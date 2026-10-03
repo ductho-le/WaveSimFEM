@@ -9,7 +9,7 @@
 
 A high-performance finite element simulation and signal processing framework for **2D plane-strain elastodynamic guided wave propagation** in plates, multilayered composites, truncated semi-infinite media, and regularized fluid–solid waveguides.
 
-Powered by **DOLFINx / FEniCSx**, **PETSc**, and **MPI**, `GuidedWaveFEM` provides an end-to-end computational pipeline—from multi-format configuration parsing, conforming multi-domain mesh generation, and dual time-integration schemes to exact-point sensor measurements and automated 2D spatio-temporal Fourier transform ($f$–$k$) dispersion analysis.
+Powered by **DOLFINx / FEniCSx**, **PETSc**, and **MPI**, `GuidedWaveFEM` provides an end-to-end computational pipeline—from multi-format configuration parsing, conforming multi-domain mesh generation, and dual time-integration schemes to exact-point sensor measurements and automated 2D spatio-temporal Fourier transform $f$–$k$ dispersion analysis.
 
 ---
 
@@ -117,10 +117,10 @@ $$
 \ell(\mathbf{w}, t) = \int_{\Gamma_{\mathrm{exc}}} \mathbf{t}_{\mathrm{ext}}(\mathbf{x}, t) \cdot \mathbf{w} \, ds
 $$
 
-Exterior boundaries are traction-free ($\mathbf{t} = \mathbf{0}$) except on the excitation zone $\Gamma_{\mathrm{exc}}$. Domain truncation is achieved via absorbing sponge layers rather than reflecting zero-displacement Dirichlet constraints.
+Exterior boundaries are traction-free with $\mathbf{t} = \mathbf{0}$ except on the excitation zone $\Gamma_{\mathrm{exc}}$. Domain truncation is achieved via absorbing sponge layers rather than reflecting zero-displacement Dirichlet constraints.
 
 #### Discretized Semidiscrete Matrix System
-Spatial discretization by Lagrange quadrilateral elements ($Q_p$) yields the classical second-order ordinary differential system:
+Spatial discretization by Lagrange quadrilateral elements $Q_p$ yields the classical second-order ordinary differential system:
 
 $$
 \mathbf{M} \ddot{\mathbf{u}} + \mathbf{C} \dot{\mathbf{u}} + \mathbf{K} \mathbf{u} = \mathbf{F}(t)
@@ -147,7 +147,7 @@ $$
 \mu = \frac{E}{2(1 + \nu)}, \qquad \lambda = \frac{E \nu}{(1 + \nu)(1 - 2\nu)}
 $$
 
-Bulk longitudinal ($c_L$) and shear ($c_T$) wave speeds are:
+Bulk longitudinal $c_L$ and shear $c_T$ wave speeds are:
 
 $$
 c_L = \sqrt{\frac{\lambda + 2\mu}{\rho}}, \qquad c_T = \sqrt{\frac{\mu}{\rho}}
@@ -177,7 +177,7 @@ $$
 \boldsymbol{\sigma}(\mathbf{u}, \dot{\mathbf{u}}) = \mathbf{C} : \boldsymbol{\varepsilon}(\mathbf{u}) + \mathbf{C}_v : \boldsymbol{\varepsilon}(\dot{\mathbf{u}})
 $$
 
-where $\mathbf{C}$ is the elastic stiffness tensor (Pa) and $\mathbf{C}_v$ is the viscosity tensor (Pa·s). Thermodynamic admissibility requires $\mathbf{C}_v$ to be positive semidefinite ($\lambda_i(\mathbf{C}_v) \ge 0$).
+where $\mathbf{C}$ is the elastic stiffness tensor (Pa) and $\mathbf{C}_v$ is the viscosity tensor (Pa·s). Thermodynamic admissibility requires $\mathbf{C}_v$ to be positive semidefinite with eigenvalues $\lambda_i(\mathbf{C}_v) \ge 0$.
 
 #### (d) Acoustic Fluid (Regularized Small-Shear Elasticity)
 Acoustic fluids with bulk modulus $K_f = \rho_f c_f^2$ are modeled on conforming displacement meshes using an elastic regularization parameter $\epsilon_f \ll 1$ (`fluid_shear_reg`, default $10^{-8}$):
@@ -199,7 +199,7 @@ $$
 
 ### 3. Rayleigh Surface Wave Secular Solution
 
-For a semi-infinite isotropic elastic halfspace ($x_2 \le 0$), the surface wave speed $c_R$ satisfies Rayleigh's cubic secular equation:
+For a semi-infinite isotropic elastic halfspace with depth $x_2 \le 0$, the surface wave speed $c_R$ satisfies Rayleigh's cubic secular equation:
 
 $$
 \xi^3 - 8\xi^2 + 8(3 - 2\eta)\xi - 16(1 - \eta) = 0
@@ -317,7 +317,7 @@ The integer step count is fitted exactly: $N_{\mathrm{steps}} = \lceil T_{\mathr
 
 #### Branch B: Implicit Newmark-$\beta$ Solver
 
-##### (a) Newmark Approximations ($\beta = 0.25, \gamma = 0.5$)
+##### (a) Newmark Approximations with $\beta = 0.25, \, \gamma = 0.5$
 
 $$
 \mathbf{u}_{n+1} = \mathbf{u}_n + \Delta t \, \mathbf{v}_n + \Delta t^2 \left[ \left(\frac{1}{2} - \beta\right)\mathbf{a}_n + \beta \mathbf{a}_{n+1} \right]
@@ -368,7 +368,7 @@ $$
 f = \frac{c_{\mathrm{phase}}}{2000\pi} \, k \quad [f \text{ in MHz}, \, k \text{ in rad/mm}, \, c_{\mathrm{phase}} \text{ in m/s}]
 $$
 
-3. **Independent Component Processing:** In-plane longitudinal ($u_1$) and transverse out-of-plane ($u_2$) spectra are normalized and displayed separately to preserve modal polarity information.
+3. **Independent Component Processing:** In-plane longitudinal $u_1$ and transverse out-of-plane $u_2$ spectra are normalized and displayed separately to preserve modal polarity information.
 
 ---
 
@@ -517,7 +517,7 @@ Thirteen configuration files represent **eleven distinct physical setups** in [`
 
 | Tier | Config File | Mode | Physical System & Materials | Target Wave Phenomena |
 | :--- | :--- | :--- | :--- | :--- |
-| **Tier 1** | [`01_single_layer_aluminum.yaml`](configs/01_single_layer_aluminum.yaml) | `1_layer` | 1 mm aluminum plate in vacuum | Fundamental Lamb waves ($S_0, A_0$) |
+| **Tier 1** | [`01_single_layer_aluminum.yaml`](configs/01_single_layer_aluminum.yaml) | `1_layer` | 1 mm aluminum plate in vacuum | Fundamental Lamb waves $S_0$ and $A_0$ |
 | | [`01_single_layer_aluminum.toml`](configs/01_single_layer_aluminum.toml) | `1_layer` | Case 01, TOML format | Standard-library `tomllib` parsing |
 | | [`01_single_layer_aluminum.json`](configs/01_single_layer_aluminum.json) | `1_layer` | Case 01, JSON format | JSON schema integration |
 | | [`09_bonedc_case1_cortical_bone.yaml`](configs/09_bonedc_case1_cortical_bone.yaml) | `1_layer` | 4 mm cortical bone, BoneDC Case 1 | Independent Lamb dispersion benchmark |
@@ -525,7 +525,7 @@ Thirteen configuration files represent **eleven distinct physical setups** in [`
 | | [`03_multilayer_bone_aluminum.yaml`](configs/03_multilayer_bone_aluminum.yaml) | `N_layers` | 2 mm bone + 1 mm aluminum | Heterogeneous laminate dispersion |
 | | [`10_bonedc_case2_cb_st_fluid.yaml`](configs/10_bonedc_case2_cb_st_fluid.yaml) | `N_layers` | 4 mm bone + 1 mm regularized tissue | Coupled solid–fluid guided modes |
 | | [`11_bonedc_case3_st_cb_mr_fluid.yaml`](configs/11_bonedc_case3_st_cb_mr_fluid.yaml) | `N_layers` | 1 mm marrow + 4 mm bone + 1 mm tissue | Tri-layer biological waveguide |
-| **Tier 3** | [`04_halfspace_rayleigh_aluminum.yaml`](configs/04_halfspace_rayleigh_aluminum.yaml) | `halfspace` | 40 mm aluminum with bottom sponge | Rayleigh surface wave ($c_R \approx 2906$ m/s) |
+| **Tier 3** | [`04_halfspace_rayleigh_aluminum.yaml`](configs/04_halfspace_rayleigh_aluminum.yaml) | `halfspace` | 40 mm aluminum with bottom sponge | Rayleigh surface wave $c_R \approx 2906$ m/s |
 | | [`07_plate_on_water_halfspace.yaml`](configs/07_plate_on_water_halfspace.yaml) | `plate_on_halfspace` | 1.5 mm aluminum on water substrate | Scholte waves & leaky Lamb radiation |
 | | [`08_plate_immersed_in_water.yaml`](configs/08_plate_immersed_in_water.yaml) | `plate_in_halfspaces` | 1.5 mm aluminum in water domains | Bilateral fluid loading & radiation |
 | | [`05_plate_on_halfspace_bone_marrow.yaml`](configs/05_plate_on_halfspace_bone_marrow.yaml) | `plate_on_halfspace` | 2 mm bone on 12 mm marrow substrate | Leaky Lamb waves & substrate radiation |
@@ -553,9 +553,9 @@ Simulations save comprehensive structured measurements and vector figures:
 3. **`quick_results.png`**: Multi-panel visualization containing the excitation wavelet, displacement waterfall, and B-scan overview.
 4. **`full_analysis.{png,pdf,svg,eps}`**: Publication-ready 2×2 composite figure (300 DPI):
    - **Panel (a)**: Selected $u_2$ waveforms at the first, middle, and last sensors.
-   - **Panel (b)**: Spatio-temporal $u_2$ B-scan with theoretical wave arrival slopes ($t_0 + x/c$).
-   - **Panel (c)**: Forward-propagating 2D FFT dispersion spectrum for horizontal motion ($u_1$).
-   - **Panel (d)**: Forward-propagating 2D FFT dispersion spectrum for transverse motion ($u_2$).
+   - **Panel (b)**: Spatio-temporal $u_2$ B-scan with theoretical wave arrival slopes $t_0 + x/c$.
+   - **Panel (c)**: Forward-propagating 2D FFT dispersion spectrum for horizontal motion $u_1$.
+   - **Panel (d)**: Forward-propagating 2D FFT dispersion spectrum for transverse motion $u_2$.
 5. **`guided_wave.bp`** *(optional)*: ADIOS2 VTX displacement snapshots for 2D/3D visualization in ParaView.
 
 ---
@@ -582,12 +582,12 @@ git diff --check
 
 | Area | Verification Target | Test Method |
 | :--- | :--- | :--- |
-| **Damped Time Integration** | 4th-order temporal convergence | Matrix-exponential oscillator solution ($\exp(\mathbf{A}t)$) |
+| **Damped Time Integration** | 4th-order temporal convergence | Analytical matrix-exponential oscillator solution $\exp(\mathbf{A}t)$ |
 | **FE Sensor Evaluation** | Quadratic off-node exact evaluation | Distributed bounding-box tree and collision cells |
-| **Spectral Analysis** | Exact frequency/wavenumber peaks | Known monochromatic traveling wave ($f_0, k_0$) |
-| **Stability Limits** | Assembled operator bounds ($B_K, B_C$) | Scipy direct generalized eigensolution ($\mathbf{K}\mathbf{v} = \lambda \mathbf{M}_L \mathbf{v}$) |
+| **Spectral Analysis** | Exact frequency and wavenumber peaks | Monochromatic traveling wave with exact $f_0$ and $k_0$ |
+| **Stability Limits** | Assembled operator bounds $B_K$ and $B_C$ | SciPy direct generalized eigensolution $\mathbf{K}\mathbf{v} = \lambda \mathbf{M}_L \mathbf{v}$ |
 | **Material Energy** | Positive definiteness enforcement | Voigt tensor and viscosity eigenvalue validation |
-| **Distributed Solver Agreement** | Serial vs. 2-rank MPI consistency | Coupled fluid–solid waveguide regression (relative error $< 10^{-8}$) |
+| **Distributed Solver Agreement** | Serial vs. 2-rank MPI consistency | Coupled fluid–solid waveguide regression with relative error $< 10^{-8}$ |
 | **CLI & Orchestration** | Template generation, dry-run, and postprocessing | Automated CLI test suite (`tests/test_cli.py`) |
 | **Configuration Schemas** | All 13 shipped configurations | Automated schema parsing and normalization check |
 
