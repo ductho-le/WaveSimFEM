@@ -16,6 +16,7 @@
 - Check PETSc convergence and fail fast on MPI runtime exceptions with detailed process failure diagnostics.
 - Make `--no-postprocess` disable all plotting and honor archived plot limits.
 - Add installable CLI, pinned FEM API versions, regression tests and CI.
+- Reorganize codebase into a modular Python package (`src/guidedwavefem/`) with dedicated modules for configuration, materials, numerics, solvers, analysis, and CLI.
 
 Numerical results intentionally differ from 0.1: integrator, sensor interpolation,
 automatic mesh-sizing frequency, default implicit sponge damping and FFT windows

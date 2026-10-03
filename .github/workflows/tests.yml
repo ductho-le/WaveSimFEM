@@ -12,7 +12,8 @@ jobs:
       - name: Lint and serial regression tests
         shell: micromamba-shell {0}
         run: |
-          ruff check guided_waves.py wave_numerics.py tests
+          pip install --no-deps -e .
+          ruff check src tests
           pytest -q
       - name: Distributed interpolation regression
         shell: micromamba-shell {0}

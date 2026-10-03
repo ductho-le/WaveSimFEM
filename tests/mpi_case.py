@@ -2,8 +2,8 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from guided_waves import run_simulation
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from guidedwavefem import run_simulation
 
 run_simulation(cfg={
     'solver_type': sys.argv[2], 'output_dir': sys.argv[1],

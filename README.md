@@ -41,7 +41,7 @@ Powered by **DOLFINx / FEniCSx**, **PETSc**, and **MPI**, `GuidedWaveFEM` provid
 
 ## Code Architecture & Modular Structure
 
-`GuidedWaveFEM` is organized following modern Python packaging standards (`src` layout) under `src/guidedwavefem/`. The framework cleanly separates configuration management, material constitutive models, testable numerical algorithms, finite element wave propagation solvers, spectral signal processing, and CLI execution into dedicated modules. Root compatibility shims (`guided_waves.py` and `wave_numerics.py`) ensure 100% backwards compatibility with standalone scripts and legacy imports.
+`GuidedWaveFEM` is organized following modern Python packaging standards (`src` layout) under `src/guidedwavefem/`. The framework cleanly separates configuration management, material constitutive models, testable numerical algorithms, finite element wave propagation solvers, spectral signal processing, and CLI execution into dedicated modules.
 
 ### Architecture Tree
 
@@ -50,14 +50,13 @@ GuidedWaveFEM/
 ├── src/
 │   └── guidedwavefem/
 │       ├── __init__.py         # Package entry point & public API exports
+│       ├── __main__.py         # Direct execution entry point (`python -m guidedwavefem`)
 │       ├── config.py           # Multi-format loaders (YAML/TOML/JSON), resolution, template generator
 │       ├── materials.py        # Voigt tensors, Kelvin-Voigt, Rayleigh speed, structure normalization
 │       ├── numerics.py         # RK4 integrator, assembled-operator bounds, exact PointSensors
 │       ├── solvers.py          # Conforming mesh generation, ALID sponges, RK4 & Newmark-β time loops
 │       ├── analysis.py         # 2D spatio-temporal FFT, Hann tapering, 2x2 publication figures
 │       └── cli.py              # Argparse, preflight estimator (--dry-run), main() orchestration
-├── guided_waves.py             # Backwards-compatible shim: `python guided_waves.py`
-├── wave_numerics.py            # Backwards-compatible shim for numerical routines
 ├── configs/                    # YAML, TOML, and JSON examples
 ├── tests/                      # Numerical and serial/MPI regressions
 ├── .github/workflows/tests.yml # Continuous integration
@@ -133,7 +132,7 @@ Zero-padding interpolates the spectral display; physical frequency and wavenumbe
 - **`main() -> None`**  
   Parses `--config`, `--solver`, `--structure-mode`, `--output`, numerical controls (`--dry-run`, `--max-frequency`, `--duration`, `--dt`, `--cfl`), frequency/wavenumber limits, `--postprocess`, `--no-postprocess`, and `--generate-config`. A configuration is required for simulation; existing sensor files can be postprocessed independently.
 
-#### Reusable Numerical Utilities (`wave_numerics.py`)
+#### Reusable Numerical Utilities (`guidedwavefem.numerics`)
 
 | Utility | Responsibility |
 | :--- | :--- |
@@ -275,12 +274,14 @@ conda list --explicit > environment-explicit.txt
 
 ## Usage Guide & Command-Line Interface
 
-All simulations require an explicit configuration file via `-c` / `--config`. The installed `guided-waves` command is equivalent to `python guided_waves.py`.
+All simulations require an explicit configuration file via `-c` / `--config`. Simulations can be launched using the installed CLI `guided-waves` or module invocation `python -m guidedwavefem`.
 
 ### 1. Running a Simulation
 
 ```bash
-python guided_waves.py -c configs/01_single_layer_aluminum.yaml
+guided-waves -c configs/01_single_layer_aluminum.yaml
+# Or alternatively:
+python -m guidedwavefem -c configs/01_single_layer_aluminum.yaml
 ```
 
 ### 2. Parallel MPI Execution
@@ -288,7 +289,9 @@ python guided_waves.py -c configs/01_single_layer_aluminum.yaml
 Distribute simulation work across processes:
 
 ```bash
-mpiexec -n 4 python guided_waves.py -c configs/03_multilayer_bone_aluminum.yaml
+mpiexec -n 4 guided-waves -c configs/03_multilayer_bone_aluminum.yaml
+# Or:
+mpiexec -n 4 python -m guidedwavefem -c configs/03_multilayer_bone_aluminum.yaml
 ```
 
 ### 3. Runtime CLI Overrides
@@ -297,22 +300,22 @@ Command-line options override configuration settings:
 
 ```bash
 # Preflight dry-run: preview mesh sizing, DOF counts, step count, and memory without allocating
-python guided_waves.py -c configs/01_single_layer_aluminum.yaml --dry-run
+guided-waves -c configs/01_single_layer_aluminum.yaml --dry-run
 
 # Use implicit Newmark integration
-python guided_waves.py -c configs/01_single_layer_aluminum.yaml --solver implicit
+guided-waves -c configs/01_single_layer_aluminum.yaml --solver implicit
 
 # Select an output directory
-python guided_waves.py -c configs/04_halfspace_rayleigh_aluminum.yaml --output results_rayleigh_run
+guided-waves -c configs/04_halfspace_rayleigh_aluminum.yaml --output results_rayleigh_run
 
 # Override numerical controls (duration, mesh frequency, CFL, dt)
-python guided_waves.py -c configs/01_single_layer_aluminum.yaml --duration 5.0e-5 --max-frequency 1.0e6 --cfl 0.4
+guided-waves -c configs/01_single_layer_aluminum.yaml --duration 5.0e-5 --max-frequency 1.0e6 --cfl 0.4
 
 # Set dispersion display limits (MHz and rad/mm)
-python guided_waves.py -c configs/01_single_layer_aluminum.yaml --f-max 3.0 --k-max 4.0
+guided-waves -c configs/01_single_layer_aluminum.yaml --f-max 3.0 --k-max 4.0
 
 # Run the simulation and save data without generating figures
-python guided_waves.py -c configs/01_single_layer_aluminum.yaml --no-postprocess
+guided-waves -c configs/01_single_layer_aluminum.yaml --no-postprocess
 ```
 
 ### 4. Standalone Signal Post-Processing
@@ -320,7 +323,7 @@ python guided_waves.py -c configs/01_single_layer_aluminum.yaml --no-postprocess
 Reprocess existing measurements without rerunning the FEM solver:
 
 ```bash
-python guided_waves.py --postprocess results_case01_aluminum_1layer/sensor_data.npz --output reprocessed_figures
+guided-waves --postprocess results_case01_aluminum_1layer/sensor_data.npz --output reprocessed_figures
 ```
 
 Saved plotting limits are honored unless explicitly overridden. Postprocessing requires at least 32 time samples and three uniformly spaced sensors. Component spectra are normalized separately; their color scales do not establish absolute cross-component amplitude ratios.
@@ -328,7 +331,7 @@ Saved plotting limits are honored unless explicitly overridden. Postprocessing r
 ### 5. Generating Configuration Templates
 
 ```bash
-python guided_waves.py --generate-config my_custom_waveguide.yaml
+guided-waves --generate-config my_custom_waveguide.yaml
 ```
 
 ### 6. Mesh, Time-Step & Output Controls
@@ -427,7 +430,7 @@ conda run -n fenicsx-waves python -m pytest -q
 conda run -n fenicsx-waves mpiexec -n 2 python -m pytest -q tests/test_numerics.py -k exact_point
 
 # Check source and tests with the repository's Ruff configuration
-conda run -n fenicsx-waves python -m ruff check guided_waves.py wave_numerics.py tests
+conda run -n fenicsx-waves python -m ruff check src tests
 
 # Inspect whitespace errors before submitting changes
 git diff --check

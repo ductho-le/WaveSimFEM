@@ -5,7 +5,7 @@ These are runnable examples demonstrating different waveguide physics, boundary 
 Use `--dry-run` to preview expected mesh resolution, DOF counts, step counts, and memory requirements before running:
 
 ```sh
-python guided_waves.py -c configs/01_single_layer_aluminum.yaml --dry-run
+guided-waves -c configs/01_single_layer_aluminum.yaml --dry-run
 ```
 
 ---
@@ -47,20 +47,20 @@ python guided_waves.py -c configs/01_single_layer_aluminum.yaml --dry-run
 
 ### 1. Preflight Estimation (Inspect before execution)
 ```sh
-python guided_waves.py -c configs/01_single_layer_aluminum.yaml --dry-run
-python guided_waves.py -c configs/05_plate_on_halfspace_bone_marrow.yaml --dry-run
+guided-waves -c configs/01_single_layer_aluminum.yaml --dry-run
+guided-waves -c configs/05_plate_on_halfspace_bone_marrow.yaml --dry-run
 ```
 
 ### 2. Fast Tutorial Run (Case 01)
 ```sh
-python guided_waves.py -c configs/01_single_layer_aluminum.yaml
+guided-waves -c configs/01_single_layer_aluminum.yaml
 ```
 
 ### 3. Parallel Execution with CLI Overrides
 You can throttle frequency or duration directly from the CLI without editing configuration files:
 ```sh
 # Override mesh sizing frequency and duration for quick evaluation
-mpiexec -n 4 python guided_waves.py -c configs/03_multilayer_bone_aluminum.yaml \
+mpiexec -n 4 guided-waves -c configs/03_multilayer_bone_aluminum.yaml \
     --max-frequency 1.0e6 --duration 30e-6
 ```
 

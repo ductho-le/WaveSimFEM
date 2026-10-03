@@ -5,8 +5,15 @@ from scipy.linalg import expm
 from dolfinx import fem, mesh
 from mpi4py import MPI
 
-from wave_numerics import PointSensors, dispersion_spectrum, rk4_step, validate_tensor
-from guided_waves import parse_and_resolve_config, dump_config, load_config
+from guidedwavefem import (
+    PointSensors,
+    dispersion_spectrum,
+    dump_config,
+    load_config,
+    parse_and_resolve_config,
+    rk4_step,
+    validate_tensor,
+)
 
 
 def test_damped_rk4_convergence():
@@ -70,7 +77,7 @@ def test_boolean_provenance(tmp_path):
 
 
 def test_plot_limits_do_not_stretch_fft(tmp_path, monkeypatch):
-    import guided_waves as gw
+    import guidedwavefem as gw
     t, x = np.arange(256)*1e-7, np.arange(16)*.001
     signal = np.sin(2*np.pi*5e5*t[:, None]-1000*x[None, :])
     path = tmp_path/'signal.npz'
@@ -87,12 +94,12 @@ def test_plot_limits_do_not_stretch_fft(tmp_path, monkeypatch):
 
 def test_all_shipped_configurations():
     from pathlib import Path
-    import guided_waves as gw
+    from guidedwavefem.materials import _normalize_structure
     for path in (Path(__file__).resolve().parents[1]/'configs').glob('*'):
         if path.suffix not in ('.yaml', '.json', '.toml'):
             continue
-        cfg = gw.parse_and_resolve_config(str(path))
-        gw._normalize_structure(
+        cfg = parse_and_resolve_config(str(path))
+        _normalize_structure(
             mode=cfg['structure_mode'], single_layer_input=cfg.get('single_layer'),
             layers_input=cfg.get('layers'), halfspace_input=cfg.get('halfspace'),
             bottom_hs_input=cfg.get('bottom_halfspace'), top_hs_input=cfg.get('top_halfspace'))
@@ -101,7 +108,7 @@ def test_all_shipped_configurations():
 def test_assembled_operator_bound():
     import ufl
     from scipy.linalg import eigvalsh
-    from wave_numerics import operator_bound
+    from guidedwavefem.numerics import operator_bound
     domain = mesh.create_unit_square(MPI.COMM_SELF, 3, 3)
     space = fem.functionspace(domain, ('Lagrange', 1))
     u, v = ufl.TrialFunction(space), ufl.TestFunction(space)
