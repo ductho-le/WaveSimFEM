@@ -112,7 +112,7 @@ def compute_rayleigh_speed(
         return 0.92 * c_T
     # Rayleigh's cubic equation: ξ³ - 8ξ² + 8(3 - 2η)ξ - 16(1 - η) = 0 where ξ = (c_R / c_T)²
     roots = np.roots([1.0, -8.0, 8.0 * (3.0 - 2.0 * eta), -16.0 * (1.0 - eta)])
-    valid = [r.real for r in roots if np.isreal(r) and 0.0 < r.real < 1.0]
+    valid = [r.real for r in roots if abs(r.imag) < 1e-10 and 0.0 < r.real < 1.0]
     if len(valid) > 0:
         return float(c_T * np.sqrt(valid[0]))
     return (

@@ -1,0 +1,20 @@
+cff-version: 1.2.0
+message: "If you use GuidedWaveFEM in academic research or industrial applications, please cite it as below."
+title: "GuidedWaveFEM: Unified Guided & Surface Wave Finite Element Framework"
+authors:
+  - family-names: "Le"
+    given-names: "Duc-Tho"
+    orcid: "https://orcid.org/0000-0000-0000-0000"
+version: 0.2.0
+date-released: 2026-10-03
+license: MIT
+repository-code: "https://github.com/ductho-le/GuidedWaveFEM"
+keywords:
+  - "guided-waves"
+  - "finite-element-method"
+  - "ultrasonics"
+  - "dolfinx"
+  - "petsc"
+  - "rayleigh-waves"
+  - "lamb-waves"
+  - "dispersion-analysis"
