@@ -92,31 +92,41 @@ The plane-strain elastodynamic problem is posed on a bounded physical domain $\O
 #### Strong Form
 The balance of linear momentum with damping dissipation satisfies:
 
-$$\rho(\mathbf{x}) \ddot{\mathbf{u}} + \alpha(\mathbf{x}) \rho(\mathbf{x}) \dot{\mathbf{u}} - \nabla \cdot \left[ \boldsymbol{\sigma}_e(\mathbf{u}) + \beta(\mathbf{x}) \boldsymbol{\sigma}_e(\dot{\mathbf{u}}) + \boldsymbol{\sigma}_v(\dot{\mathbf{u}}) \right] = \mathbf{0} \quad \text{in } \Omega \times (0, T)$$
+$$
+\rho(\mathbf{x}) \ddot{\mathbf{u}} + \alpha(\mathbf{x}) \rho(\mathbf{x}) \dot{\mathbf{u}} - \nabla \cdot \left[ \boldsymbol{\sigma}_e(\mathbf{u}) + \beta(\mathbf{x}) \boldsymbol{\sigma}_e(\dot{\mathbf{u}}) + \boldsymbol{\sigma}_v(\dot{\mathbf{u}}) \right] = \mathbf{0} \quad \text{in } \Omega \times (0, T)
+$$
 
 where $\rho$ is the mass density, $\boldsymbol{\sigma}_e$ is the elastic Cauchy stress tensor, $\boldsymbol{\sigma}_v$ is the internal viscous stress tensor (for viscoelastic media), $\alpha(\mathbf{x})$ is the mass-proportional sponge damping coefficient, and $\beta(\mathbf{x})$ is the stiffness-proportional sponge damping coefficient.
 
 The small-strain tensor $\boldsymbol{\varepsilon}(\mathbf{u})$ is given by:
 
-$$\boldsymbol{\varepsilon}(\mathbf{u}) = \frac{1}{2} \left( \nabla \mathbf{u} + (\nabla \mathbf{u})^T \right)$$
+$$
+\boldsymbol{\varepsilon}(\mathbf{u}) = \frac{1}{2} \left( \nabla \mathbf{u} + (\nabla \mathbf{u})^T \right)
+$$
 
 #### Weak Variational Formulation
-Taking an arbitrary test function $\mathbf{w} \in \mathcal{V} = [H^1(\Omega)]^2$, the weak momentum balance is:
+Taking an arbitrary test function $\mathbf{w} \in [H^1(\Omega)]^2$, the weak momentum balance is:
 
-$$\int_\Omega \rho \, \ddot{\mathbf{u}} \cdot \mathbf{w} \, d\Omega + \int_\Omega \alpha(\mathbf{x}) \rho \, \dot{\mathbf{u}} \cdot \mathbf{w} \, d\Omega + \int_\Omega \left[ \boldsymbol{\sigma}_e(\mathbf{u}) + \beta(\mathbf{x}) \boldsymbol{\sigma}_e(\dot{\mathbf{u}}) + \boldsymbol{\sigma}_v(\dot{\mathbf{u}}) \right] : \boldsymbol{\varepsilon}(\mathbf{w}) \, d\Omega = \ell(\mathbf{w}, t)$$
+$$
+\int_\Omega \rho \, \ddot{\mathbf{u}} \cdot \mathbf{w} \, d\Omega + \int_\Omega \alpha(\mathbf{x}) \rho \, \dot{\mathbf{u}} \cdot \mathbf{w} \, d\Omega + \int_\Omega \left[ \boldsymbol{\sigma}_e(\mathbf{u}) + \beta(\mathbf{x}) \boldsymbol{\sigma}_e(\dot{\mathbf{u}}) + \boldsymbol{\sigma}_v(\dot{\mathbf{u}}) \right] : \boldsymbol{\varepsilon}(\mathbf{w}) \, d\Omega = \ell(\mathbf{w}, t)
+$$
 
 where $\ell(\mathbf{w}, t)$ denotes the external boundary or interface traction:
 
-$$\ell(\mathbf{w}, t) = \int_{\Gamma_{\text{exc}}} \mathbf{t}_{\text{ext}}(\mathbf{x}, t) \cdot \mathbf{w} \, ds$$
+$$
+\ell(\mathbf{w}, t) = \int_{\Gamma_{\mathrm{exc}}} \mathbf{t}_{\mathrm{ext}}(\mathbf{x}, t) \cdot \mathbf{w} \, ds
+$$
 
-Exterior boundaries are traction-free ($\mathbf{t} = \mathbf{0}$) except on the excitation zone $\Gamma_{\text{exc}}$. Domain truncation is achieved via absorbing sponge layers rather than reflecting zero-displacement Dirichlet constraints.
+Exterior boundaries are traction-free ($\mathbf{t} = \mathbf{0}$) except on the excitation zone $\Gamma_{\mathrm{exc}}$. Domain truncation is achieved via absorbing sponge layers rather than reflecting zero-displacement Dirichlet constraints.
 
 #### Discretized Semidiscrete Matrix System
 Spatial discretization by Lagrange quadrilateral elements ($Q_p$) yields the classical second-order ordinary differential system:
 
-$$\mathbf{M} \ddot{\mathbf{u}} + \mathbf{C} \dot{\mathbf{u}} + \mathbf{K} \mathbf{u} = \mathbf{F}(t)$$
+$$
+\mathbf{M} \ddot{\mathbf{u}} + \mathbf{C} \dot{\mathbf{u}} + \mathbf{K} \mathbf{u} = \mathbf{F}(t)
+$$
 
-where $\mathbf{M}$ is the global consistent mass matrix, $\mathbf{K}$ is the global stiffness matrix, $\mathbf{C} = \mathbf{C}_{\text{sponge}} + \mathbf{C}_{\text{visco}}$ is the dissipation matrix, and $\mathbf{F}(t)$ is the dynamic load vector.
+where $\mathbf{M}$ is the global consistent mass matrix, $\mathbf{K}$ is the global stiffness matrix, $\mathbf{C} = \mathbf{C}_{\mathrm{sponge}} + \mathbf{C}_{\mathrm{visco}}$ is the dissipation matrix, and $\mathbf{F}(t)$ is the dynamic load vector.
 
 ---
 
@@ -127,44 +137,60 @@ where $\mathbf{M}$ is the global consistent mass matrix, $\mathbf{K}$ is the glo
 #### (a) Isotropic Elastic Solid
 Linear isotropic Hookean elasticity is parameterized by Young's modulus $E$ and Poisson's ratio $\nu$:
 
-$$\boldsymbol{\sigma}_e = \lambda \, \operatorname{tr}(\boldsymbol{\varepsilon}) \mathbf{I} + 2\mu \boldsymbol{\varepsilon}$$
+$$
+\boldsymbol{\sigma}_e = \lambda \, \mathrm{tr}(\boldsymbol{\varepsilon}) \mathbf{I} + 2\mu \boldsymbol{\varepsilon}
+$$
 
 with Lamé parameters:
 
-$$\mu = \frac{E}{2(1 + \nu)}, \qquad \lambda = \frac{E \nu}{(1 + \nu)(1 - 2\nu)}$$
+$$
+\mu = \frac{E}{2(1 + \nu)}, \qquad \lambda = \frac{E \nu}{(1 + \nu)(1 - 2\nu)}
+$$
 
 Bulk longitudinal ($c_L$) and shear ($c_T$) wave speeds are:
 
-$$c_L = \sqrt{\frac{\lambda + 2\mu}{\rho}}, \qquad c_T = \sqrt{\frac{\mu}{\rho}}$$
+$$
+c_L = \sqrt{\frac{\lambda + 2\mu}{\rho}}, \qquad c_T = \sqrt{\frac{\mu}{\rho}}
+$$
 
 Admissible parameters must satisfy $E > 0$, $\rho > 0$, and $-1 < \nu < 0.5$.
 
 #### (b) Anisotropic Elastic Solid (General 2D Voigt)
 For orthotropic, transverse isotropic, or monoclinic media, the stress-strain relation in Voigt engineering notation is:
 
-$$\begin{bmatrix} \sigma_{11} \\ \sigma_{22} \\ \sigma_{12} \end{bmatrix} = \begin{bmatrix} C_{11} & C_{12} & C_{16} \\ C_{12} & C_{22} & C_{26} \\ C_{16} & C_{26} & C_{66} \end{bmatrix} \begin{bmatrix} \varepsilon_{11} \\ \varepsilon_{22} \\ 2\varepsilon_{12} \end{bmatrix}$$
+$$
+\begin{bmatrix} \sigma_{11} \\ \sigma_{22} \\ \sigma_{12} \end{bmatrix} = \begin{bmatrix} C_{11} & C_{12} & C_{16} \\ C_{12} & C_{22} & C_{26} \\ C_{16} & C_{26} & C_{66} \end{bmatrix} \begin{bmatrix} \varepsilon_{11} \\ \varepsilon_{22} \\ 2\varepsilon_{12} \end{bmatrix}
+$$
 
 Energy stability requires the $3 \times 3$ Voigt stiffness matrix $\mathbf{C}$ to be strictly positive definite:
 
-$$\mathbf{v}^T \mathbf{C} \mathbf{v} > 0 \quad \forall \mathbf{v} \neq \mathbf{0} \iff \lambda_i(\mathbf{C}) > 0$$
+$$
+\mathbf{v}^T \mathbf{C} \mathbf{v} > 0 \quad \forall \mathbf{v} \neq \mathbf{0} \iff \lambda_i(\mathbf{C}) > 0
+$$
 
-Wave speed bounds for mesh sizing are derived from the eigenvalues of the orthonormal Kelvin-scaled tensor $\mathbf{S} \mathbf{C} \mathbf{S}$, where $\mathbf{S} = \operatorname{diag}(1, 1, \sqrt{2})$.
+Wave speed bounds for mesh sizing are derived from the eigenvalues of the orthonormal Kelvin-scaled tensor $\mathbf{S} \mathbf{C} \mathbf{S}$, where $\mathbf{S} = \mathrm{diag}(1, 1, \sqrt{2})$.
 
 #### (c) Viscoelastic Solid (Kelvin–Voigt)
 Viscoelastic materials incorporate rate-dependent dissipation proportional to the strain rate:
 
-$$\boldsymbol{\sigma}(\mathbf{u}, \dot{\mathbf{u}}) = \mathbf{C} : \boldsymbol{\varepsilon}(\mathbf{u}) + \mathbf{C}_v : \boldsymbol{\varepsilon}(\dot{\mathbf{u}})$$
+$$
+\boldsymbol{\sigma}(\mathbf{u}, \dot{\mathbf{u}}) = \mathbf{C} : \boldsymbol{\varepsilon}(\mathbf{u}) + \mathbf{C}_v : \boldsymbol{\varepsilon}(\dot{\mathbf{u}})
+$$
 
 where $\mathbf{C}$ is the elastic stiffness tensor (Pa) and $\mathbf{C}_v$ is the viscosity tensor (Pa·s). Thermodynamic admissibility requires $\mathbf{C}_v$ to be positive semidefinite ($\lambda_i(\mathbf{C}_v) \ge 0$).
 
 #### (d) Acoustic Fluid (Regularized Small-Shear Elasticity)
 Acoustic fluids with bulk modulus $K_f = \rho_f c_f^2$ are modeled on conforming displacement meshes using an elastic regularization parameter $\epsilon_f \ll 1$ (`fluid_shear_reg`, default $10^{-8}$):
 
-$$\mu_f = \epsilon_f K_f, \qquad \lambda_f = K_f - \frac{2}{3}\mu_f$$
+$$
+\mu_f = \epsilon_f K_f, \qquad \lambda_f = K_f - \frac{2}{3}\mu_f
+$$
 
 The regularized compressional wave speed closely recovers the physical sound speed:
 
-$$c_L = \sqrt{\frac{\lambda_f + 2\mu_f}{\rho_f}} = \sqrt{\frac{K_f + \frac{4}{3}\mu_f}{\rho_f}} = c_f \sqrt{1 + \frac{4}{3}\epsilon_f} \approx c_f$$
+$$
+c_L = \sqrt{\frac{\lambda_f + 2\mu_f}{\rho_f}} = \sqrt{\frac{K_f + \frac{4}{3}\mu_f}{\rho_f}} = c_f \sqrt{1 + \frac{4}{3}\epsilon_f} \approx c_f
+$$
 
 > [!NOTE]
 > This monolithic formulation preserves full displacement continuity across fluid–solid boundaries without introducing Lagrange multipliers or mixed pressure-displacement formulations. It represents a small-shear elastic approximation with continuous tangential displacements.
@@ -175,15 +201,21 @@ $$c_L = \sqrt{\frac{\lambda_f + 2\mu_f}{\rho_f}} = \sqrt{\frac{K_f + \frac{4}{3}
 
 For a semi-infinite isotropic elastic halfspace ($x_2 \le 0$), the surface wave speed $c_R$ satisfies Rayleigh's cubic secular equation:
 
-$$\xi^3 - 8\xi^2 + 8(3 - 2\eta)\xi - 16(1 - \eta) = 0$$
+$$
+\xi^3 - 8\xi^2 + 8(3 - 2\eta)\xi - 16(1 - \eta) = 0
+$$
 
 where:
 
-$$\xi = \left(\frac{c_R}{c_T}\right)^2, \qquad \eta = \left(\frac{c_T}{c_L}\right)^2 = \frac{1 - 2\nu}{2(1 - \nu)}$$
+$$
+\xi = \left(\frac{c_R}{c_T}\right)^2, \qquad \eta = \left(\frac{c_T}{c_L}\right)^2 = \frac{1 - 2\nu}{2(1 - \nu)}
+$$
 
 `GuidedWaveFEM` extracts the exact physical root in $(0, 1)$ via companion-matrix eigenvalue factorization, with the robust Achenbach approximation as a fallback:
 
-$$c_R \approx c_T \left( \frac{0.862 + 1.14\nu}{1 + \nu} \right)$$
+$$
+c_R \approx c_T \left( \frac{0.862 + 1.14\nu}{1 + \nu} \right)
+$$
 
 ---
 
@@ -191,15 +223,23 @@ $$c_R \approx c_T \left( \frac{0.862 + 1.14\nu}{1 + \nu} \right)$$
 
 To prevent spurious reflections from artificial computational domain boundaries, Absorbing Layers by Increasing Damping (ALID) are applied. The damping profile ramps smoothly from 0 at the interior interface to its peak at the boundary using a 5th-order polynomial:
 
-$$\alpha(s) = \alpha_{\text{peak}} \, s^5, \qquad \beta(s) = \beta_{\text{peak}} \, s^5, \qquad s \in [0, 1]$$
+$$
+\alpha(s) = \alpha_{\mathrm{peak}} \, s^5, \qquad \beta(s) = \beta_{\mathrm{peak}} \, s^5, \qquad s \in [0, 1]
+$$
 
-where $s(\mathbf{x}) = \frac{|\mathbf{x} - \mathbf{x}_{\text{interface}}|}{L_{\text{absorb}}}$.
+where the normalized penetration depth into the sponge is:
 
-The resulting dissipation bilinear form assembled into $\mathbf{C}_{\text{sponge}}$ is:
+$$
+s(\mathbf{x}) = \frac{|\mathbf{x} - \mathbf{x}_{\mathrm{int}}|}{L_{\mathrm{abs}}}
+$$
 
-$$C^{\text{sponge}}_{ij} = \int_{\Omega_{\text{sponge}}} \alpha(\mathbf{x}) \rho \, \boldsymbol{\phi}_j \cdot \boldsymbol{\phi}_i \, d\Omega + \int_{\Omega_{\text{sponge}}} \beta(\mathbf{x}) \, \boldsymbol{\sigma}_e(\boldsymbol{\phi}_j) : \boldsymbol{\varepsilon}(\boldsymbol{\phi}_i) \, d\Omega$$
+The resulting dissipation bilinear form assembled into $\mathbf{C}_{\mathrm{sponge}}$ is:
 
-Default peak parameters are $\alpha_{\text{peak}} = 10^7 \, \text{s}^{-1}$ and $\beta_{\text{peak}} = 10^{-8} \, \text{s}$. Horizontal and vertical sponge indicators are combined additively in halfspace corners.
+$$
+C^{\mathrm{sponge}}_{ij} = \int_{\Omega_{\mathrm{sponge}}} \alpha(\mathbf{x}) \rho \, \boldsymbol{\phi}_j \cdot \boldsymbol{\phi}_i \, d\Omega + \int_{\Omega_{\mathrm{sponge}}} \beta(\mathbf{x}) \, \boldsymbol{\sigma}_e(\boldsymbol{\phi}_j) : \boldsymbol{\varepsilon}(\boldsymbol{\phi}_i) \, d\Omega
+$$
+
+Default peak parameters are $\alpha_{\mathrm{peak}} = 10^7 \, \text{s}^{-1}$ and $\beta_{\mathrm{peak}} = 10^{-8} \, \text{s}$. Horizontal and vertical sponge indicators are combined additively in halfspace corners.
 
 ---
 
@@ -228,42 +268,83 @@ Default peak parameters are $\alpha_{\text{peak}} = 10^7 \, \text{s}^{-1}$ and $
 
 #### Branch A: Explicit 4th-Order Runge–Kutta (RK4) with Mass Lumping
 
-1. **Row-Sum Diagonal Mass Lumping:**
-   $$\mathbf{M}_L = \operatorname{diag}\left(\sum_j M_{ij}\right), \qquad (M_L)_{ii} > 0$$
+##### (a) Row-Sum Diagonal Mass Lumping
 
-2. **First-Order State-Space Evolution:**
-   Defining velocity $\mathbf{v} = \dot{\mathbf{u}}$, the acceleration operator is:
-   $$\mathbf{a}(\mathbf{u}, \mathbf{v}, t) = \mathbf{M}_L^{-1} \left[ \mathbf{F}_{\text{ext}}(t) - \mathbf{K}\mathbf{u} - \mathbf{C}\mathbf{v} \right]$$
+$$
+\mathbf{M}_L = \mathrm{diag}\left(\sum_j M_{ij}\right), \qquad (M_L)_{ii} > 0
+$$
 
-3. **Consistent 4-Stage RK4 Update:**
-   $$\begin{aligned}
-   \mathbf{k}_1^u &= \mathbf{v}_n, & \mathbf{k}_1^v &= \mathbf{a}(\mathbf{u}_n, \mathbf{v}_n, t_n) \\
-   \mathbf{k}_2^u &= \mathbf{v}_n + \frac{\Delta t}{2}\mathbf{k}_1^v, & \mathbf{k}_2^v &= \mathbf{a}\left(\mathbf{u}_n + \frac{\Delta t}{2}\mathbf{k}_1^u, \mathbf{k}_2^u, t_n + \frac{\Delta t}{2}\right) \\
-   \mathbf{k}_3^u &= \mathbf{v}_n + \frac{\Delta t}{2}\mathbf{k}_2^v, & \mathbf{k}_3^v &= \mathbf{a}\left(\mathbf{u}_n + \frac{\Delta t}{2}\mathbf{k}_2^u, \mathbf{k}_3^u, t_n + \frac{\Delta t}{2}\right) \\
-   \mathbf{k}_4^u &= \mathbf{v}_n + \Delta t \, \mathbf{k}_3^v, & \mathbf{k}_4^v &= \mathbf{a}\left(\mathbf{u}_n + \Delta t \, \mathbf{k}_3^u, \mathbf{k}_4^u, t_n + \Delta t\right)
-   \end{aligned}$$
-   $$\mathbf{u}_{n+1} = \mathbf{u}_n + \frac{\Delta t}{6} \left(\mathbf{k}_1^u + 2\mathbf{k}_2^u + 2\mathbf{k}_3^u + \mathbf{k}_4^u\right)$$
-   $$\mathbf{v}_{n+1} = \mathbf{v}_n + \frac{\Delta t}{6} \left(\mathbf{k}_1^v + 2\mathbf{k}_2^v + 2\mathbf{k}_3^v + \mathbf{k}_4^v\right)$$
+##### (b) First-Order State-Space Evolution
+Defining velocity $\mathbf{v} = \dot{\mathbf{u}}$, the acceleration operator is:
 
-4. **Conservative Gershgorin Spectral Stability Bound:**
-   Instead of heuristic wave speeds or random power iterations, absolute spectral bounds are computed from assembled operators:
-   $$\omega_{\max}^2 \le B_K = \max_i \frac{\sum_j |K_{ij}|}{M_{L,ii}}, \qquad \zeta_{\max} \le B_C = \max_i \frac{\sum_j |C_{ij}|}{M_{L,ii}}$$
-   $$\Delta t_{\text{crit}} = \frac{1}{\max\left(\sqrt{B_K}, B_C\right)}, \qquad \Delta t = \text{CFL} \cdot \Delta t_{\text{crit}} \quad (0 < \text{CFL} \le 1)$$
-   The integer step count is fitted exactly: $N_{\text{steps}} = \lceil T_{\text{total}} / \Delta t \rceil, \, \Delta t_{\text{actual}} = T_{\text{total}} / N_{\text{steps}}$.
+$$
+\mathbf{a}(\mathbf{u}, \mathbf{v}, t) = \mathbf{M}_L^{-1} \left[ \mathbf{F}_{\mathrm{ext}}(t) - \mathbf{K}\mathbf{u} - \mathbf{C}\mathbf{v} \right]
+$$
+
+##### (c) Consistent 4-Stage RK4 Update
+
+$$
+\begin{aligned}
+\mathbf{k}_1^u &= \mathbf{v}_n, & \mathbf{k}_1^v &= \mathbf{a}(\mathbf{u}_n, \mathbf{v}_n, t_n) \\
+\mathbf{k}_2^u &= \mathbf{v}_n + \frac{\Delta t}{2}\mathbf{k}_1^v, & \mathbf{k}_2^v &= \mathbf{a}\left(\mathbf{u}_n + \frac{\Delta t}{2}\mathbf{k}_1^u, \mathbf{k}_2^u, t_n + \frac{\Delta t}{2}\right) \\
+\mathbf{k}_3^u &= \mathbf{v}_n + \frac{\Delta t}{2}\mathbf{k}_2^v, & \mathbf{k}_3^v &= \mathbf{a}\left(\mathbf{u}_n + \frac{\Delta t}{2}\mathbf{k}_2^u, \mathbf{k}_3^u, t_n + \frac{\Delta t}{2}\right) \\
+\mathbf{k}_4^u &= \mathbf{v}_n + \Delta t \, \mathbf{k}_3^v, & \mathbf{k}_4^v &= \mathbf{a}\left(\mathbf{u}_n + \Delta t \, \mathbf{k}_3^u, \mathbf{k}_4^u, t_n + \Delta t\right)
+\end{aligned}
+$$
+
+Displacement and velocity vectors are updated simultaneously:
+
+$$
+\mathbf{u}_{n+1} = \mathbf{u}_n + \frac{\Delta t}{6} \left(\mathbf{k}_1^u + 2\mathbf{k}_2^u + 2\mathbf{k}_3^u + \mathbf{k}_4^u\right)
+$$
+
+$$
+\mathbf{v}_{n+1} = \mathbf{v}_n + \frac{\Delta t}{6} \left(\mathbf{k}_1^v + 2\mathbf{k}_2^v + 2\mathbf{k}_3^v + \mathbf{k}_4^v\right)
+$$
+
+##### (d) Conservative Gershgorin Spectral Stability Bound
+Instead of heuristic wave speeds or random power iterations, absolute spectral bounds are computed from assembled operators:
+
+$$
+\omega_{\max}^2 \le B_K = \max_i \frac{\sum_j |K_{ij}|}{M_{L,ii}}, \qquad \zeta_{\max} \le B_C = \max_i \frac{\sum_j |C_{ij}|}{M_{L,ii}}
+$$
+
+$$
+\Delta t_{\mathrm{crit}} = \frac{1}{\max\left(\sqrt{B_K}, B_C\right)}, \qquad \Delta t = \mathrm{CFL} \cdot \Delta t_{\mathrm{crit}} \quad (0 < \mathrm{CFL} \le 1)
+$$
+
+The integer step count is fitted exactly: $N_{\mathrm{steps}} = \lceil T_{\mathrm{total}} / \Delta t \rceil, \, \Delta t_{\mathrm{actual}} = T_{\mathrm{total}} / N_{\mathrm{steps}}$.
 
 #### Branch B: Implicit Newmark-$\beta$ Solver
 
-1. **Newmark Approximations ($\beta = 0.25, \gamma = 0.5$):**
-   $$\mathbf{u}_{n+1} = \mathbf{u}_n + \Delta t \mathbf{v}_n + \Delta t^2 \left[ \left(\frac{1}{2} - \beta\right)\mathbf{a}_n + \beta \mathbf{a}_{n+1} \right]$$
-   $$\mathbf{v}_{n+1} = \mathbf{v}_n + \Delta t \left[ (1 - \gamma)\mathbf{a}_n + \gamma \mathbf{a}_{n+1} \right]$$
+##### (a) Newmark Approximations ($\beta = 0.25, \gamma = 0.5$)
 
-2. **Effective Dynamic Linear System:**
-   $$\mathbf{K}_{\text{eff}} \, \mathbf{u}_{n+1} = \mathbf{F}_{\text{eff}}(t_{n+1})$$
-   where:
-   $$\mathbf{K}_{\text{eff}} = \frac{1}{\beta \Delta t^2} \mathbf{M} + \frac{\gamma}{\beta \Delta t} \mathbf{C} + \mathbf{K}$$
-   $$\mathbf{F}_{\text{eff}} = \mathbf{F}_{\text{ext}}(t_{n+1}) + \mathbf{M}\left[\frac{1}{\beta \Delta t^2}\mathbf{u}_n + \frac{1}{\beta \Delta t}\mathbf{v}_n + \left(\frac{1}{2\beta} - 1\right)\mathbf{a}_n\right] + \mathbf{C}\left[\frac{\gamma}{\beta \Delta t}\mathbf{u}_n + \left(\frac{\gamma}{\beta} - 1\right)\mathbf{v}_n + \Delta t\left(\frac{\gamma}{2\beta} - 1\right)\mathbf{a}_n\right]$$
+$$
+\mathbf{u}_{n+1} = \mathbf{u}_n + \Delta t \, \mathbf{v}_n + \Delta t^2 \left[ \left(\frac{1}{2} - \beta\right)\mathbf{a}_n + \beta \mathbf{a}_{n+1} \right]
+$$
 
-3. **PETSc Solvers:** Parallel MUMPS direct LU solver or iterative Preconditioned Conjugate Gradients (CG) with Geometric-Algebraic Multigrid (GAMG) preconditioning.
+$$
+\mathbf{v}_{n+1} = \mathbf{v}_n + \Delta t \left[ (1 - \gamma)\mathbf{a}_n + \gamma \mathbf{a}_{n+1} \right]
+$$
+
+##### (b) Effective Dynamic Linear System
+
+$$
+\mathbf{K}_{\mathrm{eff}} \, \mathbf{u}_{n+1} = \mathbf{F}_{\mathrm{eff}}(t_{n+1})
+$$
+
+where:
+
+$$
+\mathbf{K}_{\mathrm{eff}} = \frac{1}{\beta \Delta t^2} \mathbf{M} + \frac{\gamma}{\beta \Delta t} \mathbf{C} + \mathbf{K}
+$$
+
+$$
+\mathbf{F}_{\mathrm{eff}} = \mathbf{F}_{\mathrm{ext}}(t_{n+1}) + \mathbf{M}\left[\frac{1}{\beta \Delta t^2}\mathbf{u}_n + \frac{1}{\beta \Delta t}\mathbf{v}_n + \left(\frac{1}{2\beta} - 1\right)\mathbf{a}_n\right] + \mathbf{C}\left[\frac{\gamma}{\beta \Delta t}\mathbf{u}_n + \left(\frac{\gamma}{\beta} - 1\right)\mathbf{v}_n + \Delta t\left(\frac{\gamma}{2\beta} - 1\right)\mathbf{a}_n\right]
+$$
+
+##### (c) PETSc Solvers
+Parallel MUMPS direct LU solver or iterative Preconditioned Conjugate Gradients (CG) with Geometric-Algebraic Multigrid (GAMG) preconditioning.
 
 ---
 
@@ -274,13 +355,19 @@ Sensor measurements are sampled along the observation line at exact coordinates 
 #### 2D Spatio-Temporal Fourier Transform
 The wavefield $u(x, t)$ is transformed into wavenumber-frequency space:
 
-$$S(k, f) = \int_{-\infty}^{\infty} \int_{-\infty}^{\infty} u(x, t) \, w(x, t) \, e^{-i(2\pi f t - k x)} \, dt \, dx$$
+$$
+S(k, f) = \int_{-\infty}^{\infty} \int_{-\infty}^{\infty} u(x, t) \, w(x, t) \, e^{-i(2\pi f t - k x)} \, dt \, dx
+$$
 
-where $w(x, t) = w_{\text{Hann}}(x) \otimes w_{\text{Hann}}(t)$ is a separable 2D Hann taper that eliminates spectral leakage.
+where $w(x, t) = w_{\mathrm{Hann}}(x) \otimes w_{\mathrm{Hann}}(t)$ is a separable 2D Hann taper that eliminates spectral leakage.
 
 1. **Directional Separation:** By selecting $+f$ and $+k$, forward-propagating wave modes are isolated without backward-wave spectral folding.
-2. **Phase Velocity Reference Slopes:** Nondispersive phase velocities $c_{\text{phase}}$ appear as linear trajectories in $(k, f)$ space:
-   $$f = \frac{c_{\text{phase}}}{2000\pi} \, k \quad \left[ f \text{ in MHz}, \, k \text{ in rad/mm}, \, c_{\text{phase}} \text{ in m/s} \right]$$
+2. **Phase Velocity Reference Slopes:** Nondispersive phase velocities $c_{\mathrm{phase}}$ appear as linear trajectories in $(k, f)$ space:
+
+$$
+f = \frac{c_{\mathrm{phase}}}{2000\pi} \, k \quad [f \text{ in MHz}, \, k \text{ in rad/mm}, \, c_{\mathrm{phase}} \text{ in m/s}]
+$$
+
 3. **Independent Component Processing:** In-plane longitudinal ($u_1$) and transverse out-of-plane ($u_2$) spectra are normalized and displayed separately to preserve modal polarity information.
 
 ---
@@ -454,10 +541,10 @@ Thirteen configuration files represent **eleven distinct physical setups** in [`
 Simulations save comprehensive structured measurements and vector figures:
 
 1. **`sensor_data.npz`**: Uncompressed NumPy archive:
-   - `times`: Discrete simulation time array ($t$).
-   - `sensor_x`, `sensor_y`, `sensor_coords`: Exact sensor coordinates.
-   - `sensor_data_x`: In-plane longitudinal displacement histories ($u_1(x_i, t)$).
-   - `sensor_data_y`: Plate-transverse displacement histories ($u_2(x_i, t)$).
+   - `times`: Discrete simulation time vector from $t = 0$ to $t = T$.
+   - `sensor_x`, `sensor_y`, `sensor_coords`: Exact sensor coordinates along the array.
+   - `sensor_data_x`: In-plane longitudinal displacement histories $u_1(x_i, t)$.
+   - `sensor_data_y`: Plate-transverse displacement histories $u_2(x_i, t)$.
    - Provenance fields: Material models, wave speeds, layer summaries, and source locations.
 2. **`simulation_config.yaml`**: Effective simulation settings and complete runtime metadata:
    - Damping values, actual time step, duration, and step count.
@@ -500,7 +587,7 @@ git diff --check
 | **Spectral Analysis** | Exact frequency/wavenumber peaks | Known monochromatic traveling wave ($f_0, k_0$) |
 | **Stability Limits** | Assembled operator bounds ($B_K, B_C$) | Scipy direct generalized eigensolution ($\mathbf{K}\mathbf{v} = \lambda \mathbf{M}_L \mathbf{v}$) |
 | **Material Energy** | Positive definiteness enforcement | Voigt tensor and viscosity eigenvalue validation |
-| **Distributed Solver Agreement** | Serial vs. 2-rank MPI consistency | Coupled fluid–solid waveguide regression ($\text{rel\_err} < 10^{-8}$) |
+| **Distributed Solver Agreement** | Serial vs. 2-rank MPI consistency | Coupled fluid–solid waveguide regression (relative error $< 10^{-8}$) |
 | **CLI & Orchestration** | Template generation, dry-run, and postprocessing | Automated CLI test suite (`tests/test_cli.py`) |
 | **Configuration Schemas** | All 13 shipped configurations | Automated schema parsing and normalization check |
 
