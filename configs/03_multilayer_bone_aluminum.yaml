@@ -1,0 +1,72 @@
+# ==============================================================================
+# Guided Wave FEM Configuration: Case 03 - Multilayer Bone-Aluminum Laminate
+# ==============================================================================
+# Physics:
+#   Guided Lamb wave propagation in a heterogeneous bi-layer plate stack in vacuum.
+#   - Layer 1 (bottom, y in [0, 2] mm): Anisotropic viscoelastic cortical bone
+#   - Layer 2 (top, y in [2, 3] mm): Isotropic elastic aluminum coating
+#   Demonstrates acoustic impedance mismatch, interface continuity, and hybrid modes.
+# ==============================================================================
+
+solver:
+  type: "explicit"              # Lumped Velocity Verlet explicit solver
+  CFL: 0.5                      # CFL stability factor
+  time_factor: 1.2              # Total duration multiplier
+
+geometry:
+  sensing_length: 0.30          # [m] Pristine sensing region
+  absorb_length: 0.15           # [m] Absorbing sponge layer width
+
+structure:
+  mode: "N_layers"              # Multilayer laminate mode
+  layers:
+    - name: "Bone Substrate Layer"
+      thickness: 2.0e-3         # [m] 2.0 mm
+      material_model: "anisotropic"
+      rho: 1948.0               # [kg/m³]
+      C: [31.7e9, 13.4e9, 0.0, 20.2e9, 0.0, 6.38e9] # [Pa]
+      Cv: [157.0, 121.0, 0.0, 109.0, 0.0, 18.0]     # [Pa·s]
+      min_elems_y: 6
+
+    - name: "Aluminum Coating Layer"
+      thickness: 1.0e-3         # [m] 1.0 mm
+      material_model: "isotropic"
+      rho: 2700.0               # [kg/m³]
+      E: 70.0e9                 # [Pa] 70 GPa
+      nu: 0.33
+      min_elems_y: 4
+
+absorbing_boundaries:
+  alpha: null                   # Peak mass damping (null = auto: 1e7)
+  beta: null                    # Peak stiffness damping (null = auto: 1e-8)
+
+excitation:
+  f_center: 1.0e6               # [Hz] 1.0 MHz
+  traction_max: 1.0e6           # [Pa] 1.0 MPa
+  excitation_width: 2.0e-3      # [m] 2.0 mm
+  source_x: null                # [m]
+  source_fx: 1.0
+  source_fy: 1.0
+
+mesh:
+  elems_per_wavelength: 10
+  min_elems_x: 100
+  min_elems_y: 4
+  degree: 2
+
+sensors:
+  n_sensors: 401
+  sensor_offset: 0.05
+  sensor_pitch: 0.5e-3
+
+postprocess:
+  run_postprocess: true
+  f_min_disp_MHz: 0.0
+  f_max_disp_MHz: 2.0
+  k_min_disp: 0.0
+  k_max_disp: 3.0
+
+output:
+  output_dir: "results_case03_multilayer_bone_aluminum"
+  write_vtx: false
+  target_snapshots: 200

@@ -1,0 +1,92 @@
+# ==============================================================================
+# Guided Wave FEM Configuration: Case 08 - Plate Immersed in Water (Bilateral Fluid Loading)
+# ==============================================================================
+# Physics:
+#   Guided wave propagation in an elastic plate immersed in water (bilateral fluid loading),
+#   representative of immersion ultrasonic testing (UT) and acoustic leak detection.
+#   - Bottom Substrate  (y in [-15, 0] mm): Water halfspace with bottom acoustic sponge
+#   - Central Plate     (y in [0, 1.5] mm): Aluminum plate (isotropic solid)
+#   - Top Superstrate   (y in [1.5, 16.5] mm): Water halfspace with top acoustic sponge
+#
+# Boundary & Acoustic Coupling:
+#   - Conforming displacement-based fluid elements with shear regularization (μ_f = 1e-8 * K_f)
+#     enforce normal kinematic continuity and fluid pressure naturally across both faces.
+#   - 4-way absorbing sponge absorbs radiated bulk acoustic waves in both upper and lower
+#     halfspaces as well as propagating guided waves at lateral plate ends.
+#   - Excitation applied at the top plate-fluid interface (y = H_plate = 1.5 mm).
+#   - Generates symmetric and anti-symmetric leaky Lamb modes radiating into both halfspaces,
+#     along with Scholte interface waves localized at both solid-fluid boundaries.
+# ==============================================================================
+
+solver:
+  type: "explicit"              # Velocity Verlet explicit scheme
+  CFL: 0.5                      # CFL stability factor
+  time_factor: 1.3              # Total duration multiplier
+
+geometry:
+  sensing_length: 0.25          # [m] 250 mm sensing region along upper plate-water interface
+  absorb_length: 0.12           # [m] 120 mm lateral sponge width
+
+structure:
+  mode: "plate_in_halfspaces"   # Plate embedded between dual halfspaces
+  layers:
+    - name: "Aluminum Plate"
+      thickness: 1.5e-3         # [m] 1.5 mm plate thickness
+      material_model: "isotropic"
+      rho: 2700.0               # [kg/m³]
+      E: 70.0e9                 # [Pa] Young's modulus (70 GPa)
+      nu: 0.33                  # [-] Poisson's ratio
+      min_elems_y: 6
+
+  substrate:
+    name: "Water Substrate (Bottom)"
+    thickness: 15.0e-3          # [m] 15 mm truncation depth
+    absorb_depth: 10.0e-3       # [m] 10 mm bottom absorbing sponge
+    material_model: "fluid"     # Acoustic fluid medium
+    rho: 1000.0                 # [kg/m³] Water density
+    c: 1480.0                   # [m/s] Sound speed in water
+    min_elems_y: 12
+
+  superstrate:
+    name: "Water Superstrate (Top)"
+    thickness: 15.0e-3          # [m] 15 mm truncation height
+    absorb_depth: 10.0e-3       # [m] 10 mm top absorbing sponge
+    material_model: "fluid"     # Acoustic fluid medium
+    rho: 1000.0                 # [kg/m³] Water density
+    c: 1480.0                   # [m/s] Sound speed in water
+    min_elems_y: 12
+
+absorbing_boundaries:
+  alpha: null                   # Peak mass damping (auto: 1e7)
+  beta: null                    # Peak stiffness damping (auto: 1e-8)
+
+excitation:
+  f_center: 1.0e6               # [Hz] 1.0 MHz central frequency Ricker wavelet
+  traction_max: 1.0e6           # [Pa] 1.0 MPa
+  excitation_width: 2.0e-3      # [m] 2.0 mm
+  source_x: null                # [m] Auto-centered at absorb_length + 20 mm
+  source_fx: 0.0                # Normal traction
+  source_fy: 1.0
+
+mesh:
+  elems_per_wavelength: 10
+  min_elems_x: 100
+  min_elems_y: 4
+  degree: 2
+
+sensors:
+  n_sensors: 351                # Sensors positioned at upper interface y = 1.5 mm
+  sensor_offset: 0.04           # [m] 40 mm
+  sensor_pitch: 0.5e-3          # [m] 0.5 mm
+
+postprocess:
+  run_postprocess: true
+  f_min_disp_MHz: 0.0
+  f_max_disp_MHz: 2.5
+  k_min_disp: 0.0
+  k_max_disp: 4.0
+
+output:
+  output_dir: "results_case08_plate_immersed_in_water"
+  write_vtx: false
+  target_snapshots: 200

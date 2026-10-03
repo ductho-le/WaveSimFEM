@@ -1,0 +1,69 @@
+# ==============================================================================
+# Guided Wave FEM Configuration: Case 04 - Pristine Elastic Halfspace (Rayleigh Waves)
+# ==============================================================================
+# Physics:
+#   Propagation of non-dispersive Rayleigh surface acoustic waves (SAWs) along
+#   the traction-free boundary (y = 0) of a semi-infinite isotropic elastic medium.
+#
+# Numerical Truncation:
+#   The infinite depth is truncated at y = -thickness (-40 mm):
+#   - y in [-15, 0] mm: Clean physical propagation zone (> 4 Rayleigh wavelengths)
+#   - y in [-40, -15] mm: 25 mm deep 5th-order absorbing sponge boundary to prevent bottom reflections
+#   Theoretical Rayleigh wave velocity for Al: c_R = 2906.4 m/s (linear dispersion k = 2π f / c_R)
+# ==============================================================================
+
+solver:
+  type: "explicit"              # Velocity Verlet explicit scheme
+  CFL: 0.5                      # CFL stability factor
+  time_factor: 1.2              # Total duration multiplier
+
+geometry:
+  sensing_length: 0.30          # [m] 300 mm sensing region along surface
+  absorb_length: 0.15           # [m] 150 mm left/right absorbing sponges
+
+structure:
+  mode: "halfspace"             # Semi-infinite halfspace medium
+  halfspace:
+    name: "Aluminum Halfspace"
+    thickness: 40.0e-3          # [m] Total numerical truncation depth (40 mm)
+    absorb_depth: 25.0e-3       # [m] Bottom absorbing sponge thickness (25 mm)
+    material_model: "isotropic"
+    rho: 2700.0                 # [kg/m³]
+    E: 70.0e9                   # [Pa]
+    nu: 0.33
+    min_elems_y: 30             # Vertical element resolution across depth
+
+absorbing_boundaries:
+  alpha: null                   # Peak mass damping (auto: 1e7)
+  beta: null                    # Peak stiffness damping (auto: 1e-8)
+
+excitation:
+  f_center: 1.0e6               # [Hz] 1.0 MHz
+  traction_max: 1.0e6           # [Pa] 1.0 MPa
+  excitation_width: 2.0e-3      # [m] 2.0 mm
+  source_x: null                # [m]
+  source_fx: 1.0                # Tangential surface traction
+  source_fy: 1.0                # Normal surface traction
+
+mesh:
+  elems_per_wavelength: 10      # Resolved per shortest shear wavelength
+  min_elems_x: 100
+  min_elems_y: 4
+  degree: 2
+
+sensors:
+  n_sensors: 401                # Surface sensors positioned along y = 0
+  sensor_offset: 0.05           # [m] 50 mm from excitation point
+  sensor_pitch: 0.5e-3          # [m] 0.5 mm pitch
+
+postprocess:
+  run_postprocess: true         # 2D FFT dispersion analysis
+  f_min_disp_MHz: 0.0           # [MHz] Min frequency
+  f_max_disp_MHz: 2.0           # [MHz] Max frequency
+  k_min_disp: 0.0               # [rad/mm] Min wavenumber
+  k_max_disp: 3.0               # [rad/mm] Max wavenumber (slope = 1/c_R)
+
+output:
+  output_dir: "results_case04_halfspace_rayleigh"
+  write_vtx: false
+  target_snapshots: 200

@@ -1,0 +1,81 @@
+# ==============================================================================
+# Guided Wave FEM Configuration: Case 11 - BoneDC Benchmark 3: Marrow + Cortical Bone + Soft Tissue
+# ==============================================================================
+# Benchmark Comparison with Spectral Collocation Method (SCM) from BoneDC:
+#   - Layer 1 (Bottom, y in [0, 1] mm): 1.0 mm Bone Marrow (fluid, c = 1480 m/s, rho = 930 kg/m³)
+#   - Layer 2 (Middle, y in [1, 5] mm): 4.0 mm Cortical Bone (anisotropic solid)
+#   - Layer 3 (Top,    y in [5, 6] mm): 1.0 mm Soft Tissue (fluid, c = 1500 m/s, rho = 1000 kg/m³)
+#
+# Reference:
+#   Le et al. (2025), Guided waves in anisotropic and viscoelastic stratified plates:
+#   Application to bone quantitative ultrasound, Computers & Structures.
+# ==============================================================================
+
+solver:
+  type: "explicit"              # Velocity Verlet explicit scheme
+  CFL: 0.5                      # CFL stability factor
+  time_factor: 1.2              # Total duration multiplier
+
+geometry:
+  sensing_length: 0.15          # [m] 150 mm sensing region on top surface of soft tissue fluid layer (y = 6.0 mm)
+  absorb_length: 0.05           # [m] 50 mm lateral absorbing sponge width
+
+structure:
+  mode: "N_layers"              # 3-layer stratified waveguide in vacuum
+  layers:
+    - name: "Bone Marrow (MR)"
+      thickness: 1.0e-3         # [m] 1.0 mm fluid layer thickness
+      material_model: "fluid"   # Acoustic fluid medium
+      rho: 930.0                # [kg/m³] Marrow density
+      c: 1480.0                 # [m/s] Sound speed in marrow (K = 2.037 GPa)
+      min_elems_y: 6
+
+    - name: "Cortical Bone (CB)"
+      thickness: 4.0e-3         # [m] 4.0 mm plate thickness
+      material_model: "anisotropic"
+      rho: 1948.0               # [kg/m³]
+      C: [31.7e9, 13.4e9, 0.0, 20.2e9, 0.0, 6.38e9] # [Pa]
+      min_elems_y: 16
+
+    - name: "Soft Tissue (ST)"
+      thickness: 1.0e-3         # [m] 1.0 mm fluid layer thickness
+      material_model: "fluid"   # Acoustic fluid medium
+      rho: 1000.0               # [kg/m³] Soft tissue density
+      c: 1500.0                 # [m/s] Sound speed in soft tissue (K = 2.25 GPa)
+      min_elems_y: 6
+
+absorbing_boundaries:
+  alpha: null                   # Peak mass damping (auto: 1e7)
+  beta: null                    # Peak stiffness damping (auto: 1e-8)
+
+excitation:
+  f_center: 0.5e6               # [Hz] 500 kHz center frequency (covers 0 - 1.2 MHz band)
+  traction_max: 1.0e6           # [Pa] 1.0 MPa
+  excitation_width: 2.0e-3      # [m] 2.0 mm Gaussian strip width
+  source_x: null                # [m] Auto-centered at absorb_length + 10 mm
+  source_fx: 0.0                # Normal traction on top surface of top fluid layer (y = 6.0 mm)
+  source_fy: 1.0
+
+mesh:
+  elems_per_wavelength: 10
+  min_elems_x: 100
+  min_elems_y: 4
+  degree: 2
+
+sensors:
+  n_sensors: 301                # High spatial resolution along top fluid surface (y = 6.0 mm)
+  sensor_offset: 0.03           # [m] 30 mm
+  sensor_pitch: 0.4e-3          # [m] 0.4 mm
+  sensor_y: 6.0e-3              # [m] 6.0 mm: top surface of Soft Tissue fluid layer
+
+postprocess:
+  run_postprocess: true
+  f_min_disp_MHz: 0.0
+  f_max_disp_MHz: 1.0
+  k_min_disp: 0.0
+  k_max_disp: 3.0
+
+output:
+  output_dir: "results_bonedc_case3_st_cb_mr"
+  write_vtx: false
+  target_snapshots: 200

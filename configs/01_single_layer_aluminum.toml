@@ -1,0 +1,56 @@
+# ==============================================================================
+# Guided Wave FEM Configuration: Case 01 - Single Layer Aluminum Plate (TOML)
+# ==============================================================================
+# Demonstrates TOML standard library compatibility (Python 3.11+ tomllib)
+# ==============================================================================
+
+[solver]
+type = "explicit"
+CFL = 0.5
+time_factor = 1.2
+
+[geometry]
+sensing_length = 0.30
+absorb_length = 0.15
+
+[structure]
+mode = "1_layer"
+
+[structure.single_layer]
+name = "Aluminum Plate"
+thickness = 1.0e-3
+material_model = "isotropic"
+rho = 2700.0
+E = 70.0e9
+nu = 0.33
+min_elems_y = 6
+
+[excitation]
+f_center = 1.0e6
+traction_max = 1.0e6
+excitation_width = 2.0e-3
+source_fx = 1.0
+source_fy = 1.0
+
+[mesh]
+elems_per_wavelength = 10
+min_elems_x = 100
+min_elems_y = 4
+degree = 2
+
+[sensors]
+n_sensors = 401
+sensor_offset = 0.05
+sensor_pitch = 0.5e-3
+
+[postprocess]
+run_postprocess = true
+f_min_disp_MHz = 0.0
+f_max_disp_MHz = 2.0
+k_min_disp = 0.0
+k_max_disp = 3.0
+
+[output]
+output_dir = "results_case01_aluminum_toml"
+write_vtx = false
+target_snapshots = 200

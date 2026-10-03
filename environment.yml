@@ -1,0 +1,15 @@
+name: fenicsx-waves
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - fenics-dolfinx
+  - mpich
+  - pyvista
+  - matplotlib
+  - scipy
+  - numpy
+  - h5py
+  - tqdm
+  - ipython
+  - gmsh

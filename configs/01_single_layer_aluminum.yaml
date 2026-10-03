@@ -1,0 +1,67 @@
+# ==============================================================================
+# Guided Wave FEM Configuration: Case 01 - Single Layer Aluminum Plate (Vacuum)
+# ==============================================================================
+# Physics:
+#   Fundamental Lamb wave propagation (symmetric S0 extensional mode and
+#   anti-symmetric A0 flexural mode) in a traction-free homogeneous aluminum plate.
+#
+# Boundary Conditions:
+#   - Top (y = 1 mm): Traction-free (surface excitation strip)
+#   - Bottom (y = 0 mm): Traction-free
+#   - Left/Right (x = 0, x = L): 5th-order polynomial Rayleigh damping sponge layers
+# ==============================================================================
+
+solver:
+  type: "explicit"              # "explicit" (lumped Velocity Verlet) or "implicit" (Newmark-beta)
+  CFL: 0.5                      # Courant-Friedrichs-Lewy stability coefficient
+  time_factor: 1.2              # Duration factor (T_total = time_factor * sensing_length / c_T)
+
+geometry:
+  sensing_length: 0.30          # [m] Pristine sensing region length (300 mm)
+  absorb_length: 0.15           # [m] Absorbing sponge layer width on both ends (150 mm)
+
+structure:
+  mode: "1_layer"               # Structural configuration mode: "1_layer"
+  single_layer:
+    name: "Aluminum Plate"
+    thickness: 1.0e-3           # [m] Plate thickness (1 mm)
+    material_model: "isotropic" # "isotropic", "anisotropic", or "viscoelastic"
+    rho: 2700.0                 # [kg/m³] Mass density
+    E: 70.0e9                   # [Pa] Young's modulus (70 GPa)
+    nu: 0.33                    # [-] Poisson's ratio
+    min_elems_y: 6              # Minimum finite element divisions through thickness
+
+absorbing_boundaries:
+  alpha: null                   # Peak mass-proportional damping [1/s] (null = auto: 1e7)
+  beta: null                    # Peak stiffness-proportional damping [s] (null = auto: 1e-8)
+
+excitation:
+  f_center: 1.0e6               # [Hz] Center frequency of Ricker wavelet excitation (1 MHz)
+  traction_max: 1.0e6           # [Pa] Peak surface traction amplitude (1 MPa)
+  excitation_width: 2.0e-3      # [m] Spatial Gaussian distribution width (2 mm)
+  source_x: null                # [m] Excitation position (null = absorb_length + 0.005 m)
+  source_fx: 1.0                # Tangential traction component (excites in-plane / S0 mode)
+  source_fy: 1.0                # Normal traction component (excites out-of-plane / A0 mode)
+
+mesh:
+  elems_per_wavelength: 10      # Number of elements per shortest shear wavelength
+  min_elems_x: 100              # Minimum element count along x-direction
+  min_elems_y: 4                # Minimum element count per layer
+  degree: 2                     # Lagrange polynomial degree (2 = Q2 quadrilateral)
+
+sensors:
+  n_sensors: 401                # Number of measurement points along top face
+  sensor_offset: 0.05           # [m] Distance from excitation source to 1st sensor (50 mm)
+  sensor_pitch: 0.5e-3          # [m] Spatial pitch between adjacent sensors (0.5 mm)
+
+postprocess:
+  run_postprocess: true         # Run automated 2D FFT spatio-temporal dispersion analysis
+  f_min_disp_MHz: 0.0           # [MHz] Minimum frequency for dispersion extraction
+  f_max_disp_MHz: 2.0           # [MHz] Maximum frequency for dispersion extraction
+  k_min_disp: 0.0               # [rad/mm] Minimum wavenumber
+  k_max_disp: 3.0               # [rad/mm] Maximum wavenumber
+
+output:
+  output_dir: "results_case01_aluminum_1layer"
+  write_vtx: false              # Set True to output ADIOS2 VTX (.bp) for ParaView
+  target_snapshots: 200         # Number of animated snapshots if write_vtx is True
