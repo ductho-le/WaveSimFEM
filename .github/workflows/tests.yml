@@ -1,20 +1,72 @@
-name: Numerical regression tests
-on: [push, pull_request]
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  fenicsx:
+  lint:
+    name: Lint & format
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
-      - uses: mamba-org/setup-micromamba@v2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+      - run: python -m pip install "ruff==0.16.9" # keep in sync with .pre-commit-config.yaml
+      - run: ruff check src tests tools
+      - run: ruff format --check src tests tools
+
+  test:
+    name: Tests (DOLFINx ${{ matrix.dolfinx }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        dolfinx: ["0.10.0"]
+    defaults:
+      run:
+        shell: micromamba-shell {0}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: mamba-org/setup-micromamba@0dea6379afdaffa5d528b3d1dabc45da37f443fc # v2.0.4
         with:
           environment-file: environment.yml
           cache-environment: true
-      - name: Lint and serial regression tests
-        shell: micromamba-shell {0}
+      - name: Install package
+        run: python -m pip install --no-deps --no-build-isolation -e .
+      - name: Serial test suite (with coverage)
+        run: python -m pytest --cov --cov-report=term --cov-report=xml
+      - name: Distributed tests (2 MPI ranks)
+        run: mpiexec -n 2 python -m pytest -q -p no:cacheprovider tests/test_numerics.py -k "exact_point or gather"
+      - name: CLI smoke test
         run: |
-          pip install --no-deps -e .
-          ruff check src tests
-          pytest -q
-      - name: Distributed interpolation regression
-        shell: micromamba-shell {0}
-        run: mpiexec -n 2 python -m pytest -q tests/test_numerics.py -k exact_point
+          guided-waves --version
+          for example in configs/*.yaml; do guided-waves -c "$example" --dry-run -q; done
+
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+      - run: python -m pip install build
+      - run: python -m build
+      - name: Install wheel and verify metadata
+        run: |
+          python -m pip install dist/*.whl
+          python -c "import guidedwavefem as g; print(g.__version__); assert g.__version__ != '0.0.0+unknown'"

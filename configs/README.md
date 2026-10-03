@@ -1,74 +1,84 @@
 # Example configurations
 
-These are runnable examples demonstrating different waveguide physics, boundary conditions, and material models. They are categorized into three computational tiers based on their resolution and memory requirements.
+One runnable example per supported structure mode, each with materials and
+dimensions taken from a real application. The header of every file explains the
+physics, the application, the modelling choices, and references.
 
-Use `--dry-run` to preview expected mesh resolution, DOF counts, step counts, and memory requirements before running:
+| # | File | `structure.mode` | System | Field | Excitation | Scale |
+| :-- | :-- | :-- | :-- | :-- | :-- | :-- |
+| 01 | [`01_plate_aluminum_lamb.yaml`](01_plate_aluminum_lamb.yaml) | `1_layer` | 1 mm aluminium plate in vacuum | NDE / SHM | Ricker, 1 MHz | mm, μs, MHz |
+| 02 | [`02_layers_bonded_joint.yaml`](02_layers_bonded_joint.yaml) | `N_layers` | Al / 0.2 mm viscoelastic epoxy / Al bonded joint | Aerospace bond inspection | 5-cycle Hann tone burst, 300 kHz (implicit solver) | mm, μs, kHz |
+| 03 | [`03_halfspace_steel_rayleigh.yaml`](03_halfspace_steel_rayleigh.yaml) | `halfspace` | Rail steel halfspace | Rail / surface-crack NDE | Ricker, 1 MHz | mm, μs, MHz |
+| 04 | [`04_plate_on_halfspace_soil_bedrock.yaml`](04_plate_on_halfspace_soil_bedrock.yaml) | `plate_on_halfspace` | 10 m soft soil on bedrock | Seismic MASW / site characterisation | Ricker, 15 Hz | m, s, Hz |
+| 05 | [`05_plate_in_halfspaces_bone_qus.yaml`](05_plate_in_halfspaces_bone_qus.yaml) | `plate_in_halfspaces` | Anisotropic viscoelastic cortical bone between soft tissue and marrow (fluids) | Biomedical QUS (axial transmission) | Ricker, 500 kHz | mm, μs, kHz |
+
+Together they cover every material model: `isotropic` (01–04), `viscoelastic`
+(02, 05; anisotropic stiffness in 05), and `fluid` (05).
+
+## Preflight sizes (`--dry-run`, default settings)
+
+| # | Q2 elements | DOFs | Duration | Notes |
+| :-- | --: | --: | --: | :-- |
+| 01 | 9.2 k | 80 k | 118 μs | Quick tutorial case |
+| 02 | 12.6 k | 105 k | 90 μs | Implicit Newmark: the viscous adhesive would cap the explicit step |
+| 03 | 36.4 k | 293 k | 31 μs | Truncated halfspace with a bottom sponge |
+| 04 | 12.5 k | 101 k | 800 ms | Same solver at seismic scale; reduced sponge `beta` (high Vp contrast) |
+| 05 | 82.4 k | 662 k | 55 μs | Largest case; `mpiexec -n 4` recommended |
+
+The explicit time step is finalised from the assembled operator bound and is
+usually smaller than the preflight estimate, so expect more steps than shown.
+
+## Running
 
 ```sh
-guided-waves -c configs/01_single_layer_aluminum.yaml --dry-run
+# Inspect mesh, DOFs and duration without solving
+guided-waves -c configs/04_plate_on_halfspace_soil_bedrock.yaml --dry-run
+
+# Serial run
+guided-waves -c configs/01_plate_aluminum_lamb.yaml
+
+# Parallel run with CLI overrides (no file edits)
+mpiexec -n 4 guided-waves -c configs/05_plate_in_halfspaces_bone_qus.yaml \
+    --max-frequency 800e3 --duration 40e-6
+
+# Re-plot an existing archive with different limits (SI numbers or unit strings)
+guided-waves --postprocess results_01_plate_aluminum_lamb/sensor_data.npz \
+    --f-max "1.5 MHz" --k-max "2.5 rad/mm"
 ```
 
----
+## Writing your own
 
-## Configuration Tiers & Computational Profiles
+Start from `guided-waves --generate-config my_case.yaml` or copy the example
+closest to your structure. Useful conventions:
 
-### Tier 1: Quick Verification & Tutorials (Workstation / Laptop Friendly)
-*Fast, lightweight verification cases designed to run in under a minute on a personal computer.*
+- **Units:** all inputs are SI. Dispersion plot limits (`postprocess.f_min`,
+  `f_max`, `k_min`, `k_max`) also accept strings such as `"2 MHz"`, `"40 Hz"`,
+  `"3 rad/mm"` or `"1.2 rad/m"`; `null` selects them automatically.
+- **Excitation:** `source_type: ricker` (broadband, best for dispersion maps) or
+  `source_type: tone_burst` with `n_cycles` (narrowband, mode-selective; the NDE/SHM
+  standard). The default duration adds the pulse length to the travel time.
+- **Sponges:** `absorbing_boundaries.alpha/beta: null` scale with `f_center`, so the
+  same damping profile works from seismic to ultrasonic frequencies. Sponges should
+  be a few wavelengths wide at `f_center`. If the solver warns that damping limits
+  the explicit step, lower `beta` (as in example 04) or use the implicit solver.
+- **Viscoelastic layers:** `Cv = eta * C` with `eta = tan(delta) / (2 pi f0)` gives
+  a loss factor `tan(delta)` at `f0` (see example 02). Strong viscosity favours the
+  implicit solver, because Kelvin-Voigt damping grows with the mesh frequency.
+- **Halfspaces:** `halfspace`, `substrate` (bottom) and `superstrate` (top) take a
+  `thickness` (truncation depth) and an `absorb_depth` (sponge inside it).
 
-| Case | System | Model | Typical Runtime | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| [01](01_single_layer_aluminum.yaml) | Single aluminum plate | `1_layer` (explicit) | ~30–45 s | Fundamental Lamb waves ($S_0, A_0$). Also in [TOML](01_single_layer_aluminum.toml) & [JSON](01_single_layer_aluminum.json). |
-| [09](09_bonedc_case1_cortical_bone.yaml) | BoneDC cortical bone plate | `1_layer` (explicit) | ~1–2 min | 4 mm plate benchmark with $f_0 = 0.5$ MHz. |
+## Numerical notes
 
-### Tier 2: Multilayer Benchmarks & Viscoelastic Laminates
-*Moderate scale (~0.5M–4.5M DOFs). Recommended for multi-core MPI (`mpiexec -n 4`).*
-
-| Case | System | Model | Solvers | Key Phenomena |
-| :--- | :--- | :--- | :--- | :--- |
-| [02](02_single_layer_cortical_bone_viscoelastic.yaml) | Cortical bone (Kelvin–Voigt) | `1_layer` | Implicit | Viscoelastic attenuation, PETSc CG+GAMG |
-| [03](03_multilayer_bone_aluminum.yaml) | Bone/aluminum laminate | `N_layers` | Explicit | Heterogeneous laminate, interfacial mode conversion |
-| [10](10_bonedc_case2_cb_st_fluid.yaml) | Bone + soft tissue fluid | `N_layers` | Explicit | Coupled solid-fluid modes |
-| [11](11_bonedc_case3_st_cb_mr_fluid.yaml) | Marrow + bone + soft tissue | `N_layers` | Explicit | Tri-layer biological waveguide |
-
-### Tier 3: Truncated Semi-Infinite Halfspace Models (HPC / Cluster Recommended)
-*Large-scale models ($\sim 17\text{M}$ to $>150\text{M}$ DOFs). Require multi-node distributed MPI and $>32$ GB RAM.*
-
-| Case | System | Substrate / Superstrate Depth | Key Phenomena |
-| :--- | :--- | :--- | :--- |
-| [04](04_halfspace_rayleigh_aluminum.yaml) | Truncated aluminum halfspace | 40 mm aluminum (25 mm sponge) | Rayleigh surface waves ($c_R \approx 2906$ m/s) |
-| [05](05_plate_on_halfspace_bone_marrow.yaml) | Bone plate on marrow substrate | 12 mm marrow (8 mm sponge) | Leaky Lamb waves & substrate radiation |
-| [06](06_plate_in_halfspaces_bone_tissue_marrow.yaml) | Bone between tissue and marrow | 12 mm substrate + 12 mm superstrate | Stoneley/Scholte interface waves |
-| [07](07_plate_on_water_halfspace.yaml) | Aluminum on regularized water | 12 mm water (8 mm sponge) | Scholte waves & leaky Lamb radiation |
-| [08](08_plate_immersed_in_water.yaml) | Aluminum immersed in water | Dual 12 mm water halfspaces | Bilateral fluid loading |
-
----
-
-## Execution Examples & CLI Overrides
-
-### 1. Preflight Estimation (Inspect before execution)
-```sh
-guided-waves -c configs/01_single_layer_aluminum.yaml --dry-run
-guided-waves -c configs/05_plate_on_halfspace_bone_marrow.yaml --dry-run
-```
-
-### 2. Fast Tutorial Run (Case 01)
-```sh
-guided-waves -c configs/01_single_layer_aluminum.yaml
-```
-
-### 3. Parallel Execution with CLI Overrides
-You can throttle frequency or duration directly from the CLI without editing configuration files:
-```sh
-# Override mesh sizing frequency and duration for quick evaluation
-mpiexec -n 4 guided-waves -c configs/03_multilayer_bone_aluminum.yaml \
-    --max-frequency 1.0e6 --duration 30e-6
-```
-
----
-
-## Version 0.2 Numerical Notes
-
-1. **Explicit Solver:** Uses 4th-order classical RK4 with lumped mass, replacing the older damped Velocity Verlet.
-2. **Conservative Operator Bounds:** Critical time steps are determined by absolute row sums of assembled stiffness and damping operators ($\Delta t_{\text{crit}} = 1.0 / \max(\omega_{\max}, \text{damping\_bound})$).
-3. **Mesh Sizing:** By default, automatic mesh sizing resolves wavelengths down to `mesh.max_frequency` (default `3 * f_center`). For large domains, specify `--max-frequency <f0>` or set `max_frequency` explicitly in the configuration.
-4. **Fluid Formulation:** The `fluid` model is a regularized small-shear elastic approximation ($\mu_f = 10^{-8} K_f$) with full tangential displacement continuity, not mixed inviscid acoustics.
+1. **Explicit solver:** classical RK4 with lumped mass; the critical step comes from
+   absolute row sums of the assembled stiffness and damping operators.
+2. **Mesh sizing:** elements resolve the slowest physical wavelength at
+   `mesh.max_frequency` (default `3 * f_center`) with `elems_per_wavelength`
+   elements; override with `--max-frequency` for quick evaluations.
+3. **Fluid formulation:** `fluid` is a regularised small-shear elastic model
+   (`mu_f = 1e-8 K_f`) with full tangential continuity, not mixed inviscid
+   acoustics. Scholte/Stoneley interface waves and leaky-wave attenuation are
+   approximate; treat fluid-loaded results qualitatively unless validated.
+4. **Truncated halfspaces:** body waves longer than the bottom sponge (for example
+   bedrock P-waves in example 04) are only partially absorbed.
+5. **Strict schema:** unknown keys and constitutive fields not used by a region's
+   `material_model` are rejected (e.g. `Cv` requires `viscoelastic`).

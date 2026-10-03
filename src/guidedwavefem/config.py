@@ -1,276 +1,518 @@
-"""Multi-format configuration loading, validation, resolution, and serialization.
+"""Configuration loading, schema validation, resolution, and serialization.
 
 Supports:
   - YAML (.yaml, .yml), TOML (.toml), and JSON (.json)
-  - Hierarchical and flat parameter configurations
-  - Interactive CLI overrides
+  - Hierarchical (sectioned) and flat parameter layouts
+  - Strict schema: unknown keys are rejected with "did you mean" suggestions
+  - CLI overrides (highest precedence) and a single table of defaults
   - Commented YAML template generation
 """
 
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
+import tomllib
+from collections.abc import Mapping
 from typing import Any
 
 import numpy as np
+import yaml
 
-try:
-    import yaml
+from guidedwavefem.device import DEVICE_CHOICES_HELP, normalize_device_request
+from guidedwavefem.materials import canonicalize_mode, structure_from_config
+from guidedwavefem.sources import DEFAULT_N_CYCLES, SOURCE_TYPES
+from guidedwavefem.units import parse_quantity
 
-    HAS_YAML = True
-except ImportError:
-    HAS_YAML = False
+# ---------------------------------------------------------------------------
+# Schema
+# ---------------------------------------------------------------------------
+#: Section name -> {section key: flat key}
+SECTION_KEYS: dict[str, dict[str, str]] = {
+    "solver": {
+        "type": "solver_type",
+        "CFL": "CFL",
+        "time_factor": "time_factor",
+        "beta": "beta_val",
+        "gamma": "gamma_val",
+        "dt": "dt",
+        "duration": "duration",
+        "device": "device",
+        "precision": "precision",
+    },
+    "geometry": {"sensing_length": "sensing_length", "absorb_length": "absorb_length"},
+    "structure": {
+        "mode": "structure_mode",
+        "single_layer": "single_layer",
+        "layers": "layers",
+        "halfspace": "halfspace",
+        "substrate": "substrate",
+        "superstrate": "superstrate",
+        "bottom_halfspace": "bottom_halfspace",
+        "top_halfspace": "top_halfspace",
+    },
+    "absorbing_boundaries": {"alpha": "absorb_alpha", "beta": "absorb_beta"},
+    "excitation": {
+        k: k
+        for k in (
+            "source_type",
+            "f_center",
+            "n_cycles",
+            "traction_max",
+            "excitation_width",
+            "source_x",
+            "source_fx",
+            "source_fy",
+        )
+    },
+    "mesh": {
+        k: k
+        for k in ("elems_per_wavelength", "min_elems_x", "min_elems_y", "degree", "max_frequency")
+    },
+    "sensors": {k: k for k in ("n_sensors", "sensor_offset", "sensor_pitch", "sensor_y")},
+    "postprocess": {
+        "run_postprocess": "run_postprocess",
+        # SI numbers (Hz, rad/m) or unit strings ("2 MHz", "3 rad/mm"); null = automatic
+        "f_min": "disp_f_min",
+        "f_max": "disp_f_max",
+        "k_min": "disp_k_min",
+        "k_max": "disp_k_max",
+        # Legacy (<= 0.2) keys in MHz and rad/mm, converted on load
+        "f_min_disp_MHz": "f_min_disp_MHz",
+        "f_max_disp_MHz": "f_max_disp_MHz",
+        "k_min_disp": "k_min_disp",
+        "k_max_disp": "k_max_disp",
+    },
+    "output": {
+        k: k
+        for k in (
+            "output_dir",
+            "target_snapshots",
+            "write_vtx",
+            "quick_plot",
+            "compress_output",
+            "figure_formats",
+            "usetex",
+        )
+    },
+}
 
-try:
-    import tomllib
+#: Keys written by the solver into ``simulation_config.yaml`` (accepted on reload).
+PROVENANCE_KEYS = frozenset({"runtime", "load_y"})
+FLAT_KEYS = (
+    frozenset({flat for section in SECTION_KEYS.values() for flat in section.values()})
+    | PROVENANCE_KEYS
+)
 
-    HAS_TOMLLIB = True
-except ImportError:
-    try:
-        import tomli as tomllib
+FIGURE_FORMATS = ("png", "pdf", "svg", "eps")
 
-        HAS_TOMLLIB = True
-    except ImportError:
-        HAS_TOMLLIB = False
+#: Single source of truth for defaults.
+DEFAULTS: dict[str, Any] = {
+    "solver_type": "explicit",
+    "device": "auto",
+    "precision": "double",
+    "CFL": 0.5,
+    "time_factor": 1.2,
+    "beta_val": 0.25,
+    "gamma_val": 0.5,
+    "dt": None,
+    "duration": None,
+    "structure_mode": "N_layers",
+    "absorb_alpha": None,  # auto: ABSORB_ALPHA_REF * f_center / 1 MHz
+    "absorb_beta": None,  # auto: ABSORB_BETA_REF * 1 MHz / f_center
+    "source_type": "ricker",
+    "n_cycles": None,  # tone_burst only (default DEFAULT_N_CYCLES)
+    "traction_max": 1.0e6,
+    "excitation_width": 2.0e-3,
+    "source_x": None,
+    "source_fx": 0.0,
+    "source_fy": 1.0,
+    "elems_per_wavelength": 10,
+    "min_elems_x": 100,
+    "min_elems_y": 4,
+    "degree": 2,
+    "max_frequency": None,
+    "n_sensors": 301,
+    "sensor_offset": 0.05,
+    "sensor_pitch": 0.5e-3,
+    "sensor_y": None,
+    "run_postprocess": True,
+    "disp_f_min": None,  # auto: 0
+    "disp_f_max": None,  # auto: 2 * f_center
+    "disp_k_min": None,  # auto: 0
+    "disp_k_max": None,  # auto: 2π disp_f_max / slowest wave speed (capped at π / pitch)
+    "output_dir": None,
+    "target_snapshots": 200,
+    "write_vtx": False,
+    "quick_plot": True,
+    "compress_output": False,
+    "figure_formats": list(FIGURE_FORMATS),
+    "usetex": "auto",
+}
+
+#: Minimum lateral offset of the default source from the left sponge [m]; the
+#: actual default offset is ``max(DEFAULT_SOURCE_OFFSET, excitation_width)`` so
+#: wide (e.g. seismic) loads never overlap the sponge.
+DEFAULT_SOURCE_OFFSET = 0.005
+#: Sponge damping peaks at the 1 MHz reference; auto values scale so that
+#: ``alpha / f_center`` and ``beta * f_center`` stay constant across frequency scales.
+#: Mass-proportional ``alpha`` provides the absorption (damping ratio ≈ 0.8 at f0);
+#: ``beta`` is kept small because stiffness-proportional damping grows with the
+#: mesh frequency and would otherwise limit the explicit time step.
+ABSORB_REFERENCE_FREQUENCY = 1.0e6
+ABSORB_ALPHA_REF = 1.0e7
+ABSORB_BETA_REF = 1.0e-9
+
+#: Canonical dispersion-limit keys -> (quantity kind, user-facing name).
+DISPERSION_KEYS: dict[str, tuple[str, str]] = {
+    "disp_f_min": ("frequency", "postprocess.f_min"),
+    "disp_f_max": ("frequency", "postprocess.f_max"),
+    "disp_k_min": ("wavenumber", "postprocess.k_min"),
+    "disp_k_max": ("wavenumber", "postprocess.k_max"),
+}
+#: Legacy dispersion keys -> (canonical key, factor to SI).
+LEGACY_DISPERSION_KEYS: dict[str, tuple[str, float]] = {
+    "f_min_disp_MHz": ("disp_f_min", 1e6),
+    "f_max_disp_MHz": ("disp_f_max", 1e6),
+    "k_min_disp": ("disp_k_min", 1e3),
+    "k_max_disp": ("disp_k_max", 1e3),
+}
 
 
+def _suggest(key: str, candidates: set[str] | frozenset[str]) -> str:
+    match = difflib.get_close_matches(key, sorted(candidates), n=1)
+    return f" Did you mean '{match[0]}'?" if match else ""
+
+
+# ---------------------------------------------------------------------------
+# File I/O
+# ---------------------------------------------------------------------------
 def load_config(config_path: str) -> dict[str, Any]:
-    """Load simulation configuration from a YAML, TOML, or JSON file.
-
-    Parameters
-    ----------
-    config_path : str
-        Path to configuration file (.yaml, .yml, .toml, or .json).
-
-    Returns
-    -------
-    dict
-        Parsed configuration dictionary.
-    """
+    """Load a configuration mapping from a YAML, TOML, or JSON file."""
     if not os.path.exists(config_path):
         raise FileNotFoundError(f"Configuration file not found: {config_path}")
 
     ext = os.path.splitext(config_path)[1].lower()
     if ext in (".yaml", ".yml"):
-        if not HAS_YAML:
-            raise ImportError(
-                "PyYAML package is required to load YAML files. Install with: conda install pyyaml"
-            )
-        with open(config_path, "r", encoding="utf-8") as f:
+        with open(config_path, encoding="utf-8") as f:
             data = yaml.safe_load(f)
     elif ext == ".toml":
-        if not HAS_TOMLLIB:
-            raise ImportError(
-                "Python 3.11+ built-in tomllib or tomli package is required to load TOML files."
-            )
         with open(config_path, "rb") as f:
             data = tomllib.load(f)
     elif ext == ".json":
-        with open(config_path, "r", encoding="utf-8") as f:
+        with open(config_path, encoding="utf-8") as f:
             data = json.load(f)
     else:
         raise ValueError(
-            f"Unsupported configuration format '{ext}'. Supported formats: .yaml, .yml, .toml, .json"
+            f"Unsupported configuration format '{ext}'. Supported: .yaml, .yml, .toml, .json"
         )
-
     if not isinstance(data, dict):
-        raise TypeError(
-            f"Configuration root in {config_path} must be a key-value mapping."
-        )
-
+        raise TypeError(f"Configuration root in {config_path} must be a key-value mapping.")
     return data
 
 
-def dump_config(cfg_dict: dict[str, Any], out_path: str) -> None:
-    """Serialize and save configuration dictionary to YAML or JSON format.
+def _sanitize(item: Any) -> Any:
+    if isinstance(item, np.ndarray):
+        return item.tolist()
+    if isinstance(item, (bool, np.bool_)):
+        return bool(item)
+    if isinstance(item, (np.floating, float)):
+        return float(item)
+    if isinstance(item, (np.integer, int)):
+        return int(item)
+    if isinstance(item, Mapping):
+        return {k: _sanitize(v) for k, v in item.items() if not str(k).startswith("_")}
+    if isinstance(item, (list, tuple)):
+        return [_sanitize(v) for v in item]
+    return item
 
-    Parameters
-    ----------
-    cfg_dict : dict
-        Configuration dictionary to serialize.
-    out_path : str
-        Destination path for serialized configuration file.
+
+def dump_config(cfg_dict: dict[str, Any], out_path: str) -> None:
+    """Serialize a configuration to YAML (``.yaml``/``.yml``) or JSON (otherwise).
+
+    Keys starting with ``_`` are internal and are not written.
     """
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-    ext = os.path.splitext(out_path)[1].lower()
-
-    def _sanitize(item: Any) -> Any:
-        if isinstance(item, np.ndarray):
-            return item.tolist()
-        elif isinstance(item, (bool, np.bool_)):
-            return bool(item)
-        elif isinstance(item, (np.floating, float)):
-            return float(item)
-        elif isinstance(item, (np.integer, int)):
-            return int(item)
-        elif isinstance(item, dict):
-            return {k: _sanitize(v) for k, v in item.items() if not k.startswith("_")}
-        elif isinstance(item, (list, tuple)):
-            return [_sanitize(v) for v in item]
-        return item
-
     cleaned = _sanitize(cfg_dict)
-    if ext in (".yaml", ".yml") and HAS_YAML:
-        with open(out_path, "w", encoding="utf-8") as f:
-            yaml.dump(cleaned, f, default_flow_style=False, sort_keys=False)
-        return
-
-    # Fallback to JSON
     with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(cleaned, f, indent=2)
+        if os.path.splitext(out_path)[1].lower() in (".yaml", ".yml"):
+            yaml.safe_dump(cleaned, f, default_flow_style=False, sort_keys=False)
+        else:
+            json.dump(cleaned, f, indent=2)
 
 
-def flatten_config(cfg_in: dict[str, Any]) -> dict[str, Any]:
-    """Normalize nested hierarchical configuration dictionary into a flat parameter mapping."""
+# ---------------------------------------------------------------------------
+# Flattening
+# ---------------------------------------------------------------------------
+def flatten_config(cfg_in: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize a sectioned configuration into a flat parameter mapping.
+
+    Raises
+    ------
+    ValueError
+        On unknown keys (with a suggestion), malformed sections, or a parameter
+        defined both inside a section and at the top level.
+    """
+    if not isinstance(cfg_in, Mapping):
+        raise TypeError("Configuration must be a mapping")
     flat: dict[str, Any] = {}
-    if not isinstance(cfg_in, dict):
-        return flat
+    origin: dict[str, str] = {}
 
-    # 1. Solver
-    if "solver" in cfg_in and isinstance(cfg_in["solver"], dict):
-        s = cfg_in["solver"]
-        if "type" in s:
-            flat["solver_type"] = s["type"]
-        if "CFL" in s:
-            flat["CFL"] = float(s["CFL"])
-        if "time_factor" in s:
-            flat["time_factor"] = float(s["time_factor"])
-        if "beta" in s:
-            flat["beta_val"] = float(s["beta"])
-        if "gamma" in s:
-            flat["gamma_val"] = float(s["gamma"])
-        for key in ("dt", "duration"):
-            if key in s:
-                flat[key] = s[key]
-
-    # 2. Geometry
-    if "geometry" in cfg_in and isinstance(cfg_in["geometry"], dict):
-        g = cfg_in["geometry"]
-        if "sensing_length" in g:
-            flat["sensing_length"] = float(g["sensing_length"])
-        if "absorb_length" in g:
-            flat["absorb_length"] = float(g["absorb_length"])
-
-    # 3. Structure & Materials
-    if "structure" in cfg_in and isinstance(cfg_in["structure"], dict):
-        st = cfg_in["structure"]
-        if "mode" in st:
-            flat["structure_mode"] = str(st["mode"])
-        if "single_layer" in st:
-            flat["single_layer"] = st["single_layer"]
-        if "layers" in st:
-            flat["layers"] = st["layers"]
-        if "halfspace" in st:
-            flat["halfspace"] = st["halfspace"]
-        if "substrate" in st:
-            flat["substrate"] = st["substrate"]
-        if "superstrate" in st:
-            flat["superstrate"] = st["superstrate"]
-        if "bottom_halfspace" in st:
-            flat["bottom_halfspace"] = st["bottom_halfspace"]
-        if "top_halfspace" in st:
-            flat["top_halfspace"] = st["top_halfspace"]
-
-    # 4. Absorbing Boundaries
-    if "absorbing_boundaries" in cfg_in and isinstance(
-        cfg_in["absorbing_boundaries"], dict
-    ):
-        ab = cfg_in["absorbing_boundaries"]
-        if "alpha" in ab:
-            flat["absorb_alpha"] = (
-                float(ab["alpha"]) if ab["alpha"] is not None else None
+    def _put(flat_key: str, value: Any, where: str) -> None:
+        if flat_key in flat:
+            raise ValueError(
+                f"Parameter '{flat_key}' is defined twice ({origin[flat_key]} and {where})"
             )
-        if "beta" in ab:
-            flat["absorb_beta"] = float(ab["beta"]) if ab["beta"] is not None else None
+        flat[flat_key] = value
+        origin[flat_key] = where
 
-    # 5. Excitation
-    if "excitation" in cfg_in and isinstance(cfg_in["excitation"], dict):
-        ex = cfg_in["excitation"]
-        if "f_center" in ex:
-            flat["f_center"] = float(ex["f_center"])
-        if "traction_max" in ex:
-            flat["traction_max"] = float(ex["traction_max"])
-        if "excitation_width" in ex:
-            flat["excitation_width"] = float(ex["excitation_width"])
-        if "source_x" in ex:
-            flat["source_x"] = (
-                float(ex["source_x"]) if ex["source_x"] is not None else None
+    for key, value in cfg_in.items():
+        key = str(key)
+        if key.startswith("_"):
+            flat[key] = value  # internal metadata (e.g. _config_source)
+            continue
+        if key in SECTION_KEYS:
+            if not isinstance(value, Mapping):
+                raise ValueError(f"Section '{key}' must be a mapping, got {type(value).__name__}")
+            mapping = SECTION_KEYS[key]
+            for sub_key, sub_value in value.items():
+                if sub_key not in mapping:
+                    raise ValueError(
+                        f"Unknown key '{key}.{sub_key}'.{_suggest(str(sub_key), set(mapping))}"
+                    )
+                _put(mapping[sub_key], sub_value, f"'{key}.{sub_key}'")
+        elif key in FLAT_KEYS:
+            _put(key, value, f"top-level '{key}'")
+        else:
+            raise ValueError(
+                f"Unknown configuration key '{key}'.{_suggest(key, FLAT_KEYS | set(SECTION_KEYS))}"
             )
-        if "source_fx" in ex:
-            flat["source_fx"] = float(ex["source_fx"])
-        if "source_fy" in ex:
-            flat["source_fy"] = float(ex["source_fy"])
-
-    # 6. Mesh
-    if "mesh" in cfg_in and isinstance(cfg_in["mesh"], dict):
-        m = cfg_in["mesh"]
-        if "elems_per_wavelength" in m:
-            flat["elems_per_wavelength"] = m["elems_per_wavelength"]
-        if "min_elems_x" in m:
-            flat["min_elems_x"] = m["min_elems_x"]
-        if "min_elems_y" in m:
-            flat["min_elems_y"] = m["min_elems_y"]
-        if "degree" in m:
-            flat["degree"] = m["degree"]
-        if "max_frequency" in m:
-            flat["max_frequency"] = m["max_frequency"]
-
-    # 7. Sensors
-    if "sensors" in cfg_in and isinstance(cfg_in["sensors"], dict):
-        sn = cfg_in["sensors"]
-        if "n_sensors" in sn:
-            flat["n_sensors"] = sn["n_sensors"]
-        if "sensor_offset" in sn:
-            flat["sensor_offset"] = float(sn["sensor_offset"])
-        if "sensor_pitch" in sn:
-            flat["sensor_pitch"] = float(sn["sensor_pitch"])
-        if "sensor_y" in sn and sn["sensor_y"] is not None:
-            flat["sensor_y"] = float(sn["sensor_y"])
-
-    # 8. Postprocess
-    if "postprocess" in cfg_in and isinstance(cfg_in["postprocess"], dict):
-        pp = cfg_in["postprocess"]
-        if "run_postprocess" in pp:
-            flat["run_postprocess"] = bool(pp["run_postprocess"])
-        if "f_min_disp_MHz" in pp:
-            flat["f_min_disp_MHz"] = float(pp["f_min_disp_MHz"])
-        if "f_max_disp_MHz" in pp:
-            flat["f_max_disp_MHz"] = float(pp["f_max_disp_MHz"])
-        if "k_min_disp" in pp:
-            flat["k_min_disp"] = float(pp["k_min_disp"])
-        if "k_max_disp" in pp:
-            flat["k_max_disp"] = float(pp["k_max_disp"])
-
-    # 9. Output
-    if "output" in cfg_in and isinstance(cfg_in["output"], dict):
-        o = cfg_in["output"]
-        if "output_dir" in o:
-            flat["output_dir"] = o["output_dir"]
-        if "target_snapshots" in o:
-            flat["target_snapshots"] = o["target_snapshots"]
-        if "write_vtx" in o:
-            flat["write_vtx"] = bool(o["write_vtx"])
-        if "quick_plot" in o:
-            flat["quick_plot"] = bool(o["quick_plot"])
-
-    # Also accept any direct top-level flat parameter keys
-    for k, v in cfg_in.items():
-        if k not in (
-            "solver",
-            "geometry",
-            "structure",
-            "absorbing_boundaries",
-            "excitation",
-            "mesh",
-            "sensors",
-            "postprocess",
-            "output",
-        ):
-            flat[k] = v
-
     return flat
+
+
+# ---------------------------------------------------------------------------
+# Typed validation helpers
+# ---------------------------------------------------------------------------
+def _float(cfg: dict[str, Any], key: str, *, positive: bool = False, nonneg: bool = False) -> float:
+    value = cfg[key]
+    if isinstance(value, bool):
+        raise ValueError(f"'{key}' must be a number, got a boolean")
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"'{key}' must be a number, got {value!r}") from None
+    if not np.isfinite(out):
+        raise ValueError(f"'{key}' must be finite, got {value!r}")
+    if positive and out <= 0:
+        raise ValueError(f"'{key}' must be positive, got {out}")
+    if nonneg and out < 0:
+        raise ValueError(f"'{key}' must be nonnegative, got {out}")
+    cfg[key] = out
+    return out
+
+
+def _int(cfg: dict[str, Any], key: str, minimum: int) -> int:
+    value = cfg[key]
+    if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
+        raise ValueError(f"'{key}' must be an integer >= {minimum}, got {value!r}")
+    if not np.isfinite(value) or int(value) != value or value < minimum:
+        raise ValueError(f"'{key}' must be an integer >= {minimum}, got {value!r}")
+    cfg[key] = int(value)
+    return int(value)
+
+
+def _bool(cfg: dict[str, Any], key: str) -> bool:
+    value = cfg[key]
+    if not isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"'{key}' must be true or false, got {value!r}")
+    cfg[key] = bool(value)
+    return bool(value)
+
+
+def _validate_output_options(cfg: dict[str, Any]) -> None:
+    for key in ("run_postprocess", "write_vtx", "quick_plot", "compress_output"):
+        _bool(cfg, key)
+    formats = cfg["figure_formats"]
+    if isinstance(formats, str):
+        formats = [s.strip() for s in formats.split(",") if s.strip()]
+    if not isinstance(formats, (list, tuple)) or not formats:
+        raise ValueError(f"'figure_formats' must be a non-empty list from {FIGURE_FORMATS}")
+    formats = [str(f).lower().lstrip(".") for f in formats]
+    bad = [f for f in formats if f not in FIGURE_FORMATS]
+    if bad:
+        raise ValueError(f"Unsupported figure format(s) {bad}; choose from {FIGURE_FORMATS}")
+    cfg["figure_formats"] = list(dict.fromkeys(formats))
+    usetex = cfg["usetex"]
+    if isinstance(usetex, str) and usetex.lower() == "auto":
+        cfg["usetex"] = "auto"
+    elif isinstance(usetex, (bool, np.bool_)):
+        cfg["usetex"] = bool(usetex)
+    else:
+        raise ValueError(f"'usetex' must be 'auto', true or false, got {usetex!r}")
+    if cfg["output_dir"] is not None and not isinstance(cfg["output_dir"], str):
+        raise ValueError("'output_dir' must be a string or null")
+    _resolve_dispersion_limits(cfg)
+
+
+def _resolve_dispersion_limits(cfg: dict[str, Any]) -> None:
+    """Convert legacy keys and unit strings to SI (Hz, rad/m); ``None`` stays automatic."""
+    for legacy, (key, factor) in LEGACY_DISPERSION_KEYS.items():
+        value = cfg.pop(legacy, None)
+        if value is None:
+            continue
+        if cfg.get(key) is not None:
+            name = DISPERSION_KEYS[key][1]
+            raise ValueError(f"Specify only one of '{name}' and the legacy '{legacy}'")
+        cfg[key] = _float({legacy: value}, legacy) * factor
+    for key, (kind, name) in DISPERSION_KEYS.items():
+        if cfg.get(key) is None:
+            continue
+        try:
+            value = parse_quantity(cfg[key], kind)  # type: ignore[arg-type]
+        except ValueError as exc:
+            raise ValueError(f"'{name}': {exc}") from None
+        if value < 0:
+            raise ValueError(f"'{name}' must be nonnegative, got {cfg[key]!r}")
+        cfg[key] = value
+    for low, high in (("disp_f_min", "disp_f_max"), ("disp_k_min", "disp_k_max")):
+        lo, hi = cfg.get(low), cfg.get(high)
+        if lo is not None and hi is not None and not lo < hi:
+            raise ValueError(
+                f"Require {DISPERSION_KEYS[low][1]} < {DISPERSION_KEYS[high][1]}, got {lo:g} and {hi:g}"
+            )
+
+
+def _resolve_source(cfg: dict[str, Any]) -> None:
+    source_type = str(cfg["source_type"]).lower().strip().replace("-", "_")
+    if source_type not in SOURCE_TYPES:
+        raise ValueError(f"source_type must be one of {SOURCE_TYPES}, got {cfg['source_type']!r}")
+    cfg["source_type"] = source_type
+    if source_type == "tone_burst":
+        if cfg.get("n_cycles") is None:
+            cfg["n_cycles"] = DEFAULT_N_CYCLES
+        _int(cfg, "n_cycles", 1)
+    elif cfg.get("n_cycles") is not None:
+        raise ValueError("'n_cycles' only applies to source_type 'tone_burst'")
+
+
+def _resolve_automatic_values(cfg: dict[str, Any], summary: Mapping[str, Any]) -> None:
+    """Fill frequency-scaled sponge damping and dispersion plot limits left as ``null``."""
+    f0 = cfg["f_center"]
+    scale = f0 / ABSORB_REFERENCE_FREQUENCY
+    if cfg["absorb_alpha"] is None:
+        cfg["absorb_alpha"] = ABSORB_ALPHA_REF * scale
+    if cfg["absorb_beta"] is None:
+        cfg["absorb_beta"] = ABSORB_BETA_REF / scale
+    for key in ("absorb_alpha", "absorb_beta"):
+        _float(cfg, key, nonneg=True)
+
+    if cfg["disp_f_min"] is None:
+        cfg["disp_f_min"] = 0.0
+    if cfg["disp_f_max"] is None:
+        cfg["disp_f_max"] = max(2.0 * f0, 1.5 * cfg["disp_f_min"])
+    if cfg["disp_k_min"] is None:
+        cfg["disp_k_min"] = 0.0
+    if cfg["disp_k_max"] is None:
+        k_nyquist = np.pi / cfg["sensor_pitch"]
+        k_wave = 2.0 * np.pi * cfg["disp_f_max"] / summary["c_wave_min"]
+        cfg["disp_k_max"] = float(max(min(k_wave, k_nyquist), 1.5 * cfg["disp_k_min"]))
+    _resolve_dispersion_limits(cfg)  # re-check ordering with the automatic values
+
+
+def _validate_simulation(cfg: dict[str, Any], source: str) -> None:
+    for key in ("sensing_length", "absorb_length", "f_center"):
+        if cfg.get(key) is None:
+            raise ValueError(f"Configuration '{source}' must specify '{key}'.")
+
+    for key in (
+        "sensing_length",
+        "absorb_length",
+        "f_center",
+        "excitation_width",
+        "sensor_pitch",
+        "CFL",
+        "time_factor",
+    ):
+        _float(cfg, key, positive=True)
+    for key in ("dt", "duration", "max_frequency"):
+        if cfg.get(key) is not None:
+            _float(cfg, key, positive=True)
+    for key, minimum in (
+        ("n_sensors", 2),
+        ("elems_per_wavelength", 1),
+        ("min_elems_x", 1),
+        ("min_elems_y", 1),
+        ("target_snapshots", 1),
+        ("degree", 1),
+    ):
+        _int(cfg, key, minimum)
+    if cfg["source_x"] is None:
+        offset = max(DEFAULT_SOURCE_OFFSET, cfg["excitation_width"])
+        cfg["source_x"] = cfg["absorb_length"] + offset
+    for key in ("source_x", "source_fx", "source_fy", "traction_max", "sensor_offset"):
+        _float(cfg, key)
+    if cfg["source_fx"] == 0 and cfg["source_fy"] == 0:
+        raise ValueError("Source direction (source_fx, source_fy) cannot be zero")
+    _resolve_source(cfg)
+    for key in ("absorb_alpha", "absorb_beta"):
+        if cfg[key] is not None:
+            _float(cfg, key, nonneg=True)
+
+    solver = cfg["solver_type"]
+    if solver == "explicit" and cfg["CFL"] > 1:
+        raise ValueError("Explicit CFL must be in (0, 1]")
+    beta, gamma = _float(cfg, "beta_val"), _float(cfg, "gamma_val")
+    if solver == "implicit" and (gamma < 0.5 or beta < 0.25 * (gamma + 0.5) ** 2):
+        raise ValueError("Newmark requires gamma >= 0.5 and beta >= (gamma+0.5)^2/4")
+
+    length = 2 * cfg["absorb_length"] + cfg["sensing_length"]
+    if not 0 <= cfg["source_x"] <= length:
+        raise ValueError(f"source_x={cfg['source_x']} must lie inside [0, {length}]")
+    sensor_start = cfg["source_x"] + cfg["sensor_offset"]
+    sensor_end = sensor_start + (cfg["n_sensors"] - 1) * cfg["sensor_pitch"]
+    if sensor_start < 0 or sensor_end > length:
+        raise ValueError(
+            f"Sensor array [{sensor_start:.4g}, {sensor_end:.4g}] m must lie inside [0, {length:.4g}] m"
+        )
+    if cfg["run_postprocess"] and cfg["n_sensors"] < 3:
+        raise ValueError("Postprocessing requires at least three sensors")
+
+    summary = structure_from_config(cfg)
+    if cfg.get("sensor_y") is not None:
+        y = _float(cfg, "sensor_y")
+        if not summary["y_min"] <= y <= summary["y_max"]:
+            raise ValueError(
+                f"sensor_y={y} must lie inside the domain [{summary['y_min']}, {summary['y_max']}]"
+            )
+    _resolve_automatic_values(cfg, summary)
+
+
+def _apply_cli_overrides(resolved: dict[str, Any], args: argparse.Namespace) -> None:
+    overrides = {
+        "solver": "solver_type",
+        "structure_mode": "structure_mode",
+        "output": "output_dir",
+        "f_min": "disp_f_min",
+        "f_max": "disp_f_max",
+        "k_min": "disp_k_min",
+        "k_max": "disp_k_max",
+        "max_frequency": "max_frequency",
+        "duration": "duration",
+        "dt": "dt",
+        "cfl": "CFL",
+        "device": "device",
+        "precision": "precision",
+    }
+    legacy_for = {key: legacy for legacy, (key, _) in LEGACY_DISPERSION_KEYS.items()}
+    for attr, key in overrides.items():
+        value = getattr(args, attr, None)
+        if value is not None:
+            resolved[key] = value
+            resolved.pop(legacy_for.get(key, ""), None)  # CLI wins over legacy file keys
+    if getattr(args, "no_postprocess", False):
+        resolved["run_postprocess"] = False
 
 
 def parse_and_resolve_config(
@@ -279,10 +521,13 @@ def parse_and_resolve_config(
     custom_cfg: dict[str, Any] | None = None,
     validate_simulation: bool = True,
 ) -> dict[str, Any]:
-    """Load, flatten, validate, and apply CLI overrides to the configuration."""
+    """Load, flatten, apply defaults and CLI overrides, and validate a configuration.
+
+    Precedence: CLI overrides > configuration file/dictionary > :data:`DEFAULTS`.
+    """
     if custom_cfg is not None:
         raw_cfg = custom_cfg
-        config_source = custom_cfg.get("_config_source", "Supplied Dictionary")
+        config_source = str(custom_cfg.get("_config_source", "Supplied Dictionary"))
     elif config_path is not None:
         raw_cfg = load_config(config_path)
         config_source = config_path
@@ -291,177 +536,42 @@ def parse_and_resolve_config(
         raw_cfg = load_config(config_path)
         config_source = config_path
     else:
-        raise ValueError(
-            "A configuration file path or configuration dictionary must be provided."
-        )
+        raise ValueError("A configuration file path or configuration dictionary must be provided.")
 
     resolved = flatten_config(raw_cfg)
-
-    # CLI overrides take highest precedence
     if args is not None:
-        if getattr(args, "solver", None) is not None:
-            resolved["solver_type"] = args.solver
-        if getattr(args, "structure_mode", None) is not None:
-            resolved["structure_mode"] = args.structure_mode
-        if getattr(args, "output", None) is not None:
-            resolved["output_dir"] = args.output
-        if getattr(args, "f_min", None) is not None:
-            resolved["f_min_disp_MHz"] = args.f_min
-        if getattr(args, "f_max", None) is not None:
-            resolved["f_max_disp_MHz"] = args.f_max
-        if getattr(args, "k_min", None) is not None:
-            resolved["k_min_disp"] = args.k_min
-        if getattr(args, "k_max", None) is not None:
-            resolved["k_max_disp"] = args.k_max
-        if getattr(args, "max_frequency", None) is not None:
-            resolved["max_frequency"] = args.max_frequency
-        if getattr(args, "duration", None) is not None:
-            resolved["duration"] = args.duration
-        if getattr(args, "dt", None) is not None:
-            resolved["dt"] = args.dt
-        if getattr(args, "cfl", None) is not None:
-            resolved["CFL"] = args.cfl
-        if getattr(args, "device", None) is not None:
-            resolved["device"] = args.device
-        if getattr(args, "precision", None) is not None:
-            resolved["precision"] = args.precision
-        if getattr(args, "no_postprocess", False):
-            resolved["run_postprocess"] = False
+        _apply_cli_overrides(resolved, args)
+    for key, value in DEFAULTS.items():
+        if resolved.get(key) is None:
+            resolved[key] = list(value) if isinstance(value, list) else value
 
-    # Numerical solver fallbacks
-    resolved.setdefault("solver_type", "explicit")
-    resolved.setdefault("device", "auto")
-    resolved.setdefault("precision", "double")
-    resolved.setdefault("CFL", 0.5)
-    resolved.setdefault("time_factor", 1.2)
-    resolved.setdefault("beta_val", 0.25)
-    resolved.setdefault("gamma_val", 0.5)
-    resolved.setdefault("elems_per_wavelength", 10)
-    resolved.setdefault("min_elems_x", 100)
-    resolved.setdefault("min_elems_y", 4)
-    resolved.setdefault("degree", 2)
-    resolved.setdefault("n_sensors", 301)
-    resolved.setdefault("sensor_offset", 0.05)
-    resolved.setdefault("sensor_pitch", 0.5e-3)
-    resolved.setdefault("traction_max", 1.0e6)
-    resolved.setdefault("excitation_width", 2.0e-3)
-    resolved.setdefault("source_fx", 0.0)
-    resolved.setdefault("source_fy", 1.0)
-    resolved.setdefault("target_snapshots", 200)
-    resolved.setdefault("write_vtx", False)
-    resolved.setdefault("run_postprocess", True)
-    resolved.setdefault("quick_plot", True)
-    resolved.setdefault("f_min_disp_MHz", 0.0)
-    resolved.setdefault("f_max_disp_MHz", 2.0)
-    resolved.setdefault("k_min_disp", 0.0)
-    resolved.setdefault("k_max_disp", 3.0)
-
-    # Required geometry & physical checks
-    if validate_simulation:
-        if "sensing_length" not in resolved:
-            raise ValueError(
-                f"Configuration '{config_source}' must specify 'geometry.sensing_length' (or 'sensing_length')."
-            )
-        if "absorb_length" not in resolved:
-            raise ValueError(
-                f"Configuration '{config_source}' must specify 'geometry.absorb_length' (or 'absorb_length')."
-            )
-        if "f_center" not in resolved:
-            raise ValueError(
-                f"Configuration '{config_source}' must specify 'excitation.f_center' (or 'f_center')."
-            )
-
-    if resolved.get("source_x") is None and "absorb_length" in resolved:
-        resolved["source_x"] = float(resolved["absorb_length"]) + 0.005
-
-    if resolved.get("bottom_halfspace") is None and "substrate" in resolved:
-        resolved["bottom_halfspace"] = resolved["substrate"]
-    if resolved.get("top_halfspace") is None and "superstrate" in resolved:
-        resolved["top_halfspace"] = resolved["superstrate"]
+    # Halfspace aliases
+    for alias, canonical in (("substrate", "bottom_halfspace"), ("superstrate", "top_halfspace")):
+        if resolved.get(alias) is not None:
+            if resolved.get(canonical) is not None:
+                raise ValueError(f"Specify only one of '{alias}' and '{canonical}'")
+            resolved[canonical] = resolved.pop(alias)
+        else:
+            resolved.pop(alias, None)
 
     resolved["_config_source"] = config_source
+    resolved["solver_type"] = str(resolved["solver_type"]).lower().strip()
+    if resolved["solver_type"] not in ("implicit", "explicit"):
+        raise ValueError("solver_type must be 'explicit' or 'implicit'")
+    try:
+        resolved["device"] = normalize_device_request(resolved["device"])
+    except ValueError:
+        raise ValueError(
+            f"Invalid device '{resolved['device']}'. Choose from: {DEVICE_CHOICES_HELP}."
+        ) from None
+    resolved["precision"] = str(resolved["precision"]).lower().strip()
+    if resolved["precision"] not in ("double", "single"):
+        raise ValueError(f"precision must be 'double' or 'single', got '{resolved['precision']}'")
+    resolved["structure_mode"] = canonicalize_mode(resolved["structure_mode"])
+
+    _validate_output_options(resolved)
     if validate_simulation:
-        positive = (
-            "sensing_length",
-            "absorb_length",
-            "f_center",
-            "excitation_width",
-            "sensor_pitch",
-            "CFL",
-            "time_factor",
-        )
-        for key in positive:
-            value = float(resolved[key])
-            if not np.isfinite(value) or value <= 0:
-                raise ValueError(f"{key} must be finite and positive")
-        for key in ("dt", "duration", "max_frequency"):
-            if resolved.get(key) is not None:
-                value = float(resolved[key])
-                if not np.isfinite(value) or value <= 0:
-                    raise ValueError(f"{key} must be finite and positive")
-                resolved[key] = value
-        for key, minimum in (
-            ("n_sensors", 2),
-            ("elems_per_wavelength", 1),
-            ("min_elems_x", 1),
-            ("min_elems_y", 1),
-            ("target_snapshots", 1),
-            ("degree", 1),
-        ):
-            value = resolved[key]
-            if not np.isfinite(value) or int(value) != value or value < minimum:
-                raise ValueError(f"{key} must be an integer >= {minimum}")
-        for key in (
-            "source_x",
-            "source_fx",
-            "source_fy",
-            "traction_max",
-            "sensor_offset",
-        ):
-            if not np.isfinite(float(resolved[key])):
-                raise ValueError(f"{key} must be finite")
-        if resolved["source_fx"] == resolved["source_fy"] == 0:
-            raise ValueError("Source direction cannot be zero")
-        for key in ("absorb_alpha", "absorb_beta"):
-            if resolved.get(key) is not None:
-                value = float(resolved[key])
-                if not np.isfinite(value) or value < 0:
-                    raise ValueError(f"{key} must be finite and nonnegative")
-        solver = str(resolved["solver_type"]).lower()
-        if solver not in ("implicit", "explicit"):
-            raise ValueError("solver_type must be explicit or implicit")
-        resolved["solver_type"] = solver
-        if solver == "explicit" and resolved["CFL"] > 1:
-            raise ValueError("Explicit CFL must be in (0, 1]")
-        beta, gamma = float(resolved["beta_val"]), float(resolved["gamma_val"])
-        if solver == "implicit" and (
-            not np.isfinite([beta, gamma]).all()
-            or gamma < 0.5
-            or beta < 0.25 * (gamma + 0.5) ** 2
-        ):
-            raise ValueError(
-                "Newmark requires gamma >= 0.5 and beta >= (gamma+0.5)^2/4"
-            )
-        length = 2 * resolved["absorb_length"] + resolved["sensing_length"]
-        if not 0 <= resolved["source_x"] <= length:
-            raise ValueError("source_x must be inside the domain")
-        sensor_start = resolved["source_x"] + resolved["sensor_offset"]
-        sensor_end = (
-            sensor_start + (resolved["n_sensors"] - 1) * resolved["sensor_pitch"]
-        )
-        if sensor_start < 0 or sensor_end > length:
-            raise ValueError("Sensor array must lie inside the domain")
-        if resolved["run_postprocess"] and resolved["n_sensors"] < 3:
-            raise ValueError("Postprocessing requires at least three sensors")
-    for low, high in (
-        ("f_min_disp_MHz", "f_max_disp_MHz"),
-        ("k_min_disp", "k_max_disp"),
-    ):
-        if (
-            not np.isfinite([resolved[low], resolved[high]]).all()
-            or not 0 <= resolved[low] < resolved[high]
-        ):
-            raise ValueError(f"Require 0 <= {low} < {high}, with finite limits")
+        _validate_simulation(resolved, config_source)
     return resolved
 
 
@@ -469,76 +579,85 @@ def parse_and_resolve_config(
 resolve_and_apply_config = parse_and_resolve_config
 
 
-def generate_template_config(output_path: str) -> None:
-    """Generate an annotated template configuration file in YAML format."""
-    template_content = """# ==============================================================================
+TEMPLATE_CONFIG = """# ==============================================================================
 # Guided Wave FEM Simulation Configuration Template
 # ==============================================================================
 
 solver:
-  type: "explicit"              # "explicit" (RK4) or "implicit" (Newmark-beta)
-  CFL: 0.5                      # Courant-Friedrichs-Lewy stability factor
-  time_factor: 1.2              # Total duration multiplier: T_total = time_factor * L / c_T
+  type: "explicit"              # "explicit" (lumped-mass RK4) or "implicit" (Newmark-beta)
+  CFL: 0.5                      # Fraction of the stability (explicit) / accuracy (implicit) step
+  time_factor: 1.2              # T = time_factor * sensing_length / c_slow (c_R or slowest speed)
   beta: 0.25                    # Newmark-beta (implicit only)
   gamma: 0.5                    # Newmark-gamma (implicit only)
-  dt: null                      # Optional requested maximum step [s]
+  dt: null                      # Optional maximum time step [s]
   duration: null                # Optional duration [s]; overrides time_factor
+  device: "auto"                # Explicit, single-process only: auto | cpu | cuda | cuda:N | mps
+  precision: "double"           # Explicit device engine: "double" or "single"
 
 geometry:
   sensing_length: 0.30          # [m] Pristine observation region length
   absorb_length: 0.15           # [m] 5th-order absorbing sponge width on lateral boundaries
 
 structure:
-  # Mode choices: "1_layer", "N_layers", "halfspace", "plate_on_halfspace", "plate_in_halfspaces"
+  # Modes: "1_layer", "N_layers", "halfspace", "plate_on_halfspace", "plate_in_halfspaces"
   mode: "1_layer"
-
-  # Single layer definition (mode: "1_layer")
   single_layer:
     name: "Aluminum Plate"
-    thickness: 1.0e-3           # [m] Layer thickness (1 mm)
-    material_model: "isotropic" # "isotropic", "anisotropic", or "viscoelastic"
-    rho: 2700.0                 # [kg/m³] Density
-    E: 70.0e9                   # [Pa] Young's modulus
-    nu: 0.33                    # [-] Poisson's ratio
+    thickness: 1.0e-3           # [m]
+    material_model: "isotropic" # "isotropic", "anisotropic", "viscoelastic", or "fluid"
+    rho: 2700.0                 # [kg/m^3]
+    E: 70.0e9                   # [Pa]
+    nu: 0.33                    # [-]
     min_elems_y: 6              # Minimum elements through thickness
 
 absorbing_boundaries:
-  alpha: null                   # [1/s] Peak mass-proportional damping (null = auto)
-  beta: null                    # [s] Peak stiffness-proportional damping (null = auto)
+  alpha: null                   # [1/s] Peak mass-proportional damping (null = 1e7 * f_center / 1 MHz)
+  beta: null                    # [s] Peak stiffness-proportional damping (null = 1e-9 * 1 MHz / f_center)
 
 excitation:
-  f_center: 1.0e6               # [Hz] Center frequency of Ricker wavelet
-  traction_max: 1.0e6           # [Pa] Surface load amplitude
-  excitation_width: 2.0e-3      # [m] Spatial Gaussian width
-  source_x: null                # [m] Excitation x-position (null = absorb_length + 5 mm)
-  source_fx: 1.0                # Horizontal traction vector component
-  source_fy: 1.0                # Vertical traction vector component
+  source_type: "ricker"         # "ricker" (broadband) or "tone_burst" (Hann-windowed, narrowband)
+  f_center: 1.0e6               # [Hz] Centre frequency
+  n_cycles: null                # tone_burst only: number of cycles (null = 5)
+  traction_max: 1.0e6           # [Pa] Peak traction amplitude
+  excitation_width: 2.0e-3      # [m] Spatial Gaussian width (≈ 6 sigma)
+  source_x: null                # [m] Source position (null = absorb_length + max(5 mm, excitation_width))
+  source_fx: 1.0                # Tangential traction component
+  source_fy: 1.0                # Normal traction component
 
 mesh:
-  elems_per_wavelength: 10      # Spatial discretization density
+  elems_per_wavelength: 10      # Elements (not nodes) per shortest physical wavelength
   min_elems_x: 100              # Longitudinal element floor
-  min_elems_y: 4                # Transverse element floor
-  degree: 2                     # Polynomial order (Q2 quadrilateral elements)
-  max_frequency: null           # [Hz] Mesh sizing frequency; default 3*f_center
+  min_elems_y: 4                # Element floor per region
+  degree: 2                     # Lagrange polynomial order (Q2 quadrilaterals)
+  max_frequency: null           # [Hz] Mesh sizing frequency (null = 3 * f_center)
 
 sensors:
   n_sensors: 401                # Measurement points
-  sensor_offset: 0.05           # [m] Distance from excitation to 1st sensor
-  sensor_pitch: 0.5e-3          # [m] Distance between sensors
+  sensor_offset: 0.05           # [m] Distance from source to first sensor
+  sensor_pitch: 0.5e-3          # [m] Sensor spacing
+  sensor_y: null                # [m] Sensor line height (null = loaded surface/interface)
 
 postprocess:
-  run_postprocess: true         # Compute 2D FFT dispersion analysis
-  f_min_disp_MHz: 0.0           # [MHz] Min frequency on dispersion axis
-  f_max_disp_MHz: 2.0           # [MHz] Max frequency on dispersion axis
-  k_min_disp: 0.0               # [rad/mm] Min wavenumber on dispersion axis
-  k_max_disp: 3.0               # [rad/mm] Max wavenumber on dispersion axis
+  run_postprocess: true         # 2D FFT dispersion analysis and figures
+  # Plot limits: SI numbers (Hz, rad/m) or strings with units ("2 MHz", "3 rad/mm").
+  f_min: null                   # null = 0
+  f_max: null                   # null = 2 * f_center
+  k_min: null                   # null = 0
+  k_max: null                   # null = 2*pi*f_max / slowest wave speed (capped at pi/pitch)
 
 output:
-  output_dir: null              # Result directory (null = auto: results_guided_waves_{solver})
-  write_vtx: false              # ADIOS2 VTX (.bp) Paraview export
-  target_snapshots: 200         # Target snapshot count
-  quick_plot: true              # Disabled together with --no-postprocess
+  output_dir: null              # null = results_guided_waves_{solver}
+  write_vtx: false              # ADIOS2 VTX (.bp) export for ParaView
+  target_snapshots: 200         # VTX snapshot count
+  quick_plot: true              # Overview figure (disabled by --no-postprocess)
+  compress_output: false        # Write sensor_data.npz with zlib compression
+  figure_formats: [png, pdf, svg, eps]
+  usetex: auto                  # auto (LaTeX if latex, dvipng, gs found) | true | false
 """
+
+
+def generate_template_config(output_path: str) -> None:
+    """Write the annotated YAML template configuration."""
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
-        f.write(template_content)
+        f.write(TEMPLATE_CONFIG)

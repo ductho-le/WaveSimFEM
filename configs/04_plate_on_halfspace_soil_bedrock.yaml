@@ -1,0 +1,99 @@
+# ==============================================================================
+# Example 04 - structure.mode: "plate_on_halfspace"
+# Soft soil layer over bedrock: seismic surface waves (MASW site characterisation)
+# ==============================================================================
+# Physics
+#   A 10 m soft soil layer (Vs = 200 m/s, Vp = 400 m/s) rests on a stiff bedrock
+#   halfspace (Vs = 1200 m/s, Vp = 2400 m/s). A vertical surface impact
+#   (sledgehammer / weight drop) generates dispersive Rayleigh waves: at low
+#   frequency the wavelength reaches into the bedrock and the phase velocity
+#   tends to the bedrock Rayleigh speed (~1.1 km/s); at high frequency it tends
+#   to the soil Rayleigh speed (~187 m/s). Higher Rayleigh modes appear above
+#   the layer resonance Vs / (4 h) = 5 Hz.
+#   Inverting this dispersion picture for the Vs profile is the basis of MASW,
+#   used for seismic site classification (Vs30) and geotechnical design.
+#
+# Scale awareness
+#   The same solver runs at seismic scale: figures and logs switch to s, m, Hz
+#   and rad/m automatically, and the sponge damping defaults scale with f_center.
+#
+# Truncation of the halfspace
+#   The bedrock is truncated at 90 m below the interface with a 60 m sponge.
+#   The impedance contrast (≈ 8) traps most energy in the soil layer; body waves
+#   leaking into the bedrock are long (λ_P ≈ 160 m at f0) and only partially
+#   absorbed, so treat late bedrock arrivals qualitatively.
+#
+# References
+#   - C. B. Park, R. D. Miller, J. Xia (1999), "Multichannel analysis of surface
+#     waves", Geophysics 64, 800-808.
+#   - S. Foti et al. (2018), "Guidelines for the good practice of surface wave
+#     analysis", Bull. Earthquake Eng. 16, 2367-2420.
+# ==============================================================================
+
+solver:
+  type: "explicit"
+  CFL: 0.5
+  time_factor: 1.2              # T = 1.2 * sensing_length / slowest speed + pulse length
+
+geometry:
+  sensing_length: 100.0         # [m]
+  absorb_length: 60.0           # [m] ≈ 4.5 soil Rayleigh wavelengths at f0
+
+structure:
+  mode: "plate_on_halfspace"
+  layers:
+    - name: "Soft soil (silty clay)"
+      thickness: 10.0           # [m]
+      material_model: "isotropic"
+      rho: 1800.0               # [kg/m^3]
+      E: 1.92e8                 # [Pa]  -> Vs = 200 m/s
+      nu: 0.3333333             # [-]   -> Vp = 2 Vs = 400 m/s
+
+  substrate:
+    name: "Bedrock (weathered granite)"
+    thickness: 90.0             # [m] Truncation depth below the interface
+    absorb_depth: 60.0          # [m] Bottom sponge
+    material_model: "isotropic"
+    rho: 2400.0                 # [kg/m^3]
+    E: 9.216e9                  # [Pa]  -> Vs = 1200 m/s
+    nu: 0.3333333               # [-]   -> Vp = 2400 m/s
+
+absorbing_boundaries:
+  alpha: null                   # null = 1e7 * f0 / 1 MHz = 150 1/s at 15 Hz (does the absorbing)
+  # The bedrock is meshed at soil resolution (Vp,rock / Vs,soil = 12), so its
+  # highest mesh frequencies are very high; the scaled default beta (6.7e-5 s)
+  # would then set the explicit step. 1e-5 s keeps the step wave-speed limited.
+  beta: 1.0e-5                  # [s]
+
+excitation:
+  source_type: "ricker"         # Broadband impact
+  f_center: 15.0                # [Hz]
+  traction_max: 1.0e4           # [Pa] 10 kPa over the impact plate
+  excitation_width: 3.0         # [m]
+  source_x: null                # [m] null = absorb_length + max(5 mm, excitation_width)
+  source_fx: 0.0                # Vertical impact
+  source_fy: 1.0
+
+mesh:
+  elems_per_wavelength: 6       # Q2 elements per soil shear wavelength at max_frequency
+  min_elems_x: 100              # (≈ 1.33 m elements; ≈ 10 per wavelength at f0)
+  min_elems_y: 4
+  degree: 2
+  max_frequency: 25.0           # [Hz]
+
+sensors:
+  n_sensors: 86                 # Geophone spread on the free surface
+  sensor_offset: 10.0           # [m] Near offset
+  sensor_pitch: 1.0             # [m] Geophone spacing -> Nyquist 3.1 rad/m
+
+postprocess:
+  run_postprocess: true
+  f_min: 0.0
+  f_max: "40 Hz"
+  k_min: 0.0
+  k_max: "1.2 rad/m"
+
+output:
+  output_dir: "results_04_plate_on_halfspace_soil_bedrock"
+  write_vtx: false
+  target_snapshots: 200

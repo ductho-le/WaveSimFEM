@@ -1,0 +1,77 @@
+# ==============================================================================
+# Example 03 - structure.mode: "halfspace"
+# Rayleigh surface waves on steel (rail / weld / surface-crack NDE)
+# ==============================================================================
+# Physics
+#   A normal surface load on a semi-infinite steel body (Lamb's problem)
+#   radiates P and S body waves into the depth and a non-dispersive Rayleigh
+#   surface wave that carries most of the energy along the surface:
+#     c_L ≈ 5.92 km/s, c_T ≈ 3.22 km/s, c_R ≈ 2.98 km/s (nu = 0.29).
+#   The Rayleigh wave is confined to about one wavelength (≈ 3 mm at 1 MHz)
+#   below the surface, so it is sensitive to near-surface defects such as rolling
+#   contact fatigue cracks in rail heads. The 2D-FFT shows a straight line
+#   f = c_R k / (2 pi) through the origin.
+#
+# Truncation of the halfspace
+#   The depth is truncated at 20 mm: 8 mm physical zone (> 2.5 lambda_R at f0)
+#   above a 12 mm absorbing sponge (≈ 2 P-wavelengths at f0). Low-frequency
+#   bulk waves are only partially absorbed; this does not affect the surface wave.
+#
+# References
+#   - I. A. Viktorov (1967), Rayleigh and Lamb Waves, Plenum Press.
+#   - D. Hesse, P. Cawley (2006), "Surface wave modes in rails",
+#     J. Acoust. Soc. Am. 120, 733-740.
+# ==============================================================================
+
+solver:
+  type: "explicit"
+  CFL: 0.5
+  time_factor: 1.2              # T = 1.2 * sensing_length / c_R + pulse length
+
+geometry:
+  sensing_length: 0.07          # [m] 70 mm along the surface
+  absorb_length: 0.03           # [m] 30 mm lateral sponges (10 Rayleigh wavelengths)
+
+structure:
+  mode: "halfspace"
+  halfspace:
+    name: "Rail steel"
+    thickness: 20.0e-3          # [m] Truncation depth
+    absorb_depth: 12.0e-3       # [m] Bottom sponge inside the truncation depth
+    material_model: "isotropic"
+    rho: 7850.0                 # [kg/m^3]
+    E: 210.0e9                  # [Pa]
+    nu: 0.29                    # [-]
+
+excitation:
+  source_type: "ricker"
+  f_center: 1.0e6               # [Hz] 1 MHz (typical angle-beam/wedge frequency)
+  traction_max: 1.0e6           # [Pa]
+  excitation_width: 2.0e-3      # [m]
+  source_x: null                # [m] null = absorb_length + max(5 mm, excitation_width)
+  source_fx: 0.0                # Normal point-like load (Lamb's problem)
+  source_fy: 1.0
+
+mesh:
+  elems_per_wavelength: 8       # Per shear wavelength at max_frequency
+  min_elems_x: 100
+  min_elems_y: 4
+  degree: 2
+  max_frequency: 1.5e6          # [Hz]
+
+sensors:
+  n_sensors: 91                 # Surface (y = 0) receivers, 45 mm array
+  sensor_offset: 0.01           # [m] 10 mm
+  sensor_pitch: 0.5e-3          # [m]
+
+postprocess:
+  run_postprocess: true
+  f_min: 0.0
+  f_max: "2 MHz"
+  k_min: 0.0
+  k_max: "4.5 rad/mm"           # k_R(2 MHz) ≈ 4.2 rad/mm
+
+output:
+  output_dir: "results_03_halfspace_steel_rayleigh"
+  write_vtx: false
+  target_snapshots: 200

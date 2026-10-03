@@ -2,21 +2,20 @@ name: fenicsx-waves
 channels:
   - conda-forge
 dependencies:
+  # Runtime
   - python=3.11
   - fenics-dolfinx=0.10.0
   - petsc=3.24.*
   - petsc4py=3.24.*
   - mpi4py
   - mpich
-  - pyvista
-  - matplotlib
-  - scipy
   - numpy
-  - h5py
-  - tqdm
-  - ipython
-  - gmsh
+  - scipy
+  - matplotlib
   - pyyaml>=6
+  # Development / CI
   - pytest>=8
+  - pytest-cov
   - ruff
+  - python-build
   - pip

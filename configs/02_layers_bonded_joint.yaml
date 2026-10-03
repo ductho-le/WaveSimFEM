@@ -1,0 +1,104 @@
+# ==============================================================================
+# Example 02 - structure.mode: "N_layers"
+# Adhesively bonded aluminium joint, Al / epoxy / Al (aerospace NDE of bonds)
+# ==============================================================================
+# Physics
+#   Two 1 mm aluminium-alloy adherends bonded by a 0.2 mm epoxy adhesive form a
+#   three-layer waveguide in vacuum. The guided modes of the joint depend on the
+#   adhesive thickness and stiffness, and the viscoelastic adhesive attenuates
+#   modes whose energy is concentrated in the bond line, which is why guided
+#   waves are used to assess bond quality (cohesive/adhesive weakness).
+#
+#   A narrowband 5-cycle Hann tone burst at 300 kHz (f*d ≈ 0.66 MHz*mm) is the
+#   standard SHM excitation: it limits dispersion and keeps the response
+#   dominated by the two fundamental modes, so individual wave packets can be
+#   followed in the B-scan.
+#
+# Adhesive model (Kelvin-Voigt)
+#   Epoxy: rho = 1200 kg/m^3, E ≈ 4.0 GPa, nu ≈ 0.39 -> c_L ≈ 2.60 km/s,
+#   c_T ≈ 1.10 km/s. Viscosity Cv = eta * C with eta = tan(delta) / (2 pi f0),
+#   tan(delta) = 0.05 at f0 = 300 kHz -> eta = 2.65e-8 s. Recompute Cv if f_center
+#   is changed so the loss factor at f0 stays 0.05.
+#
+# Boundary conditions
+#   Top and bottom traction-free; normal Gaussian load on the top adherend;
+#   perfectly bonded interfaces; lateral sponges.
+#
+# References
+#   - M. J. S. Lowe, R. E. Challis, C. W. Chan (2000), "The transmission of Lamb
+#     waves across adhesively bonded lap joints", J. Acoust. Soc. Am. 107, 1333-1345.
+#   - P. B. Nagy, L. Adler (1989), "Nondestructive evaluation of adhesive joints
+#     by guided waves", J. Appl. Phys. 66, 4658-4663.
+# ==============================================================================
+
+solver:
+  # Implicit Newmark-beta (unconditionally stable): Kelvin-Voigt damping grows with
+  # frequency, so in the explicit solver the adhesive viscosity would cap the step
+  # about 4x below the wave-speed limit. Newmark is limited only by accuracy here.
+  type: "implicit"
+  CFL: 0.5                      # Accuracy step fraction (h_min / c_L,max)
+  duration: 90.0e-6             # [s] A0 needs ~45 us to cross the array + 16.7 us pulse
+
+geometry:
+  sensing_length: 0.12          # [m] 120 mm
+  absorb_length: 0.06           # [m] 60 mm (≈ 7 A0 wavelengths at f0)
+
+structure:
+  mode: "N_layers"              # Layers are listed bottom -> top
+  layers:
+    - name: "Aluminium adherend, bottom (2024-T3)"
+      thickness: 1.0e-3         # [m]
+      material_model: "isotropic"
+      rho: 2780.0               # [kg/m^3]
+      E: 73.1e9                 # [Pa]
+      nu: 0.33
+
+    - name: "Epoxy adhesive"
+      thickness: 0.2e-3         # [m] 0.2 mm bond line
+      material_model: "viscoelastic"
+      rho: 1200.0               # [kg/m^3]
+      # Plane-strain Voigt order [C11, C12, C16, C22, C26, C66]
+      C: [8.112e9, 5.208e9, 0.0, 8.112e9, 0.0, 1.452e9]   # [Pa]
+      Cv: [215.2, 138.2, 0.0, 215.2, 0.0, 38.5]            # [Pa*s] = 2.65e-8 s * C
+      min_elems_y: 2
+
+    - name: "Aluminium adherend, top (2024-T3)"
+      thickness: 1.0e-3         # [m]
+      material_model: "isotropic"
+      rho: 2780.0
+      E: 73.1e9
+      nu: 0.33
+
+excitation:
+  source_type: "tone_burst"     # Hann-windowed sine burst (narrowband, mode-selective)
+  n_cycles: 5                   # -6 dB bandwidth ≈ 2/5 of f0
+  f_center: 300.0e3             # [Hz] 300 kHz
+  traction_max: 1.0e6           # [Pa]
+  excitation_width: 2.0e-3      # [m]
+  source_x: null                # [m] null = absorb_length + max(5 mm, excitation_width)
+  source_fx: 0.0                # Pure normal load (piezo wafer / contact transducer)
+  source_fy: 1.0
+
+mesh:
+  elems_per_wavelength: 8       # Per shortest wavelength (epoxy shear, ≈ 1.8 mm at 600 kHz)
+  min_elems_x: 100
+  min_elems_y: 4
+  degree: 2
+  max_frequency: 600.0e3        # [Hz] 2 * f0 covers the tone-burst spectrum
+
+sensors:
+  n_sensors: 201                # Top surface, 100 mm array
+  sensor_offset: 0.01           # [m] 10 mm
+  sensor_pitch: 0.5e-3          # [m]
+
+postprocess:
+  run_postprocess: true
+  f_min: 0.0
+  f_max: "700 kHz"
+  k_min: 0.0
+  k_max: "3 rad/mm"
+
+output:
+  output_dir: "results_02_layers_bonded_joint"
+  write_vtx: false
+  target_snapshots: 200

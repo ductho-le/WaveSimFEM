@@ -1,0 +1,66 @@
+# Install once with `pre-commit install`; run everything with `pre-commit run --all-files`.
+# Hooks run in file order: the junk guard first (fail fast), the junk cleaner last (so it
+# also removes caches created by earlier hooks, e.g. .ruff_cache/).
+repos:
+  - repo: local
+    hooks:
+      # Refuse to commit junk that was staged (e.g. with `git add -f`). Keep in sync with
+      # the patterns in tools/clean_junk.py.
+      - id: forbid-junk
+        name: forbid committing junk files
+        entry: >-
+          Junk files must not be committed; unstage them with `git rm --cached <path>`
+        language: fail
+        files: |
+          (?x)(
+              (^|/)__pycache__/
+            | \.py[co]$
+            | (^|/)\.(pytest|ruff|mypy)_cache/
+            | (^|/)\.ipynb_checkpoints/
+            | (^|/)htmlcov/
+            | (^|/)\.eggs/
+            | \.egg-info/
+            | ^(build|dist)/
+            | (^|/)\.DS_Store$
+            | (^|/)\._[^/]+$
+            | (^|/)(Thumbs|ehthumbs)\.db$
+            | (^|/)[Dd]esktop\.ini$
+            | \.sw[po]$
+            | ~$
+            | (^|/)\.coverage(\.[^/]+)?$
+            | (^|/)coverage\.xml$
+          )
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+      - id: check-merge-conflict
+      - id: check-case-conflict
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.9  # keep in sync with the ruff pin in .github/workflows/tests.yml
+    hooks:
+      - id: ruff-check
+        args: ["--fix"]
+      - id: ruff-format
+
+  # Keep this block LAST so it also removes junk produced by the hooks above.
+  - repo: local
+    hooks:
+      # Delete regenerable junk (caches, build artifacts, coverage, OS/editor files) from the
+      # working tree. Never touches results_*, *.npz, envs, .dev, or Git-tracked files.
+      # Manual use: `pre-commit run clean-junk` or `python tools/clean_junk.py [--dry-run]`.
+      - id: clean-junk
+        name: clean junk files and folders
+        entry: python tools/clean_junk.py --quiet
+        language: python
+        pass_filenames: false
+        always_run: true
+        stages: [pre-commit, manual]

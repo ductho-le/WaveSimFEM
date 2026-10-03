@@ -5,25 +5,54 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections.abc import Sequence
+from typing import NoReturn
 
 from mpi4py import MPI
 
-from guidedwavefem.analysis import plot_full_analysis
+from guidedwavefem import __version__
 from guidedwavefem.config import generate_template_config, parse_and_resolve_config
-from guidedwavefem.materials import log, preflight_estimate
+from guidedwavefem.device import DEVICE_CHOICES_HELP, DeviceUnavailableError
+from guidedwavefem.materials import STRUCTURE_MODES, preflight_estimate
+from guidedwavefem.reporting import log, set_verbosity
 from guidedwavefem.solvers import mpi_fail_fast, run_simulation
 
 comm = MPI.COMM_WORLD
 rank = comm.rank
 
+_MISSING_CONFIG_MESSAGE = (
+    "\n" + "=" * 70 + "\nERROR: Configuration file is required to run simulation.\n"
+    "Please provide a YAML/TOML/JSON configuration file using:\n"
+    "    guided-waves -c configs/01_plate_aluminum_lamb.yaml\n\n"
+    "Or generate a template configuration with:\n"
+    "    guided-waves --generate-config my_config.yaml\n" + "=" * 70 + "\n"
+)
 
-@mpi_fail_fast
-def main() -> None:
-    """Parse command-line arguments and orchestrate simulation and post-processing."""
+#: Exit status for invalid user input (unreadable or invalid configuration, missing files).
+EXIT_USAGE = 2
+#: Exit status when an explicitly requested compute device is unavailable.
+EXIT_DEVICE_UNAVAILABLE = 3
+
+
+def _exit_with_error(
+    message: str, code: int, *, exc: BaseException | None = None, verbose: bool = False
+) -> NoReturn:
+    """Report a user-facing error on rank 0 and exit; in verbose mode re-raise ``exc``."""
+    if verbose and exc is not None:
+        raise exc
+    if rank == 0:
+        print(f"guided-waves: error: {message}", file=sys.stderr)
+    sys.exit(code)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    """Construct the ``guided-waves`` argument parser."""
     parser = argparse.ArgumentParser(
+        prog="guided-waves",
         description="Unified Guided Wave FEM Simulation & Dispersion Extraction",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        epilog="Options left unset fall back to the configuration file, then built-in defaults.",
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
         "-c",
         "--config",
@@ -42,29 +71,24 @@ def main() -> None:
         "--solver",
         choices=["implicit", "explicit"],
         default=None,
-        help="Time integration solver scheme override ('implicit' or 'explicit')",
+        help="Time integration solver scheme override",
     )
     parser.add_argument(
         "--device",
         type=str,
         default=None,
-        help="Compute device for explicit solver ('auto', 'cuda', 'cuda:0', 'mps', 'cpu')",
+        help=f"Compute device for the explicit solver ({DEVICE_CHOICES_HELP}). "
+        "'auto' falls back to CPU; an explicit GPU request fails if unavailable",
     )
     parser.add_argument(
         "--precision",
         choices=["double", "single"],
         default=None,
-        help="Floating point precision for explicit solver ('double' or 'single')",
+        help="Floating point precision for the single-process explicit engine",
     )
     parser.add_argument(
         "--structure-mode",
-        choices=[
-            "1_layer",
-            "N_layers",
-            "halfspace",
-            "plate_on_halfspace",
-            "plate_in_halfspaces",
-        ],
+        choices=list(STRUCTURE_MODES),
         default=None,
         help="Structural configuration mode override",
     )
@@ -78,67 +102,65 @@ def main() -> None:
         "--postprocess",
         type=str,
         default=None,
+        metavar="NPZ",
         help="Path to existing sensor_data.npz file to run signal processing without simulation",
     )
-    parser.add_argument(
-        "--f-min",
-        type=float,
-        default=None,
-        help="Minimum frequency override for dispersion extraction (MHz)",
-    )
-    parser.add_argument(
-        "--f-max",
-        type=float,
-        default=None,
-        help="Maximum frequency override for dispersion extraction (MHz)",
-    )
-    parser.add_argument(
-        "--k-min",
-        type=float,
-        default=None,
-        help="Minimum wavenumber override for dispersion extraction (rad/mm)",
-    )
-    parser.add_argument(
-        "--k-max",
-        type=float,
-        default=None,
-        help="Maximum wavenumber override for dispersion extraction (rad/mm)",
-    )
+    for flag, what, example in (
+        ("--f-min", "minimum frequency", "0"),
+        ("--f-max", "maximum frequency", "2MHz"),
+        ("--k-min", "minimum wavenumber", "0"),
+        ("--k-max", "maximum wavenumber", "3rad/mm"),
+    ):
+        parser.add_argument(
+            flag,
+            type=str,
+            default=None,
+            metavar="Q",
+            help=f"Dispersion plot {what}; SI number (Hz, rad/m) or with a unit, e.g. {example}",
+        )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Compute and display preflight mesh, DOF, step, and memory estimates, then exit without executing simulation",
+        help="Print preflight mesh, DOF, time-step, and memory estimates, then exit "
+        "(requires -c/--config)",
     )
     parser.add_argument(
         "--max-frequency",
         type=float,
         default=None,
-        help="Mesh sizing frequency override [Hz] (defaults to 3*f_center in config)",
+        help="Mesh sizing frequency override [Hz] (defaults to 3*f_center)",
     )
     parser.add_argument(
-        "--duration",
-        type=float,
-        default=None,
-        help="Total simulation duration override [s]",
+        "--duration", type=float, default=None, help="Total simulation duration override [s]"
     )
+    parser.add_argument("--dt", type=float, default=None, help="Maximum time-step override [s]")
     parser.add_argument(
-        "--dt",
-        type=float,
-        default=None,
-        help="Maximum time-step limit override [s]",
-    )
-    parser.add_argument(
-        "--cfl",
-        type=float,
-        default=None,
-        help="Courant-Friedrichs-Lewy (CFL) stability factor override",
+        "--cfl", type=float, default=None, help="Courant-Friedrichs-Lewy (CFL) factor override"
     )
     parser.add_argument(
         "--no-postprocess",
         action="store_true",
         help="Disable automated post-processing and figure generation",
     )
-    args = parser.parse_args()
+    verbosity = parser.add_mutually_exclusive_group()
+    verbosity.add_argument(
+        "-q", "--quiet", action="store_true", help="Only print warnings and errors"
+    )
+    verbosity.add_argument(
+        "-v", "--verbose", action="store_true", help="Print debug-level diagnostics"
+    )
+    return parser
+
+
+@mpi_fail_fast
+def main(argv: Sequence[str] | None = None) -> None:
+    """Parse command-line arguments and orchestrate simulation and post-processing."""
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.quiet:
+        set_verbosity("WARNING")
+    elif args.verbose:
+        set_verbosity("DEBUG")
 
     # Fast template generation path
     if args.generate_config:
@@ -148,33 +170,31 @@ def main() -> None:
         comm.Barrier()
         return
 
-    # Check for mandatory config when running simulation
-    if not args.postprocess and not args.config:
+    # A configuration file is mandatory for simulation and dry runs
+    if not args.config and (args.dry_run or not args.postprocess):
         if rank == 0:
-            parser.print_help()
-            log(
-                "\n"
-                + "=" * 70
-                + "\nERROR: Configuration file is required to run simulation.\n"
-                "Please provide a YAML/TOML/JSON configuration file using:\n"
-                "    guided-waves -c configs/01_single_layer_aluminum.yaml\n\n"
-                "Or generate a template configuration with:\n"
-                "    guided-waves --generate-config my_config.yaml\n"
-                + "=" * 70
-                + "\n"
-            )
-        sys.exit(1)
+            if args.dry_run:
+                parser.print_usage(sys.stderr)
+                print("guided-waves: error: --dry-run requires -c/--config", file=sys.stderr)
+            else:
+                parser.print_help()
+                print(_MISSING_CONFIG_MESSAGE, file=sys.stderr)
+        sys.exit(2 if args.dry_run else 1)
 
-    # Resolve active configuration across Defaults -> File -> CLI overrides
-    if args.config:
-        cfg = parse_and_resolve_config(
-            config_path=args.config, args=args, validate_simulation=not args.postprocess
-        )
-    else:
-        cfg = {"run_postprocess": True}
+    # Resolve active configuration across Defaults -> File -> CLI overrides. Resolution is
+    # deterministic, so every MPI rank reaches the same outcome and exits consistently.
+    try:
+        if args.config:
+            cfg = parse_and_resolve_config(
+                config_path=args.config, args=args, validate_simulation=not args.postprocess
+            )
+        else:  # postprocess-only: defaults + CLI overrides; unset plot limits come from the archive
+            cfg = parse_and_resolve_config(custom_cfg={}, args=args, validate_simulation=False)
+    except (OSError, ValueError, TypeError) as exc:
+        _exit_with_error(f"invalid configuration: {exc}", EXIT_USAGE, exc=exc, verbose=args.verbose)
 
     # Preflight dry-run path
-    if getattr(args, "dry_run", False):
+    if args.dry_run:
         preflight_estimate(cfg, rank=rank)
         if rank == 0:
             log("\n  Dry run complete: preflight estimation finished successfully.")
@@ -184,29 +204,29 @@ def main() -> None:
 
     # Step 1: Simulation (if not postprocess-only)
     if args.postprocess:
+        if not os.path.isfile(args.postprocess):
+            _exit_with_error(f"sensor data file not found: {args.postprocess}", EXIT_USAGE)
         sensor_data_file = args.postprocess
         out_dir = args.output or os.path.dirname(sensor_data_file) or "."
     else:
-        sensor_data_file, out_dir = run_simulation(args, cfg=cfg)
+        try:
+            sensor_data_file, out_dir = run_simulation(args, cfg=cfg)
+        except DeviceUnavailableError as exc:
+            _exit_with_error(str(exc), EXIT_DEVICE_UNAVAILABLE, exc=exc, verbose=args.verbose)
 
     # Step 2: Signal Processing (Rank 0 only)
     if rank == 0:
-        if cfg.get("run_postprocess", True) and not args.no_postprocess:
+        if cfg["run_postprocess"] and not args.no_postprocess:
+            from guidedwavefem.analysis import plot_full_analysis
+
+            # SI limits (Hz, rad/m); None falls back to the archive's stored limits.
+            limits = {name: cfg[f"disp_{name}"] for name in ("f_min", "f_max", "k_min", "k_max")}
             plot_full_analysis(
                 sensor_data_file,
                 output_dir=out_dir,
-                f_min_disp_MHz=args.f_min
-                if args.f_min is not None
-                else cfg.get("f_min_disp_MHz"),
-                f_max_disp_MHz=args.f_max
-                if args.f_max is not None
-                else cfg.get("f_max_disp_MHz"),
-                k_min_disp=args.k_min
-                if args.k_min is not None
-                else cfg.get("k_min_disp"),
-                k_max_disp=args.k_max
-                if args.k_max is not None
-                else cfg.get("k_max_disp"),
+                **limits,
+                formats=cfg["figure_formats"],
+                usetex=cfg["usetex"],
             )
 
         log(f"\n{'═' * 58}")

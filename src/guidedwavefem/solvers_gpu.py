@@ -1,664 +1,509 @@
-"""High-performance, zero-copy GPU and accelerated device explicit solvers.
+"""Single-process explicit RK4 engine for CPU (SciPy), CUDA (CuPy/PyTorch) and MPS.
 
-Implements the zero-transfer full-offloading principle (Trotter et al. 2023),
-the precision guidelines for wave propagation (Komatitsch et al. 2010),
-the pinned memory telemetry throughput optimizations (Li et al. 2026),
-and the element-wise coalesced vector update strategies (Cao et al. 2026).
+Design
+------
+* **One integrator, many backends.** The RK4 recurrence is written once
+  (:func:`integrate_explicit_rk4`) against a minimal backend protocol
+  (sparse mat-vec, fused-free axpy updates, host transfer). Backends differ
+  only in their array library.
+* **Stacked operator.** The state ``z = [u; v]`` is advanced with a single
+  sparse product ``[K | C] @ z`` per stage instead of two.
+* **Allocation-free stages.** All stage vectors are preallocated; updates use
+  ``out=``/in-place operations.
+* **Device-resident telemetry.** Sensor samples are written into a bounded
+  on-device ring buffer and flushed to host memory in large chunks, so there is
+  no host synchronization per time step.
+* **Lazy imports.** CuPy/PyTorch are only imported when their backend is used.
+
+The distributed (MPI) explicit solver uses :func:`guidedwavefem.numerics.rk4_step`
+with PETSc operators; both implement the identical scheme.
 """
 
 from __future__ import annotations
 
+import contextlib
 import time as pytime
-from typing import TYPE_CHECKING, Callable
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
 import numpy as np
 import scipy.sparse as sp
 
 if TYPE_CHECKING:
     import dolfinx
+
     from guidedwavefem.device import DeviceInfo
 
+CsrLike = sp.spmatrix | sp.sparray | tuple[np.ndarray, np.ndarray, np.ndarray]
+SnapshotCallback = Callable[[int, float, np.ndarray], None]
+
+DEFAULT_HISTORY_CHUNK_BYTES = 64 * 1024**2
+
+
 # ---------------------------------------------------------------------------
-# Lazy Optional Imports
+# Sensor interpolation operator
 # ---------------------------------------------------------------------------
-try:
-    import cupy as cp
-    import cupyx.scipy.sparse as cp_sparse
-
-    HAS_CUPY = True
-except (ImportError, Exception):
-    HAS_CUPY = False
-    cp = None
-    cp_sparse = None
-
-try:
-    import torch
-
-    HAS_TORCH = True
-except (ImportError, Exception):
-    HAS_TORCH = False
-    torch = None
-
-# Fused Elementwise CUDA kernel for CuPy (4-stage RK4 update in a single pass)
-if HAS_CUPY:
-    try:
-        _cupy_rk4_fused_update = cp.ElementwiseKernel(
-            "T u, T v, T k1u, T k2u, T k3u, T k4u, T k1v, T k2v, T k3v, T k4v, T dt",
-            "T u_out, T v_out",
-            """
-            u_out = u + (dt / (T)6.0) * (k1u + (T)2.0 * k2u + (T)2.0 * k3u + k4u);
-            v_out = v + (dt / (T)6.0) * (k1v + (T)2.0 * k2v + (T)2.0 * k3v + k4v);
-            """,
-            "rk4_fused_update",
-        )
-    except Exception:
-        _cupy_rk4_fused_update = None
-else:
-    _cupy_rk4_fused_update = None
-
-
 def build_sensor_interpolation_matrix(
     V: dolfinx.fem.FunctionSpace,
     points: np.ndarray,
     active_cells: list[int] | np.ndarray,
     n_owned_dofs: int,
 ) -> sp.csr_matrix:
-    """Precompute the exact sparse interpolation matrix for point sensor sampling.
+    """Exact sparse point-evaluation operator ``S`` with ``S @ u = u(points)``.
 
-    Evaluates exact finite element basis function weights at each sensor point,
-    transforming point sensor evaluation into a single sparse matrix-vector
-    multiplication S.dot(u) that can be executed directly on device VRAM.
-
-    Parameters
-    ----------
-    V : dolfinx.fem.FunctionSpace
-        Vector displacement function space.
-    points : np.ndarray
-        Array of sensor probe coordinates (N_sensors, 3).
-    active_cells : Sequence[int]
-        Cell indices containing each sensor point (-1 if not on this rank).
-    n_owned_dofs : int
-        Number of owned scalar DOFs.
-
-    Returns
-    -------
-    scipy.sparse.csr_matrix
-        Interpolation operator of shape (2 * n_sensors, n_owned_dofs).
-        Row 2*i corresponds to x-displacement, row 2*i + 1 to y-displacement.
+    Row ``2i`` returns the x-displacement and row ``2i + 1`` the y-displacement
+    of sensor ``i``. Basis weights are obtained from DOLFINx point evaluation.
+    Cells are greedily coloured so that cells sharing a DOF are never probed in
+    the same batch; the number of ``eval`` calls is therefore
+    ``n_colours × n_cell_dofs × block_size`` rather than per sensor and DOF.
     """
     import dolfinx
 
-    bs = V.dofmap.index_map_bs
+    points = np.asarray(points, dtype=float).reshape(-1, 3)
+    cells = np.asarray(active_cells, dtype=np.int32)
     n_pts = len(points)
-    if n_pts == 0 or len(active_cells) == 0:
+    if n_pts == 0:
         return sp.csr_matrix((0, n_owned_dofs), dtype=np.float64)
+    if np.any(cells < 0):
+        raise ValueError("All sensor points must have a valid local cell")
 
-    u_tmp = dolfinx.fem.Function(V)
-    u_tmp.x.array[:] = 0.0
-    rows: list[int] = []
-    cols: list[int] = []
-    data: list[float] = []
+    bs = V.dofmap.index_map_bs
+    unique_cells = np.unique(cells)
+    cell_nodes = {int(c): np.asarray(V.dofmap.cell_dofs(int(c))) for c in unique_cells}
 
-    for pt_idx, (pt, c) in enumerate(zip(points, active_cells)):
-        if c < 0:
-            continue
-        cell_dofs = V.dofmap.cell_dofs(c)
-        for nd in cell_dofs:
+    # Greedy colouring: cells within a colour share no DOF nodes.
+    colour_nodes: list[set[int]] = []
+    colour_of: dict[int, int] = {}
+    for c in unique_cells:
+        nodes = set(cell_nodes[int(c)].tolist())
+        for k, used in enumerate(colour_nodes):
+            if used.isdisjoint(nodes):
+                used.update(nodes)
+                colour_of[int(c)] = k
+                break
+        else:
+            colour_nodes.append(nodes)
+            colour_of[int(c)] = len(colour_nodes) - 1
+
+    probe = dolfinx.fem.Function(V)
+    n_cell_nodes = len(next(iter(cell_nodes.values())))
+    rows: list[np.ndarray] = []
+    cols: list[np.ndarray] = []
+    data: list[np.ndarray] = []
+    point_colour = np.array([colour_of[int(c)] for c in cells])
+
+    for k in range(len(colour_nodes)):
+        sel = np.flatnonzero(point_colour == k)
+        sel_cells = cells[sel]
+        node_table = np.stack([cell_nodes[int(c)] for c in sel_cells])  # (m, n_cell_nodes)
+        group_cells = np.unique(sel_cells)
+        group_nodes = np.stack([cell_nodes[int(c)] for c in group_cells])
+        for j in range(n_cell_nodes):
             for comp in range(bs):
-                scalar_dof = nd * bs + comp
-                if scalar_dof < n_owned_dofs:
-                    u_tmp.x.array[scalar_dof] = 1.0
-                    val = u_tmp.eval(np.array([pt]), [c])
-                    u_tmp.x.array[scalar_dof] = 0.0
-                    if abs(val[0]) > 1e-14:
-                        rows.append(2 * pt_idx)
-                        cols.append(scalar_dof)
-                        data.append(float(val[0]))
-                    if abs(val[1]) > 1e-14:
-                        rows.append(2 * pt_idx + 1)
-                        cols.append(scalar_dof)
-                        data.append(float(val[1]))
+                probe.x.array[:] = 0.0
+                probe.x.array[group_nodes[:, j] * bs + comp] = 1.0
+                values = probe.eval(points[sel], sel_cells).reshape(len(sel), -1)
+                dofs = node_table[:, j] * bs + comp
+                owned = dofs < n_owned_dofs
+                for out_comp in range(2):
+                    w = values[:, out_comp]
+                    keep = owned & (np.abs(w) > 1e-14)
+                    rows.append(2 * sel[keep] + out_comp)
+                    cols.append(dofs[keep])
+                    data.append(w[keep])
 
     return sp.csr_matrix(
-        (data, (rows, cols)), shape=(2 * n_pts, n_owned_dofs), dtype=np.float64
+        (np.concatenate(data), (np.concatenate(rows), np.concatenate(cols))),
+        shape=(2 * n_pts, n_owned_dofs),
+        dtype=np.float64,
     )
 
 
 # ---------------------------------------------------------------------------
-# Backend 1: CuPy (NVIDIA CUDA)
+# Backends
 # ---------------------------------------------------------------------------
-def solve_explicit_rk4_cupy(
-    K_csr: tuple[np.ndarray, np.ndarray, np.ndarray],  # (indptr, indices, data)
-    C_csr: tuple[np.ndarray, np.ndarray, np.ndarray],
-    M_inv_np: np.ndarray,
-    f_spatial_np: np.ndarray,
-    sensor_mat_csr: sp.csr_matrix,
-    dt: float,
-    Nsteps: int,
-    source_func: Callable[[float], float],
+class _NumpyLikeBackend:
+    """Backend for array libraries following the NumPy ufunc API (NumPy, CuPy)."""
+
+    name = "scipy"
+
+    def __init__(self, dtype: np.dtype) -> None:
+        self.dtype = np.dtype(dtype)
+        self.xp: Any = np
+
+    # -- lifecycle -----------------------------------------------------------
+    def context(self) -> contextlib.AbstractContextManager[Any]:
+        # Divergence is reported by the periodic finite check, not per-op warnings.
+        return np.errstate(over="ignore", invalid="ignore")
+
+    def synchronize(self) -> None:
+        return None
+
+    # -- data movement -------------------------------------------------------
+    def from_host(self, array: np.ndarray) -> Any:
+        return self.xp.asarray(np.ascontiguousarray(array, dtype=self.dtype))
+
+    def csr(self, matrix: sp.csr_matrix) -> Any:
+        return sp.csr_matrix(matrix, dtype=self.dtype)
+
+    def zeros(self, shape: int | tuple[int, ...]) -> Any:
+        return self.xp.zeros(shape, dtype=self.dtype)
+
+    def to_host(self, array: Any) -> np.ndarray:
+        return np.array(array, copy=True)
+
+    # -- arithmetic ----------------------------------------------------------
+    def spmv(self, matrix: Any, vector: Any) -> Any:
+        return matrix @ vector
+
+    def axpy(self, out: Any, x: Any, a: float, y: Any) -> None:
+        """``out = x + a*y`` (``out`` must not alias ``x`` or ``y``)."""
+        self.xp.multiply(y, a, out=out)
+        self.xp.add(out, x, out=out)
+
+    def add_scaled(self, acc: Any, a: float, y: Any, scratch: Any) -> None:
+        """``acc += a*y`` using ``scratch`` (same shape) as workspace."""
+        self.xp.multiply(y, a, out=scratch)
+        self.xp.add(acc, scratch, out=acc)
+
+    def force_balance(self, out: Any, f: float, load: Any, r: Any, inv_mass: Any) -> None:
+        """``out = (f*load - r) * inv_mass``."""
+        self.xp.multiply(load, f, out=out)
+        self.xp.subtract(out, r, out=out)
+        self.xp.multiply(out, inv_mass, out=out)
+
+    def all_finite(self, array: Any) -> bool:
+        return bool(self.xp.isfinite(array).all())
+
+
+class _CupyBackend(_NumpyLikeBackend):
+    name = "cupy"
+
+    def __init__(self, dtype: np.dtype, device_id: int = 0) -> None:
+        super().__init__(dtype)
+        import cupy as cp
+        import cupyx.scipy.sparse as cpsp
+
+        self.xp = cp
+        self._cpsp = cpsp
+        self.device_id = device_id
+
+    def context(self) -> contextlib.AbstractContextManager[Any]:
+        return self.xp.cuda.Device(self.device_id)
+
+    def synchronize(self) -> None:
+        self.xp.cuda.get_current_stream().synchronize()
+
+    def csr(self, matrix: sp.csr_matrix) -> Any:
+        return self._cpsp.csr_matrix(sp.csr_matrix(matrix, dtype=self.dtype))
+
+    def to_host(self, array: Any) -> np.ndarray:
+        return self.xp.asnumpy(array)
+
+
+class _TorchBackend:
+    name = "torch"
+
+    def __init__(self, dtype: np.dtype, device: str = "cpu") -> None:
+        import torch
+
+        self.torch = torch
+        self.dtype = np.dtype(dtype)
+        self.tdtype = torch.float32 if self.dtype == np.float32 else torch.float64
+        self.device = torch.device(device)
+
+    def context(self) -> contextlib.AbstractContextManager[Any]:
+        return contextlib.nullcontext()
+
+    def synchronize(self) -> None:
+        if self.device.type == "cuda":
+            self.torch.cuda.synchronize(self.device)
+        elif self.device.type == "mps":
+            self.torch.mps.synchronize()
+
+    def from_host(self, array: np.ndarray) -> Any:
+        return self.torch.as_tensor(
+            np.ascontiguousarray(array, dtype=self.dtype), device=self.device
+        )
+
+    def csr(self, matrix: sp.csr_matrix) -> Any:
+        m = sp.csr_matrix(matrix, dtype=self.dtype)
+        return self.torch.sparse_csr_tensor(
+            self.torch.as_tensor(m.indptr.astype(np.int64)),
+            self.torch.as_tensor(m.indices.astype(np.int64)),
+            self.torch.as_tensor(m.data),
+            size=m.shape,
+            device=self.device,
+        )
+
+    def zeros(self, shape: int | tuple[int, ...]) -> Any:
+        return self.torch.zeros(shape, dtype=self.tdtype, device=self.device)
+
+    def to_host(self, array: Any) -> np.ndarray:
+        return array.detach().cpu().numpy().copy()
+
+    def spmv(self, matrix: Any, vector: Any) -> Any:
+        return self.torch.mv(matrix, vector)
+
+    def axpy(self, out: Any, x: Any, a: float, y: Any) -> None:
+        self.torch.add(x, y, alpha=a, out=out)
+
+    def add_scaled(self, acc: Any, a: float, y: Any, scratch: Any) -> None:
+        acc.add_(y, alpha=a)
+
+    def force_balance(self, out: Any, f: float, load: Any, r: Any, inv_mass: Any) -> None:
+        self.torch.mul(load, f, out=out)
+        out.sub_(r)
+        out.mul_(inv_mass)
+
+    def all_finite(self, array: Any) -> bool:
+        return bool(self.torch.isfinite(array).all())
+
+
+def resolve_precision(precision: str) -> np.dtype:
+    """Map ``'double'``/``'single'`` to a NumPy dtype."""
+    p = str(precision).lower()
+    if p not in ("double", "single"):
+        raise ValueError(f"precision must be 'double' or 'single', got '{precision}'")
+    return np.dtype(np.float32 if p == "single" else np.float64)
+
+
+def make_backend(
+    device_info: DeviceInfo,
     precision: str = "double",
-    device_id: int = 0,
-    save_freq: int = 1,
-    snapshot_callback: Callable[[int, float, np.ndarray], None] | None = None,
+    log_func: Callable[[str], None] | None = None,
+) -> _NumpyLikeBackend | _TorchBackend:
+    """Instantiate the array backend for a resolved device."""
+    dtype = resolve_precision(precision)
+    if device_info.backend == "cupy":
+        dev_id = int(device_info.device.split(":")[1]) if ":" in device_info.device else 0
+        return _CupyBackend(dtype, dev_id)
+    if device_info.backend == "torch":
+        if device_info.device == "mps" and dtype == np.float64:
+            if log_func:
+                log_func("  [Device] MPS does not support float64; using single precision.")
+            dtype = np.dtype(np.float32)
+        return _TorchBackend(dtype, device_info.device)
+    if device_info.backend == "scipy":
+        return _NumpyLikeBackend(dtype)
+    raise ValueError(f"Unknown backend '{device_info.backend}'")
+
+
+# ---------------------------------------------------------------------------
+# Integrator
+# ---------------------------------------------------------------------------
+def _as_csr(matrix: CsrLike, n: int) -> sp.csr_matrix:
+    if isinstance(matrix, tuple):
+        indptr, indices, data = matrix
+        return sp.csr_matrix((data, indices, indptr), shape=(n, n))
+    return sp.csr_matrix(matrix)
+
+
+@dataclass(frozen=True)
+class ExplicitRK4Result:
+    """Output of :func:`integrate_explicit_rk4`."""
+
+    times: np.ndarray
+    sensor_data_x: np.ndarray
+    sensor_data_y: np.ndarray
+    loop_seconds: float
+
+
+def integrate_explicit_rk4(
+    stiffness: CsrLike,
+    damping: CsrLike,
+    inv_mass: np.ndarray,
+    load_shape: np.ndarray,
+    sensor_matrix: sp.spmatrix | sp.sparray,
+    dt: float,
+    n_steps: int,
+    source: Callable[[float], float],
+    backend: _NumpyLikeBackend | _TorchBackend,
+    save_every: int = 1,
+    snapshot_callback: SnapshotCallback | None = None,
     report_interval: int = 0,
-    log_func: Callable[[str], None] = print,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Execute explicit RK4 time-stepping entirely within NVIDIA GPU VRAM via CuPy."""
-    if not HAS_CUPY:
-        raise RuntimeError("CuPy is not available.")
+    log_func: Callable[[str], None] | None = None,
+    history_chunk_bytes: int = DEFAULT_HISTORY_CHUNK_BYTES,
+) -> ExplicitRK4Result:
+    """Integrate ``M_L ü + C u̇ + K u = s(t) f`` from rest with classical RK4.
 
-    dtype = cp.float32 if precision == "single" else cp.float64
-    np_dtype = np.float32 if precision == "single" else np.float64
-    bytes_per_elem = 4 if precision == "single" else 8
+    Parameters
+    ----------
+    stiffness, damping
+        Square CSR operators (SciPy matrices or ``(indptr, indices, data)``).
+    inv_mass
+        Inverse lumped (diagonal) mass, shape ``(n,)``.
+    load_shape
+        Spatial load vector ``f`` scaled by ``source(t)``.
+    sensor_matrix
+        Point-evaluation operator of shape ``(2*n_sensors, n)``.
+    save_every
+        Snapshot cadence in steps (snapshots at steps ``0, save_every, ...``).
+    report_interval
+        Progress/finite-check cadence in steps (``0`` → every ``n_steps//20``).
+    history_chunk_bytes
+        Upper bound of the on-device sensor ring buffer.
 
-    with cp.cuda.Device(device_id):
-        n_dofs = len(M_inv_np)
-        n_sensors = sensor_mat_csr.shape[0] // 2
+    Raises
+    ------
+    FloatingPointError
+        If the state becomes non-finite (instability or bad input).
+    """
+    if n_steps < 1 or not (np.isfinite(dt) and dt > 0):
+        raise ValueError("n_steps must be >= 1 and dt finite and positive")
+    log = log_func or (lambda _msg: None)
+    n = len(inv_mass)
+    K = _as_csr(stiffness, n)
+    C = _as_csr(damping, n)
+    S = sp.csr_matrix(sensor_matrix)
+    if K.shape != (n, n) or C.shape != (n, n) or len(load_shape) != n or S.shape[1] != n:
+        raise ValueError("Inconsistent operator dimensions")
+    n_rows = S.shape[0]
+    n_sensors = n_rows // 2
+    stacked = sp.hstack([K, C], format="csr")
 
-        # 1. ONE-TIME Host -> Device Transfer (Trotter et al. 2023)
-        t_trans_start = pytime.perf_counter()
+    times = np.arange(n_steps + 1, dtype=np.float64) * dt
+    host_hist = np.zeros((n_steps + 1, n_rows), dtype=backend.dtype)
+    check_every = report_interval if report_interval > 0 else max(n_steps // 20, 1)
+    h2 = 0.5 * dt
 
-        kindptr, kindices, kdata = K_csr
-        K_dev = cp_sparse.csr_matrix(
-            (
-                cp.asarray(kdata, dtype=dtype),
-                cp.asarray(kindices, dtype=cp.int32),
-                cp.asarray(kindptr, dtype=cp.int32),
-            ),
-            shape=(n_dofs, n_dofs),
+    with backend.context():
+        t_setup = pytime.perf_counter()
+        A = backend.csr(stacked)
+        S_dev = backend.csr(S) if n_rows else None
+        inv_m = backend.from_host(inv_mass)
+        load = backend.from_host(load_shape)
+
+        z = backend.zeros(2 * n)  # state [u; v]
+        zt = backend.zeros(2 * n)  # stage state
+        acc = backend.zeros(2 * n)  # RK accumulator
+        scratch = backend.zeros(2 * n)
+        a = backend.zeros(n)  # acceleration
+        u, v = z[:n], z[n:]
+        ut, vt = zt[:n], zt[n:]
+        du, dv = acc[:n], acc[n:]
+        a_scr = scratch[n:]
+
+        itemsize = backend.dtype.itemsize
+        chunk_rows = int(min(n_steps, max(1, history_chunk_bytes // max(1, n_rows * itemsize))))
+        ring = backend.zeros((chunk_rows, n_rows)) if n_rows else None
+        backend.synchronize()
+        log(
+            f"  [{backend.name}] {backend.dtype.name} | DOFs: {n:,} | operator nnz: "
+            f"{stacked.nnz:,} | sensors: {n_sensors} | setup "
+            f"{(pytime.perf_counter() - t_setup) * 1e3:.1f} ms"
         )
 
-        cindptr, cindices, cdata = C_csr
-        C_dev = cp_sparse.csr_matrix(
-            (
-                cp.asarray(cdata, dtype=dtype),
-                cp.asarray(cindices, dtype=cp.int32),
-                cp.asarray(cindptr, dtype=cp.int32),
-            ),
-            shape=(n_dofs, n_dofs),
-        )
+        def acceleration(state: Any, t: float) -> None:
+            r = backend.spmv(A, state)
+            backend.force_balance(a, float(source(t)), load, r, inv_m)
 
-        m_inv_dev = cp.asarray(M_inv_np, dtype=dtype)
-        f_spatial_dev = cp.asarray(f_spatial_np, dtype=dtype)
+        def flush(last_step: int, count: int) -> None:
+            if ring is not None and count:
+                first = last_step - count + 1
+                host_hist[first : last_step + 1] = backend.to_host(ring[:count])
 
-        if sensor_mat_csr.nnz > 0:
-            S_dev = cp_sparse.csr_matrix(
-                (
-                    cp.asarray(sensor_mat_csr.data, dtype=dtype),
-                    cp.asarray(sensor_mat_csr.indices, dtype=cp.int32),
-                    cp.asarray(sensor_mat_csr.indptr, dtype=cp.int32),
-                ),
-                shape=sensor_mat_csr.shape,
-            )
-        else:
-            S_dev = None
-
-        # 2. State & Pinned Telemetry Allocation (Li et al. 2026 Table 7)
-        u_dev = cp.zeros(n_dofs, dtype=dtype)
-        v_dev = cp.zeros(n_dofs, dtype=dtype)
-
-        times = np.linspace(0, Nsteps * dt, Nsteps + 1, dtype=np.float64)
-
-        # Allocate pinned host memory for sensor data
-        if n_sensors > 0:
-            pinned_x = cp.cuda.alloc_pinned_memory(
-                (Nsteps + 1) * n_sensors * bytes_per_elem
-            )
-            pinned_y = cp.cuda.alloc_pinned_memory(
-                (Nsteps + 1) * n_sensors * bytes_per_elem
-            )
-            sensor_data_x = np.frombuffer(pinned_x, dtype=np_dtype).reshape(
-                (Nsteps + 1, n_sensors)
-            )
-            sensor_data_y = np.frombuffer(pinned_y, dtype=np_dtype).reshape(
-                (Nsteps + 1, n_sensors)
-            )
-            sensor_data_x.fill(0.0)
-            sensor_data_y.fill(0.0)
-        else:
-            sensor_data_x = np.zeros((Nsteps + 1, 0), dtype=np_dtype)
-            sensor_data_y = np.zeros((Nsteps + 1, 0), dtype=np_dtype)
-
-        comm_stream = cp.cuda.Stream(non_blocking=True)
-
-        t_trans_end = pytime.perf_counter()
-        dev_props = cp.cuda.runtime.getDeviceProperties(device_id)
-        dev_name = (
-            dev_props["name"].decode("utf-8")
-            if isinstance(dev_props["name"], bytes)
-            else str(dev_props["name"])
-        )
-        log_func(
-            f"  [GPU CuPy] Device: {dev_name} | VRAM transfer: {(t_trans_end - t_trans_start)*1000:.1f} ms"
-        )
-        log_func(
-            f"  [GPU CuPy] Precision: {precision.upper()} | DOFs: {n_dofs:,} | Matrix NNZ: {len(kdata):,}"
-        )
-
-        dt_val = dtype(dt)
-
-        def compute_accel(u_vec, v_vec, t_val):
-            r = K_dev.dot(u_vec)
-            r += C_dev.dot(v_vec)
-            f_val = dtype(source_func(float(t_val)))
-            return (f_val * f_spatial_dev - r) * m_inv_dev
-
-        t_loop_start = pytime.perf_counter()
-
-        for step in range(Nsteps):
-            t_curr = step * dt
-
-            # Stage 1
-            k1u = v_dev
-            k1v = compute_accel(u_dev, v_dev, t_curr)
-
-            # Stage 2
-            u_temp = u_dev + (dtype(0.5) * dt_val) * k1u
-            v_temp = v_dev + (dtype(0.5) * dt_val) * k1v
-            k2u = v_temp
-            k2v = compute_accel(u_temp, v_temp, t_curr + 0.5 * dt)
-
-            # Stage 3
-            u_temp = u_dev + (dtype(0.5) * dt_val) * k2u
-            v_temp = v_dev + (dtype(0.5) * dt_val) * k2v
-            k3u = v_temp
-            k3v = compute_accel(u_temp, v_temp, t_curr + 0.5 * dt)
-
+        t_loop = pytime.perf_counter()
+        pending = 0
+        for step in range(n_steps):
+            t = step * dt
+            # Stage 1: k1 = (v, a(u, v, t))
+            acceleration(z, t)
+            du[...] = v
+            dv[...] = a
+            # Stage 2: k2u = v + h/2 k1v ; k2v = a(u + h/2 k1u, k2u)
+            backend.axpy(ut, u, h2, v)
+            backend.axpy(vt, v, h2, a)
+            acceleration(zt, t + h2)
+            backend.add_scaled(du, 2.0, vt, scratch[:n])
+            backend.add_scaled(dv, 2.0, a, a_scr)
+            # Stage 3: ut uses k2u (= vt) before vt is overwritten with k3u
+            backend.axpy(ut, u, h2, vt)
+            backend.axpy(vt, v, h2, a)
+            acceleration(zt, t + h2)
+            backend.add_scaled(du, 2.0, vt, scratch[:n])
+            backend.add_scaled(dv, 2.0, a, a_scr)
             # Stage 4
-            u_temp = u_dev + dt_val * k3u
-            v_temp = v_dev + dt_val * k3v
-            k4u = v_temp
-            k4v = compute_accel(u_temp, v_temp, t_curr + dt)
+            backend.axpy(ut, u, dt, vt)
+            backend.axpy(vt, v, dt, a)
+            acceleration(zt, t + dt)
+            backend.add_scaled(du, 1.0, vt, scratch[:n])
+            backend.add_scaled(dv, 1.0, a, a_scr)
+            # z += dt/6 * acc
+            backend.add_scaled(z, dt / 6.0, acc, scratch)
 
-            # Fused update
-            if _cupy_rk4_fused_update is not None:
-                _cupy_rk4_fused_update(
-                    u_dev,
-                    v_dev,
-                    k1u,
-                    k2u,
-                    k3u,
-                    k4u,
-                    k1v,
-                    k2v,
-                    k3v,
-                    k4v,
-                    dt_val,
-                    u_dev,
-                    v_dev,
-                )
-            else:
-                u_dev += (dt_val / dtype(6.0)) * (
-                    k1u + dtype(2.0) * k2u + dtype(2.0) * k3u + k4u
-                )
-                v_dev += (dt_val / dtype(6.0)) * (
-                    k1v + dtype(2.0) * k2v + dtype(2.0) * k3v + k4v
-                )
+            if ring is not None:
+                ring[pending] = backend.spmv(S_dev, u)
+                pending += 1
+                if pending == chunk_rows:
+                    flush(step + 1, pending)
+                    pending = 0
 
-            # Extract sensor readings
-            if S_dev is not None:
-                s_vals = S_dev.dot(u_dev)
-                with comm_stream:
-                    s_vals_host = s_vals.get()
-                    sensor_data_x[step + 1, :] = s_vals_host[0::2]
-                    sensor_data_y[step + 1, :] = s_vals_host[1::2]
+            if snapshot_callback is not None and step % save_every == 0:
+                snapshot_callback(step, t + dt, backend.to_host(u))
 
-            # Snapshots
-            if snapshot_callback and step % save_freq == 0:
-                snapshot_callback(
-                    step, t_curr + dt, cp.asnumpy(u_dev[:n_dofs])
-                )
+            if (step + 1) % check_every == 0 or step + 1 == n_steps:
+                if not backend.all_finite(z):
+                    raise FloatingPointError(
+                        f"Non-finite state at step {step + 1}/{n_steps} (t = {t + dt:.3e} s); "
+                        "reduce dt/CFL or check material and damping parameters."
+                    )
+                if report_interval > 0:
+                    elapsed = pytime.perf_counter() - t_loop
+                    rate = (step + 1) / max(elapsed, 1e-12)
+                    log(
+                        f"  [{100.0 * (step + 1) / n_steps:5.1f}%]  step {step + 1}/{n_steps} | "
+                        f"{rate:8.1f} steps/s | elapsed {elapsed:6.1f} s | "
+                        f"ETA {(n_steps - step - 1) / rate:6.1f} s"
+                    )
+        flush(n_steps, pending)
+        backend.synchronize()
+        loop_seconds = pytime.perf_counter() - t_loop
 
-            if report_interval > 0 and (step + 1) % report_interval == 0:
-                elapsed = pytime.perf_counter() - t_loop_start
-                rate = (step + 1) / elapsed
-                log_func(
-                    f"  [{100.0*(step+1)/Nsteps:5.1f}%]  step {step + 1}/{Nsteps} | Rate: {rate:6.1f} steps/s | Elapsed: {elapsed:5.1f}s"
-                )
-
-        cp.cuda.Stream.null.synchronize()
-        comm_stream.synchronize()
-        total_time = pytime.perf_counter() - t_loop_start
-        log_func(
-            f"  [GPU CuPy] RK4 loop complete: {total_time:.2f} s ({Nsteps / max(total_time, 1e-6):.1f} steps/s)"
-        )
-
-        return times, sensor_data_x.copy(), sensor_data_y.copy()
-
-
-# ---------------------------------------------------------------------------
-# Backend 2: PyTorch (CUDA / Apple Silicon MPS)
-# ---------------------------------------------------------------------------
-def solve_explicit_rk4_torch(
-    K_csr: tuple[np.ndarray, np.ndarray, np.ndarray],
-    C_csr: tuple[np.ndarray, np.ndarray, np.ndarray],
-    M_inv_np: np.ndarray,
-    f_spatial_np: np.ndarray,
-    sensor_mat_csr: sp.csr_matrix,
-    dt: float,
-    Nsteps: int,
-    source_func: Callable[[float], float],
-    device_name: str = "mps",
-    precision: str = "double",
-    save_freq: int = 1,
-    snapshot_callback: Callable[[int, float, np.ndarray], None] | None = None,
-    report_interval: int = 0,
-    log_func: Callable[[str], None] = print,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Execute explicit RK4 time-stepping via PyTorch Sparse on CUDA or Apple Silicon MPS."""
-    if not HAS_TORCH:
-        raise RuntimeError("PyTorch is not available.")
-
-    torch_dev = torch.device(device_name)
-    dtype = (
-        torch.float32
-        if (precision == "single" or device_name == "mps")
-        else torch.float64
+    log(
+        f"  [{backend.name}] RK4 loop complete: {loop_seconds:.2f} s "
+        f"({n_steps / max(loop_seconds, 1e-12):.1f} steps/s)"
     )
-    np_dtype = np.float32 if dtype == torch.float32 else np.float64
-
-    n_dofs = len(M_inv_np)
-    n_sensors = sensor_mat_csr.shape[0] // 2
-
-    t_trans_start = pytime.perf_counter()
-
-    kindptr, kindices, kdata = K_csr
-    K_dev = torch.sparse_csr_tensor(
-        torch.as_tensor(kindptr, dtype=torch.int64),
-        torch.as_tensor(kindices, dtype=torch.int64),
-        torch.as_tensor(kdata, dtype=dtype),
-        size=(n_dofs, n_dofs),
-        device=torch_dev,
+    return ExplicitRK4Result(
+        times=times,
+        sensor_data_x=np.ascontiguousarray(host_hist[:, 0::2]),
+        sensor_data_y=np.ascontiguousarray(host_hist[:, 1::2]),
+        loop_seconds=loop_seconds,
     )
 
-    cindptr, cindices, cdata = C_csr
-    C_dev = torch.sparse_csr_tensor(
-        torch.as_tensor(cindptr, dtype=torch.int64),
-        torch.as_tensor(cindices, dtype=torch.int64),
-        torch.as_tensor(cdata, dtype=dtype),
-        size=(n_dofs, n_dofs),
-        device=torch_dev,
-    )
 
-    m_inv_dev = torch.as_tensor(M_inv_np, dtype=dtype, device=torch_dev)
-    f_spatial_dev = torch.as_tensor(f_spatial_np, dtype=dtype, device=torch_dev)
-
-    if sensor_mat_csr.nnz > 0:
-        S_dev = torch.sparse_csr_tensor(
-            torch.as_tensor(sensor_mat_csr.indptr, dtype=torch.int64),
-            torch.as_tensor(sensor_mat_csr.indices, dtype=torch.int64),
-            torch.as_tensor(sensor_mat_csr.data, dtype=dtype),
-            size=sensor_mat_csr.shape,
-            device=torch_dev,
-        )
-    else:
-        S_dev = None
-
-    u_dev = torch.zeros(n_dofs, dtype=dtype, device=torch_dev)
-    v_dev = torch.zeros(n_dofs, dtype=dtype, device=torch_dev)
-
-    times = np.linspace(0, Nsteps * dt, Nsteps + 1, dtype=np.float64)
-    sensor_data_x = np.zeros((Nsteps + 1, n_sensors), dtype=np_dtype)
-    sensor_data_y = np.zeros((Nsteps + 1, n_sensors), dtype=np_dtype)
-
-    t_trans_end = pytime.perf_counter()
-    log_func(
-        f"  [GPU Torch] Device: {device_name.upper()} | VRAM transfer: {(t_trans_end - t_trans_start)*1000:.1f} ms"
-    )
-    log_func(
-        f"  [GPU Torch] Precision: {str(dtype).split('.')[-1].upper()} | DOFs: {n_dofs:,}"
-    )
-
-    dt_val = float(dt)
-
-    def compute_accel(u_vec, v_vec, t_val):
-        r = torch.mv(K_dev, u_vec)
-        r = torch.addmv(r, C_dev, v_vec)
-        f_val = float(source_func(float(t_val)))
-        return (f_val * f_spatial_dev - r) * m_inv_dev
-
-    t_loop_start = pytime.perf_counter()
-
-    for step in range(Nsteps):
-        t_curr = step * dt
-
-        # Stage 1
-        k1u = v_dev
-        k1v = compute_accel(u_dev, v_dev, t_curr)
-
-        # Stage 2
-        u_temp = u_dev + (0.5 * dt_val) * k1u
-        v_temp = v_dev + (0.5 * dt_val) * k1v
-        k2u = v_temp
-        k2v = compute_accel(u_temp, v_temp, t_curr + 0.5 * dt)
-
-        # Stage 3
-        u_temp = u_dev + (0.5 * dt_val) * k2u
-        v_temp = v_dev + (0.5 * dt_val) * k2v
-        k3u = v_temp
-        k3v = compute_accel(u_temp, v_temp, t_curr + 0.5 * dt)
-
-        # Stage 4
-        u_temp = u_dev + dt_val * k3u
-        v_temp = v_dev + dt_val * k3v
-        k4u = v_temp
-        k4v = compute_accel(u_temp, v_temp, t_curr + dt)
-
-        # Update
-        u_dev += (dt_val / 6.0) * (k1u + 2.0 * k2u + 2.0 * k3u + k4u)
-        v_dev += (dt_val / 6.0) * (k1v + 2.0 * k2v + 2.0 * k3v + k4v)
-
-        if S_dev is not None:
-            s_vals = torch.mv(S_dev, u_dev).cpu().numpy()
-            sensor_data_x[step + 1, :] = s_vals[0::2]
-            sensor_data_y[step + 1, :] = s_vals[1::2]
-
-        if snapshot_callback and step % save_freq == 0:
-            snapshot_callback(step, t_curr + dt, u_dev.cpu().numpy()[:n_dofs])
-
-        if report_interval > 0 and (step + 1) % report_interval == 0:
-            elapsed = pytime.perf_counter() - t_loop_start
-            rate = (step + 1) / elapsed
-            log_func(
-                f"  [{100.0*(step+1)/Nsteps:5.1f}%]  step {step + 1}/{Nsteps} | Rate: {rate:6.1f} steps/s | Elapsed: {elapsed:5.1f}s"
-            )
-
-    total_time = pytime.perf_counter() - t_loop_start
-    log_func(
-        f"  [GPU Torch] RK4 loop complete: {total_time:.2f} s ({Nsteps / max(total_time, 1e-6):.1f} steps/s)"
-    )
-
-    return times, sensor_data_x, sensor_data_y
-
-
-# ---------------------------------------------------------------------------
-# Backend 3: CPU SciPy (Pure Python / CPU Baseline)
-# ---------------------------------------------------------------------------
-def solve_explicit_rk4_scipy(
-    K_csr: tuple[np.ndarray, np.ndarray, np.ndarray],
-    C_csr: tuple[np.ndarray, np.ndarray, np.ndarray],
-    M_inv_np: np.ndarray,
-    f_spatial_np: np.ndarray,
-    sensor_mat_csr: sp.csr_matrix,
-    dt: float,
-    Nsteps: int,
-    source_func: Callable[[float], float],
-    precision: str = "double",
-    save_freq: int = 1,
-    snapshot_callback: Callable[[int, float, np.ndarray], None] | None = None,
-    report_interval: int = 0,
-    log_func: Callable[[str], None] = print,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Execute explicit RK4 time-stepping on CPU via SciPy CSR sparse matrix."""
-    dtype = np.float32 if precision == "single" else np.float64
-    n_dofs = len(M_inv_np)
-    n_sensors = sensor_mat_csr.shape[0] // 2
-
-    kindptr, kindices, kdata = K_csr
-    K_sp = sp.csr_matrix(
-        (kdata.astype(dtype), kindices, kindptr), shape=(n_dofs, n_dofs)
-    )
-
-    cindptr, cindices, cdata = C_csr
-    C_sp = sp.csr_matrix(
-        (cdata.astype(dtype), cindices, cindptr), shape=(n_dofs, n_dofs)
-    )
-
-    m_inv = M_inv_np.astype(dtype)
-    f_spatial = f_spatial_np.astype(dtype)
-    S_sp = sensor_mat_csr.astype(dtype) if sensor_mat_csr.nnz > 0 else None
-
-    u = np.zeros(n_dofs, dtype=dtype)
-    v = np.zeros(n_dofs, dtype=dtype)
-
-    times = np.linspace(0, Nsteps * dt, Nsteps + 1, dtype=np.float64)
-    sensor_data_x = np.zeros((Nsteps + 1, n_sensors), dtype=dtype)
-    sensor_data_y = np.zeros((Nsteps + 1, n_sensors), dtype=dtype)
-
-    log_func(
-        f"  [CPU SciPy] Running explicit RK4 ({precision.upper()}) | DOFs: {n_dofs:,}"
-    )
-
-    dt_val = dtype(dt)
-
-    def compute_accel(u_vec, v_vec, t_val):
-        r = K_sp.dot(u_vec)
-        r += C_sp.dot(v_vec)
-        f_val = dtype(source_func(float(t_val)))
-        return (f_val * f_spatial - r) * m_inv
-
-    t_loop_start = pytime.perf_counter()
-
-    for step in range(Nsteps):
-        t_curr = step * dt
-
-        # Stage 1
-        k1u = v
-        k1v = compute_accel(u, v, t_curr)
-
-        # Stage 2
-        u_temp = u + (dtype(0.5) * dt_val) * k1u
-        v_temp = v + (dtype(0.5) * dt_val) * k1v
-        k2u = v_temp
-        k2v = compute_accel(u_temp, v_temp, t_curr + 0.5 * dt)
-
-        # Stage 3
-        u_temp = u + (dtype(0.5) * dt_val) * k2u
-        v_temp = v + (dtype(0.5) * dt_val) * k2v
-        k3u = v_temp
-        k3v = compute_accel(u_temp, v_temp, t_curr + 0.5 * dt)
-
-        # Stage 4
-        u_temp = u + dt_val * k3u
-        v_temp = v + dt_val * k3v
-        k4u = v_temp
-        k4v = compute_accel(u_temp, v_temp, t_curr + dt)
-
-        # Update
-        u += (dt_val / dtype(6.0)) * (
-            k1u + dtype(2.0) * k2u + dtype(2.0) * k3u + k4u
-        )
-        v += (dt_val / dtype(6.0)) * (
-            k1v + dtype(2.0) * k2v + dtype(2.0) * k3v + k4v
-        )
-
-        if S_sp is not None:
-            s_vals = S_sp.dot(u)
-            sensor_data_x[step + 1, :] = s_vals[0::2]
-            sensor_data_y[step + 1, :] = s_vals[1::2]
-
-        if snapshot_callback and step % save_freq == 0:
-            snapshot_callback(step, t_curr + dt, u)
-
-        if report_interval > 0 and (step + 1) % report_interval == 0:
-            elapsed = pytime.perf_counter() - t_loop_start
-            rate = (step + 1) / elapsed
-            log_func(
-                f"  [{100.0*(step+1)/Nsteps:5.1f}%]  step {step + 1}/{Nsteps} | Rate: {rate:6.1f} steps/s | Elapsed: {elapsed:5.1f}s"
-            )
-
-    total_time = pytime.perf_counter() - t_loop_start
-    log_func(
-        f"  [CPU SciPy] RK4 loop complete: {total_time:.2f} s ({Nsteps / max(total_time, 1e-6):.1f} steps/s)"
-    )
-
-    return times, sensor_data_x, sensor_data_y
-
-
-# ---------------------------------------------------------------------------
-# Universal Dispatcher
-# ---------------------------------------------------------------------------
 def solve_explicit_rk4_device(
-    K_csr: tuple[np.ndarray, np.ndarray, np.ndarray],
-    C_csr: tuple[np.ndarray, np.ndarray, np.ndarray],
+    K_csr: CsrLike,
+    C_csr: CsrLike,
     M_inv_np: np.ndarray,
     f_spatial_np: np.ndarray,
-    sensor_mat_csr: sp.csr_matrix,
+    sensor_mat_csr: sp.spmatrix | sp.sparray,
     dt: float,
     Nsteps: int,
     source_func: Callable[[float], float],
     device_info: DeviceInfo,
     precision: str = "double",
     save_freq: int = 1,
-    snapshot_callback: Callable[[int, float, np.ndarray], None] | None = None,
+    snapshot_callback: SnapshotCallback | None = None,
     report_interval: int = 0,
-    log_func: Callable[[str], None] = print,
+    log_func: Callable[[str], None] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Route explicit RK4 simulation to the selected hardware backend."""
-    if device_info.backend == "cupy" and HAS_CUPY:
-        dev_id = 0
-        if ":" in device_info.device:
-            try:
-                dev_id = int(device_info.device.split(":")[1])
-            except ValueError:
-                dev_id = 0
-        return solve_explicit_rk4_cupy(
-            K_csr=K_csr,
-            C_csr=C_csr,
-            M_inv_np=M_inv_np,
-            f_spatial_np=f_spatial_np,
-            sensor_mat_csr=sensor_mat_csr,
-            dt=dt,
-            Nsteps=Nsteps,
-            source_func=source_func,
-            precision=precision,
-            device_id=dev_id,
-            save_freq=save_freq,
-            snapshot_callback=snapshot_callback,
-            report_interval=report_interval,
-            log_func=log_func,
-        )
-
-    if device_info.backend == "torch" and HAS_TORCH:
-        return solve_explicit_rk4_torch(
-            K_csr=K_csr,
-            C_csr=C_csr,
-            M_inv_np=M_inv_np,
-            f_spatial_np=f_spatial_np,
-            sensor_mat_csr=sensor_mat_csr,
-            dt=dt,
-            Nsteps=Nsteps,
-            source_func=source_func,
-            device_name=device_info.device,
-            precision=precision,
-            save_freq=save_freq,
-            snapshot_callback=snapshot_callback,
-            report_interval=report_interval,
-            log_func=log_func,
-        )
-
-    # Fallback to optimized SciPy CPU engine
-    return solve_explicit_rk4_scipy(
-        K_csr=K_csr,
-        C_csr=C_csr,
-        M_inv_np=M_inv_np,
-        f_spatial_np=f_spatial_np,
-        sensor_mat_csr=sensor_mat_csr,
+    """Run the explicit RK4 engine on ``device_info``; return ``(times, u_x, u_y)``."""
+    backend = make_backend(device_info, precision, log_func)
+    result = integrate_explicit_rk4(
+        K_csr,
+        C_csr,
+        M_inv_np,
+        f_spatial_np,
+        sensor_mat_csr,
         dt=dt,
-        Nsteps=Nsteps,
-        source_func=source_func,
-        precision=precision,
-        save_freq=save_freq,
+        n_steps=Nsteps,
+        source=source_func,
+        backend=backend,
+        save_every=save_freq,
         snapshot_callback=snapshot_callback,
         report_interval=report_interval,
         log_func=log_func,
     )
+    return result.times, result.sensor_data_x, result.sensor_data_y

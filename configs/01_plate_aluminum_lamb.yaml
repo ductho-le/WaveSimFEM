@@ -1,0 +1,82 @@
+# ==============================================================================
+# Example 01 - structure.mode: "1_layer"
+# Lamb waves in a free aluminium plate (NDE / structural health monitoring)
+# ==============================================================================
+# Physics
+#   A 1 mm aluminium-alloy plate in vacuum (both faces traction-free) supports
+#   the dispersive Lamb modes: the extensional S0 mode (fast, ~5.4 km/s at low
+#   f*d) and the flexural A0 mode (slow, strongly dispersive). Above
+#   f*d ≈ 1.6 MHz*mm the A1 mode appears. The broadband Ricker pulse excites all
+#   modes in the 0-2 MHz band so that the 2D-FFT reproduces the dispersion curves.
+#
+# Application
+#   Plate-like metallic structures (aircraft skins, pressure vessels, pipes
+#   unrolled) are inspected with Lamb waves for corrosion and cracks over long
+#   distances from a few transducers.
+#
+# Boundary conditions
+#   - Top (y = 1 mm):    traction-free except the Gaussian surface load strip
+#   - Bottom (y = 0):    traction-free
+#   - Left/right:        5th-order Rayleigh-damping sponges
+#
+# References
+#   - H. Lamb (1917), Proc. R. Soc. Lond. A 93, 114-128.
+#   - J. L. Rose (2014), Ultrasonic Guided Waves in Solid Media, Cambridge Univ. Press.
+# ==============================================================================
+
+solver:
+  type: "explicit"              # "explicit" (lumped-mass RK4) or "implicit" (Newmark-beta)
+  CFL: 0.5                      # Courant-Friedrichs-Lewy stability coefficient
+  time_factor: 1.2              # T = time_factor * sensing_length / slowest speed + pulse length
+
+geometry:
+  sensing_length: 0.30          # [m] Pristine sensing region (300 mm)
+  absorb_length: 0.15           # [m] Lateral absorbing sponge width (150 mm)
+
+structure:
+  mode: "1_layer"
+  single_layer:
+    name: "Aluminium alloy plate (6061-T6)"
+    thickness: 1.0e-3           # [m] 1 mm
+    material_model: "isotropic"
+    rho: 2700.0                 # [kg/m^3]
+    E: 70.0e9                   # [Pa]   -> c_L = 6.20 km/s (plane strain), c_T = 3.12 km/s
+    nu: 0.33                    # [-]
+    min_elems_y: 6              # Elements through the thickness
+
+absorbing_boundaries:
+  alpha: null                   # [1/s] null = 1e7 * f_center / 1 MHz
+  beta: null                    # [s]   null = 1e-9 * 1 MHz / f_center
+
+excitation:
+  source_type: "ricker"         # Broadband pulse: best for dispersion-curve extraction
+  f_center: 1.0e6               # [Hz] 1 MHz
+  traction_max: 1.0e6           # [Pa] 1 MPa peak surface traction
+  excitation_width: 2.0e-3      # [m] Gaussian strip width (≈ 6 sigma)
+  source_x: null                # [m] null = absorb_length + max(5 mm, excitation_width)
+  source_fx: 1.0                # Tangential component (favours S0)
+  source_fy: 1.0                # Normal component (favours A0)
+
+mesh:
+  elems_per_wavelength: 8       # Q2 elements per shortest (shear) wavelength
+  min_elems_x: 100
+  min_elems_y: 4
+  degree: 2
+  max_frequency: 1.0e6          # [Hz] Mesh sizing frequency
+
+sensors:
+  n_sensors: 401                # Points along the loaded (top) surface
+  sensor_offset: 0.05           # [m] Source to first sensor (50 mm)
+  sensor_pitch: 0.5e-3          # [m] 0.5 mm -> Nyquist wavenumber 6.3 rad/mm
+
+postprocess:
+  run_postprocess: true
+  f_min: 0.0                    # SI numbers (Hz, rad/m) or strings with units
+  f_max: "2 MHz"
+  k_min: 0.0
+  k_max: "3 rad/mm"
+
+output:
+  output_dir: "results_01_plate_aluminum_lamb"
+  write_vtx: false              # true: ADIOS2 VTX (.bp) snapshots for ParaView
+  target_snapshots: 200

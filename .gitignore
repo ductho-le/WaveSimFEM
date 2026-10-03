@@ -14,8 +14,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -43,7 +43,6 @@ venv.bak/
 
 # Operating System files
 .DS_Store
-.DS_Store?
 ._*
 .Spotlight-V100
 .Trashes
@@ -51,14 +50,15 @@ ehthumbs.db
 Thumbs.db
 
 # Simulation outputs & temporary runs
-results_guided_waves_*/
+/results_*/
 *.bp/
 *.npz
 .pytest_cache/
 .ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
 
 # Development materials & local scratch
-.dev/
-.dev*
-GPU_papers/
-GPU_ACCELERATION_PLAN.md
+/.dev/

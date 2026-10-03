@@ -4,8 +4,7 @@ title: "GuidedWaveFEM: Unified Guided & Surface Wave Finite Element Framework"
 authors:
   - family-names: "Le"
     given-names: "Duc-Tho"
-    orcid: "https://orcid.org/0000-0000-0000-0000"
-version: 0.2.0
+version: 0.3.0
 date-released: 2026-10-03
 license: MIT
 repository-code: "https://github.com/ductho-le/GuidedWaveFEM"
