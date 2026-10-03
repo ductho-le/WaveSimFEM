@@ -49,7 +49,15 @@ from guidedwavefem.materials import (
     preflight_estimate,
     structure_from_config,
 )
-from guidedwavefem.numerics import PointSensors, operator_bound, rk4_step, time_grid
+from guidedwavefem.numerics import (
+    RK4_STABILITY_RADIUS,
+    PetscRK4,
+    PointSensors,
+    operator_bound,
+    sample_stride,
+    time_grid,
+)
+from guidedwavefem.parallel import describe_thread_state
 from guidedwavefem.reporting import format_banner_box, log, print_structure_table, warn
 from guidedwavefem.solvers_gpu import (
     build_sensor_interpolation_matrix,
@@ -80,6 +88,10 @@ nprocs = comm.size
 MIN_POSTPROCESS_SAMPLES = 32
 #: Global DOF count above which the implicit solver switches to CG + GAMG.
 ITERATIVE_DOF_THRESHOLD = 500_000
+#: Default sensor sampling rate in multiples of the mesh-sizing frequency
+#: (``sensors.sample_rate: null``). Sensor histories are decimated to this rate
+#: instead of being stored at every (much finer) solver step.
+AUTO_SAMPLES_PER_MESH_PERIOD = 20
 
 
 def mpi_fail_fast(function: Callable[..., Any]) -> Callable[..., Any]:
@@ -362,6 +374,83 @@ def _check_postprocess_samples(cfg: dict[str, Any], n_steps: int) -> None:
         )
 
 
+def _sensor_stride(cfg: dict[str, Any], layout: MeshLayout, dt: float, n_steps: int) -> int:
+    """Solver steps between stored sensor samples (see ``sensors.sample_rate``).
+
+    Keeps the Nyquist frequency above 1.25× the dispersion plot range and the
+    3 f0 band-pass edge, and at least :data:`MIN_POSTPROCESS_SAMPLES` samples.
+    """
+    rate = cfg.get("sensor_sample_rate") or AUTO_SAMPLES_PER_MESH_PERIOD * layout.mesh_frequency
+    f_needed = max(float(cfg["disp_f_max"]), 3.0 * float(cfg["f_center"]))
+    return sample_stride(
+        dt,
+        n_steps,
+        float(rate),
+        f_max=f_needed,
+        min_samples=MIN_POSTPROCESS_SAMPLES if cfg["run_postprocess"] else 2,
+    )
+
+
+def _sampled_time_grid(
+    cfg: dict[str, Any], layout: MeshLayout, requested_dt: float
+) -> tuple[float, int, int]:
+    """Time step, step count, and sensor stride with ``n_steps % stride == 0``.
+
+    The step count is rounded *up* to a multiple of the stride, so ``Δt`` can
+    only shrink (never past a stability or accuracy limit) and the recorded
+    samples are uniform and end exactly at ``t = duration``.
+    """
+    dt_val, n_steps = time_grid(layout.duration, requested_dt)
+    _check_postprocess_samples(cfg, n_steps)
+    stride = _sensor_stride(cfg, layout, dt_val, n_steps)
+    if n_steps % stride:
+        n_steps = -(-n_steps // stride) * stride
+        dt_val = layout.duration / n_steps
+    return dt_val, n_steps, stride
+
+
+def _drop_zero_entries(matrix: Any) -> Any:
+    """Return a copy of a PETSc AIJ matrix without explicitly stored zeros.
+
+    Sponge damping is assembled over the whole mesh but vanishes outside the
+    absorbing layers; removing the stored zeros makes each damping SpMV cost
+    proportional to the sponge (and viscoelastic) volume only.
+    """
+    indptr, indices, values = matrix.getValuesCSR()
+    keep = values != 0.0
+    rows = np.repeat(np.arange(len(indptr) - 1), np.diff(indptr))
+    counts = np.bincount(rows[keep], minlength=len(indptr) - 1)
+    new_indptr = np.concatenate([[0], np.cumsum(counts)]).astype(PETSc.IntType)
+    filtered = PETSc.Mat().createAIJ(
+        size=matrix.getSizes(),
+        csr=(new_indptr, indices[keep].astype(PETSc.IntType), values[keep]),
+        comm=matrix.getComm(),
+    )
+    filtered.assemble()
+    return filtered
+
+
+def _rigid_body_near_nullspace(V: Any) -> tuple[Any, list[Any]]:
+    """Translations and the in-plane rotation: the elasticity near-nullspace for GAMG.
+
+    Returns the PETSc null space and the DOLFINx vectors that own its memory
+    (keep them alive while the solver is in use).
+    """
+    from dolfinx import la
+    from dolfinx.la.petsc import create_vector_wrap
+
+    index_map, bs = V.dofmap.index_map, V.dofmap.index_map_bs
+    basis = [la.vector(index_map, bs=bs, dtype=default_scalar_type) for _ in range(3)]
+    coords = V.tabulate_dof_coordinates()
+    basis[0].array[0::bs] = 1.0
+    basis[1].array[1::bs] = 1.0
+    basis[2].array[0::bs] = -coords[:, 1]
+    basis[2].array[1::bs] = coords[:, 0]
+    la.orthonormalize(basis)
+    vectors = [create_vector_wrap(vec) for vec in basis]
+    return PETSc.NullSpace().create(vectors=vectors, comm=V.mesh.comm), [*basis, *vectors]
+
+
 def _vtx_writer(stack: contextlib.ExitStack, problem: WaveProblem, function: Any) -> Any | None:
     if not problem.cfg["write_vtx"]:
         return None
@@ -374,13 +463,20 @@ def _vtx_writer(stack: contextlib.ExitStack, problem: WaveProblem, function: Any
 # ---------------------------------------------------------------------------
 # Implicit Newmark-β
 # ---------------------------------------------------------------------------
-def _configure_ksp(solver: Any, ndofs_global: int) -> str:
-    """Choose a PETSc linear solver for the constant effective stiffness matrix."""
+def _configure_ksp(solver: Any, ndofs_global: int, near_nullspace: Any | None = None) -> str:
+    """Choose a PETSc linear solver for the constant effective stiffness matrix.
+
+    ``near_nullspace`` (rigid-body modes) is attached to the operator on the
+    iterative path so that GAMG builds elasticity-aware coarse spaces.
+    """
     pc = solver.getPC()
     if ndofs_global >= ITERATIVE_DOF_THRESHOLD:
         solver.setType(PETSc.KSP.Type.CG)
         pc.setType(PETSc.PC.Type.GAMG)
         solver.setTolerances(rtol=1e-8, atol=1e-14, max_it=2000)
+        if near_nullspace is not None:
+            solver.getOperators()[0].setNearNullSpace(near_nullspace)
+            return f"CG + GAMG with rigid-body near-nullspace (iterative, {ndofs_global} DOFs)"
         return f"CG + GAMG (iterative, {ndofs_global} DOFs)"
     solver.setType(PETSc.KSP.Type.PREONLY)
     pc.setType(PETSc.PC.Type.LU)
@@ -401,40 +497,30 @@ def _fallback_bjacobi(solver: Any, ndofs_global: int) -> str:
 
 
 def solve_implicit(problem: WaveProblem) -> SolveResult:
-    """Unconditionally stable Newmark-β with a once-factorized effective matrix."""
+    """Unconditionally stable Newmark-β with a once-factorized effective matrix.
+
+    With constant ``M``, ``C`` (sponge + Kelvin-Voigt) and ``K``, each step solves
+
+        (K + c₁ M + c₁ c₅ C) uⁿ⁺¹ = s(tⁿ⁺¹) f + M p - C q,
+        p = c₁ uⁿ + c₂ vⁿ - c₃ aⁿ,   q = vⁿ + c₄ aⁿ - c₅ p,
+
+    so the right-hand side costs two SpMVs; nothing is re-assembled in the loop.
+    """
     cfg = problem.cfg
     V, u_, du = problem.V, problem.test_fn, problem.trial_fn
     beta_val, gamma_val = cfg["beta_val"], cfg["gamma_val"]
     dt_req = cfg["dt"] or implicit_time_step(
-        problem.layout.h_min, problem.summary["c_L_max"], cfg["CFL"]
+        problem.layout.mesh_frequency, float(cfg["steps_per_period"])
     )
-    dt_val, n_steps = time_grid(problem.layout.duration, dt_req)
-    _check_postprocess_samples(cfg, n_steps)
+    dt_val, n_steps, stride = _sampled_time_grid(cfg, problem.layout, dt_req)
     if rank == 0:
-        log(f"  Time step Δt   = {fmt_time(dt_val)}")
+        periods = 1.0 / (dt_val * problem.layout.mesh_frequency)
+        log(
+            f"  Time step Δt   = {fmt_time(dt_val)} ({periods:.1f} steps per mesh-frequency period)"
+        )
         log(f"  Total time T   = {fmt_time(problem.layout.duration)}")
         log(f"  Number of steps: {n_steps}")
-
-    u = fem.Function(V, name="Displacement")
-    u_old = fem.Function(V, name="Displacement_old")
-    v_old = fem.Function(V, name="Velocity_old")
-    a_old = fem.Function(V, name="Acceleration_old")
-    beta = fem.Constant(problem.domain, default_scalar_type(beta_val))
-    gamma = fem.Constant(problem.domain, default_scalar_type(gamma_val))
-    dt = fem.Constant(problem.domain, default_scalar_type(dt_val))
-
-    a_newmark = 1.0 / beta / dt**2 * (u - u_old - dt * v_old) + a_old * (1.0 - 1.0 / (2.0 * beta))
-    v_newmark = v_old + dt * ((1.0 - gamma) * a_old + gamma * a_newmark)
-    residual = (
-        problem.mass(a_newmark, u_)
-        + problem.damping(v_newmark, u_)
-        + problem.stiffness(u, u_)
-        - problem.load_form
-    )
-    visco = problem.damping_visco(v_newmark, u_)
-    if visco is not None:
-        residual += visco
-    residual_du = ufl.replace(residual, {u: du})
+        log(f"  Sensor sampling: every {stride} step(s) ({fmt_time(stride * dt_val)})")
 
     c1 = 1.0 / (beta_val * dt_val**2)
     c2 = 1.0 / (beta_val * dt_val)
@@ -442,27 +528,61 @@ def solve_implicit(problem: WaveProblem) -> SolveResult:
     c4 = dt_val * (1.0 - gamma_val)
     c5 = dt_val * gamma_val
 
+    mass_form = problem.mass(du, u_)
+    damping_form = problem.damping(du, u_)
+    visco_form = problem.damping_visco(du, u_)
+    if visco_form is not None:
+        damping_form = damping_form + visco_form
+    effective_form = problem.stiffness(du, u_) + c1 * mass_form + (c1 * c5) * damping_form
+
+    u = fem.Function(V, name="Displacement")
     n_owned = len(problem.probes.indices)
-    sensor_x = np.zeros((n_steps + 1, n_owned))
-    sensor_y = np.zeros((n_steps + 1, n_owned))
-    times = np.arange(n_steps + 1) * dt_val
+    n_samples = n_steps // stride + 1
+    sensor_x = np.zeros((n_samples, n_owned))
+    sensor_y = np.zeros((n_samples, n_owned))
+    times = np.arange(n_samples) * (stride * dt_val)
     save_every = max(n_steps // int(cfg["target_snapshots"]), 1)
     report_every = max(n_steps // 20, 1)
-    timers = dict.fromkeys(("assemble", "solve", "update", "io"), 0.0)
+    timers = dict.fromkeys(("rhs", "solve", "update", "io"), 0.0)
 
     with contextlib.ExitStack() as stack:
+
+        def assembled(form: Any) -> Any:
+            matrix = fem.petsc.assemble_matrix(fem.form(form), bcs=[])
+            matrix.assemble()
+            stack.callback(matrix.destroy)
+            return matrix
+
         t_setup = pytime.perf_counter()
-        a_compiled = fem.form(ufl.lhs(residual_du))
-        L_compiled = fem.form(ufl.rhs(residual_du))
-        A = fem.petsc.assemble_matrix(a_compiled, bcs=[])
-        stack.callback(A.destroy)
-        A.assemble()
-        b = fem.petsc.create_vector(V)
-        stack.callback(b.destroy)
+        A = assembled(effective_form)
+        M = assembled(mass_form)
+        C = _drop_zero_entries(assembled(damping_form))
+        stack.callback(C.destroy)
+
+        def work_vector() -> Any:
+            vec = A.createVecRight()
+            vec.set(0.0)
+            stack.callback(vec.destroy)
+            return vec
+
+        problem.traction_amplitude.value = 1.0
+        f_ghosted = fem.petsc.create_vector(V)
+        stack.callback(f_ghosted.destroy)
+        fem.petsc.assemble_vector(f_ghosted, fem.form(problem.load_form))
+        f_ghosted.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+        load = work_vector()
+        load.array[:] = f_ghosted.array_r
+        u_old, v_old, a_old, p, q, b, x, tmp = (work_vector() for _ in range(8))
+
+        # ``_nullspace_storage`` owns the mode memory and must outlive the solve.
+        near_nullspace, _nullspace_storage = None, []
+        if problem.ndofs_global >= ITERATIVE_DOF_THRESHOLD:
+            near_nullspace, _nullspace_storage = _rigid_body_near_nullspace(V)
+            stack.callback(near_nullspace.destroy)
         solver = PETSc.KSP().create(comm)
         stack.callback(solver.destroy)
         solver.setOperators(A)
-        solver_desc = _configure_ksp(solver, problem.ndofs_global)
+        solver_desc = _configure_ksp(solver, problem.ndofs_global, near_nullspace)
         solver.setErrorIfNotConverged(True)
         try:
             solver.setUp()
@@ -478,41 +598,54 @@ def solve_implicit(problem: WaveProblem) -> SolveResult:
             log(f"\n{'═' * 58}\n  Starting IMPLICIT time-stepping  ({n_steps} steps)\n{'═' * 58}")
 
         vtx = _vtx_writer(stack, problem, u)
-        u_vec = u.x.petsc_vec
         t_loop = pytime.perf_counter()
         for i in range(n_steps):
-            t_now = times[i + 1]
-            problem.traction_amplitude.value = problem.source(t_now)
+            step = i + 1
+            t_now = step * dt_val
 
             t0 = pytime.perf_counter()
-            with b.localForm() as b_local:
-                b_local.set(0.0)
-            fem.petsc.assemble_vector(b, L_compiled)
-            b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+            u_old.copy(p)  # p = c1 u + c2 v - c3 a
+            p.scale(c1)
+            p.axpy(c2, v_old)
+            p.axpy(-c3, a_old)
+            v_old.copy(q)  # q = v + c4 a - c5 p
+            q.axpy(c4, a_old)
+            q.axpy(-c5, p)
+            M.mult(p, b)
+            C.mult(q, tmp)
+            b.axpy(-1.0, tmp)
+            b.axpy(problem.source(t_now), load)
             t1 = pytime.perf_counter()
-            solver.solve(b, u_vec)
-            u.x.scatter_forward()
+            solver.solve(b, x)
             t2 = pytime.perf_counter()
 
-            a_new = c1 * (u.x.array - u_old.x.array) - c2 * v_old.x.array + c3 * a_old.x.array
-            v_old.x.array[:] = v_old.x.array + c4 * a_old.x.array + c5 * a_new
-            a_old.x.array[:] = a_new
-            u_old.x.array[:] = u.x.array
+            x.copy(tmp)  # a_new = c1 u_new - p
+            tmp.scale(c1)
+            tmp.axpy(-1.0, p)
+            v_old.axpy(c4, a_old)
+            v_old.axpy(c5, tmp)
+            tmp.copy(a_old)
+            x.copy(u_old)
             t3 = pytime.perf_counter()
 
-            if n_owned:
-                values = problem.probes.sample(u)
-                sensor_x[i + 1] = values[:, 0]
-                sensor_y[i + 1] = values[:, 1]
-            if vtx is not None and i % save_every == 0:
-                vtx.write(t_now)
+            sample_now = step % stride == 0
+            snapshot_now = vtx is not None and i % save_every == 0
+            if sample_now or snapshot_now:
+                u.x.petsc_vec.array[:] = x.array_r
+                u.x.scatter_forward()
+                if sample_now and n_owned:
+                    values = problem.probes.sample(u)
+                    sensor_x[step // stride] = values[:, 0]
+                    sensor_y[step // stride] = values[:, 1]
+                if snapshot_now:
+                    vtx.write(t_now)
             t4 = pytime.perf_counter()
-            timers["assemble"] += t1 - t0
+            timers["rhs"] += t1 - t0
             timers["solve"] += t2 - t1
             timers["update"] += t3 - t2
             timers["io"] += t4 - t3
-            if rank == 0 and (i + 1) % report_every == 0:
-                _progress(i + 1, n_steps, t_loop)
+            if rank == 0 and step % report_every == 0:
+                _progress(step, n_steps, t_loop)
         loop_seconds = pytime.perf_counter() - t_loop
 
     if rank == 0:
@@ -531,6 +664,7 @@ def solve_implicit(problem: WaveProblem) -> SolveResult:
             "device": "cpu",
             "precision": "float64",
             "linear_solver": solver_desc,
+            "sample_stride": stride,
         },
     )
 
@@ -539,7 +673,11 @@ def solve_implicit(problem: WaveProblem) -> SolveResult:
 # Explicit lumped-mass RK4
 # ---------------------------------------------------------------------------
 def solve_explicit(problem: WaveProblem, device: DeviceInfo | None = None) -> SolveResult:
-    """Explicit RK4 with row-sum lumped mass and a conservative Gershgorin step.
+    """Explicit RK4 with row-sum lumped mass and a rigorous Gershgorin step limit.
+
+    The limit ``Δt ≤ R / max(√B_K, B_C)`` with ``R = RK4_STABILITY_RADIUS``
+    follows from the half-disk argument in :mod:`guidedwavefem.numerics`; the
+    configured ``CFL`` is the safety fraction of that limit.
 
     ``device`` selects the single-process array engine; it must be ``None`` for
     distributed runs, which use PETSc operators on every rank.
@@ -570,23 +708,24 @@ def solve_explicit(problem: WaveProblem, device: DeviceInfo | None = None) -> So
         stiffness_bound = operator_bound(K_mat, mass_lumped)
         omega_max = float(np.sqrt(stiffness_bound))
         C_mat = fem.petsc.assemble_matrix(fem.form(problem.damping(du, u_)), bcs=[])
-        stack.callback(C_mat.destroy)
         C_mat.assemble()
         if problem.any_viscoelastic:
             Kv_mat = fem.petsc.assemble_matrix(fem.form(problem.damping_visco(du, u_)), bcs=[])
             Kv_mat.assemble()
             C_mat.axpy(1.0, Kv_mat, structure=PETSc.Mat.Structure.DIFFERENT_NONZERO_PATTERN)
             Kv_mat.destroy()
+        C_full, C_mat = C_mat, _drop_zero_entries(C_mat)
+        C_full.destroy()
+        stack.callback(C_mat.destroy)
         damping_bound = operator_bound(C_mat, mass_lumped)
 
-        dt_crit = 1.0 / max(omega_max, damping_bound)
+        dt_crit = RK4_STABILITY_RADIUS / max(omega_max, damping_bound)
         requested_dt = float(cfg["dt"] or cfg["CFL"] * dt_crit)
         if requested_dt > dt_crit * (1 + 1e-12):
             raise ValueError(
-                f"Requested dt={requested_dt:g} exceeds conservative RK4 limit {dt_crit:g}"
+                f"Requested dt={requested_dt:g} exceeds the RK4 stability limit {dt_crit:g}"
             )
-        dt_val, n_steps = time_grid(problem.layout.duration, requested_dt)
-        _check_postprocess_samples(cfg, n_steps)
+        dt_val, n_steps, stride = _sampled_time_grid(cfg, problem.layout, requested_dt)
 
         problem.traction_amplitude.value = 1.0
         f_spatial = fem.petsc.create_vector(V)
@@ -599,10 +738,11 @@ def solve_explicit(problem: WaveProblem, device: DeviceInfo | None = None) -> So
         if rank == 0:
             log(f"  Frequency upper bound = {omega_max:.2e} rad/s")
             log(f"  Damping spectral bound = {damping_bound:.2e} 1/s")
-            log(f"  Conservative step limit = {fmt_time(dt_crit)}")
+            log(f"  RK4 stability limit   = {fmt_time(dt_crit)}")
             log(f"  Δt (CFL={cfg['CFL']}) = {fmt_time(dt_val)}")
             log(f"  Number of steps: {n_steps}")
             log(f"  Total time T   = {fmt_time(problem.layout.duration)}")
+            log(f"  Sensor sampling: every {stride} step(s) ({fmt_time(stride * dt_val)})")
             if damping_bound > DAMPING_LIMITED_RATIO * omega_max:
                 warn(
                     f"Damping limits the explicit step {damping_bound / omega_max:.0f}x below "
@@ -619,6 +759,7 @@ def solve_explicit(problem: WaveProblem, device: DeviceInfo | None = None) -> So
             "stiffness_bound": stiffness_bound,
             "damping_bound": damping_bound,
             "dt_limit": dt_crit,
+            "sample_stride": stride,
         }
 
         if device is not None:
@@ -650,6 +791,7 @@ def solve_explicit(problem: WaveProblem, device: DeviceInfo | None = None) -> So
                 source=problem.source,
                 backend=backend,
                 save_every=save_every,
+                sample_every=stride,
                 snapshot_callback=snapshot if vtx is not None else None,
                 report_interval=report_every,
                 log_func=log if rank == 0 else None,
@@ -666,29 +808,15 @@ def solve_explicit(problem: WaveProblem, device: DeviceInfo | None = None) -> So
                 runtime=runtime,
             )
 
-        # Distributed PETSc engine (identical RK4 scheme via numerics.rk4_step).
-        v_half = fem.Function(V)
-        u_arr, vh_arr = u.x.array, v_half.x.array
-        u_vec, vh_vec = u.x.petsc_vec, v_half.x.petsc_vec
-        r_vec = fem.petsc.create_vector(V)
-        stack.callback(r_vec.destroy)
-        c_vec = fem.petsc.create_vector(V)
-        stack.callback(c_vec.destroy)
-
-        def acceleration(disp: np.ndarray, vel: np.ndarray, t: float) -> np.ndarray:
-            u_arr[:n_owned_dofs] = disp
-            vh_arr[:n_owned_dofs] = vel
-            K_mat.mult(u_vec, r_vec)
-            C_mat.mult(vh_vec, c_vec)
-            r_vec.axpy(1.0, c_vec)
-            return (problem.source(t) * load_shape - r_vec.array_r[:n_owned_dofs]) * inv_mass
-
+        # Distributed PETSc engine: allocation-free RK4, identical to numerics.rk4_step.
+        stepper = PetscRK4(K_mat, C_mat, inv_mass, load_shape, problem.source)
+        stack.callback(stepper.destroy)
+        u_arr = u.x.array
         n_owned = len(problem.probes.indices)
-        sensor_x = np.zeros((n_steps + 1, n_owned))
-        sensor_y = np.zeros((n_steps + 1, n_owned))
-        times = np.arange(n_steps + 1) * dt_val
-        disp = np.zeros(n_owned_dofs)
-        vel = np.zeros(n_owned_dofs)
+        n_samples = n_steps // stride + 1
+        sensor_x = np.zeros((n_samples, n_owned))
+        sensor_y = np.zeros((n_samples, n_owned))
+        times = np.arange(n_samples) * (stride * dt_val)
         if rank == 0:
             log(
                 f"\n{'═' * 58}\n  Starting EXPLICIT time-stepping (PETSc, {nprocs} ranks) "
@@ -696,20 +824,24 @@ def solve_explicit(problem: WaveProblem, device: DeviceInfo | None = None) -> So
             )
         t_loop = pytime.perf_counter()
         for i in range(n_steps):
-            disp, vel = rk4_step(disp, vel, times[i], dt_val, acceleration)
-            u_arr[:n_owned_dofs] = disp
-            u.x.scatter_forward()
-            if n_owned:
-                values = problem.probes.sample(u)
-                sensor_x[i + 1] = values[:, 0]
-                sensor_y[i + 1] = values[:, 1]
-            if vtx is not None and i % save_every == 0:
-                vtx.write(times[i + 1])
-            if (i + 1) % report_every == 0:
-                if comm.allreduce(not np.isfinite(disp).all(), op=MPI.LOR):
-                    raise FloatingPointError(f"Non-finite state at step {i + 1}/{n_steps}")
+            stepper.step(i * dt_val, dt_val)
+            step = i + 1
+            sample_now = step % stride == 0
+            snapshot_now = vtx is not None and i % save_every == 0
+            if sample_now or snapshot_now:
+                u_arr[:n_owned_dofs] = stepper.u.array_r
+                u.x.scatter_forward()
+                if sample_now and n_owned:
+                    values = problem.probes.sample(u)
+                    sensor_x[step // stride] = values[:, 0]
+                    sensor_y[step // stride] = values[:, 1]
+                if snapshot_now:
+                    vtx.write(step * dt_val)
+            if step % report_every == 0:
+                if comm.allreduce(not np.isfinite(stepper.u.array_r).all(), op=MPI.LOR):
+                    raise FloatingPointError(f"Non-finite state at step {step}/{n_steps}")
                 if rank == 0:
-                    _progress(i + 1, n_steps, t_loop)
+                    _progress(step, n_steps, t_loop)
         loop_seconds = pytime.perf_counter() - t_loop
 
     runtime.update(engine="petsc", device="cpu", precision="float64")
@@ -895,22 +1027,27 @@ def run_simulation(
                 [
                     f"GuidedWaveFEM solver: {stype.upper()}",
                     f"MPI ranks: {nprocs}",
+                    f"Threads: {describe_thread_state(nprocs)}",
                     f"Mode: {summary['structure_mode']}",
                     f"Config: {cfg.get('_config_source', 'Defaults')}",
                 ]
             )
         )
         print_structure_table(summary, rank=rank, f0=cfg["f_center"])
-        if summary["has_fluid"]:
-            log(
-                "  Fluid model: regularized elasticity (small shear modulus) with continuous "
-                "tangential displacement; not a mixed acoustic formulation."
-            )
     preflight_estimate(cfg, rank=rank)
 
     problem = build_problem(cfg, summary)
     layout = problem.layout
     if rank == 0:
+        if summary["has_fluid"]:
+            c_shear = max(r["c_T"] for r in summary["all_regions"] if r["is_fluid"])
+            ratio = c_shear / layout.mesh_frequency / layout.h_target
+            log(
+                "  Fluid model: regularized elasticity (small shear modulus) with continuous "
+                "tangential displacement; not a mixed acoustic formulation. Its spurious shear "
+                f"wavelength is {ratio:.1e} element sizes at the mesh frequency (unresolved; "
+                "carries negligible energy)."
+            )
         log(f"  Excitation: {describe_source(cfg['source_type'], cfg.get('n_cycles'))}")
         log(f"  Shortest wavelength λ_min = {fmt_length(layout.lambda_min)}")
         log(f"  Target element size h     = {fmt_length(layout.h_target)}")

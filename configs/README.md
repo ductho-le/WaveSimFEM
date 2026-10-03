@@ -17,16 +17,19 @@ Together they cover every material model: `isotropic` (01–04), `viscoelastic`
 
 ## Preflight sizes (`--dry-run`, default settings)
 
-| # | Q2 elements | DOFs | Duration | Notes |
-| :-- | --: | --: | --: | :-- |
-| 01 | 9.2 k | 80 k | 118 μs | Quick tutorial case |
-| 02 | 12.6 k | 105 k | 90 μs | Implicit Newmark: the viscous adhesive would cap the explicit step |
-| 03 | 36.4 k | 293 k | 31 μs | Truncated halfspace with a bottom sponge |
-| 04 | 12.5 k | 101 k | 800 ms | Same solver at seismic scale; reduced sponge `beta` (high Vp contrast) |
-| 05 | 82.4 k | 662 k | 55 μs | Largest case; `mpiexec -n 4` recommended |
+| # | Q2 elements | DOFs | Duration | Steps (preflight) | Notes |
+| :-- | --: | --: | --: | --: | :-- |
+| 01 | 13.8 k | 120 k | 147 μs | ≈ 34 k | Mesh resolves the 2 MHz plot edge; long window for slow A0 |
+| 02 | 12.6 k | 105 k | 90 μs | 2.2 k | Implicit Newmark: the viscous adhesive would cap the explicit step |
+| 03 | 36.4 k | 293 k | 31 μs | 4.5 k | Truncated halfspace with a bottom sponge |
+| 04 | 12.5 k | 101 k | 800 ms | 9.8 k | Same solver at seismic scale; reduced sponge `beta` (high Vp contrast) |
+| 05 | 82.4 k | 662 k | 55 μs | 13.8 k | Largest case; `mpiexec -n 4` recommended |
 
-The explicit time step is finalised from the assembled operator bound and is
-usually smaller than the preflight estimate, so expect more steps than shown.
+The preflight explicit step evaluates the solver's Gershgorin bound element by
+element, so it is never larger than the final step, and the step counts agree
+up to rounding to the sensor stride (example 01: 34,082 estimated, 34,083 run;
+example 03: 4,511 vs 4,512). On 4 MPI ranks example 02 takes about 40 s,
+example 03 about 100 s and example 01 about 270 s.
 
 ## Running
 
@@ -69,16 +72,24 @@ closest to your structure. Useful conventions:
 
 ## Numerical notes
 
-1. **Explicit solver:** classical RK4 with lumped mass; the critical step comes from
-   absolute row sums of the assembled stiffness and damping operators.
-2. **Mesh sizing:** elements resolve the slowest physical wavelength at
+1. **Explicit solver:** classical RK4 with lumped mass; the critical step
+   `2.6 / max(sqrt(B_K), B_C)` comes from absolute row sums of the assembled
+   stiffness and damping operators and the RK4 half-disk stability radius.
+   `solver.CFL` is the fraction of that limit actually used.
+2. **Implicit solver:** unconditionally stable; `solver.steps_per_period` steps
+   per period of `mesh.max_frequency` (default 40, about 0.2 % period error).
+3. **Mesh sizing:** elements resolve the slowest physical wavelength at
    `mesh.max_frequency` (default `3 * f_center`) with `elems_per_wavelength`
    elements; override with `--max-frequency` for quick evaluations.
-3. **Fluid formulation:** `fluid` is a regularised small-shear elastic model
+4. **Geometry and sampling defaults:** `excitation_width`, `source_x`, and the
+   sensor array may be left `null`; they scale with `lambda_ref = c_slow / f_center`.
+   Sensor traces are stored at 20 samples per period of `max_frequency` unless
+   `sensors.sample_rate` is set.
+5. **Fluid formulation:** `fluid` is a regularised small-shear elastic model
    (`mu_f = 1e-8 K_f`) with full tangential continuity, not mixed inviscid
    acoustics. Scholte/Stoneley interface waves and leaky-wave attenuation are
    approximate; treat fluid-loaded results qualitatively unless validated.
-4. **Truncated halfspaces:** body waves longer than the bottom sponge (for example
+6. **Truncated halfspaces:** body waves longer than the bottom sponge (for example
    bedrock P-waves in example 04) are only partially absorbed.
-5. **Strict schema:** unknown keys and constitutive fields not used by a region's
+7. **Strict schema:** unknown keys and constitutive fields not used by a region's
    `material_model` are rejected (e.g. `Cv` requires `viscoelastic`).

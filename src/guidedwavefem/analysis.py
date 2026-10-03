@@ -9,6 +9,7 @@ rad/mm), so seismic and ultrasonic records are both displayed naturally.
 
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 from collections.abc import Mapping, Sequence
@@ -62,6 +63,12 @@ _LIMIT_KEYS = {
     "k_max": ("disp_k_max", "k_max_disp", 1e3),
 }
 
+#: Legacy archives without ``is_fluid_top``: a top region with ``c_T < ratio · c_L``
+#: is a regularized fluid (its shear speed is ~1e-4 c_L). Scale-free, so very soft
+#: solids (e.g. soils with Vs < 50 m/s, whose c_T/c_L stays above ~0.05) are not
+#: misclassified.
+FLUID_SHEAR_RATIO = 0.01
+
 
 def latex_available() -> bool:
     """True if the external tools required by Matplotlib ``usetex`` are on PATH."""
@@ -112,12 +119,21 @@ def bandpass_filter(
 
 def _save(fig: Figure, base: str, formats: Sequence[str], dpi: int) -> list[str]:
     paths = []
+    ps_logger = logging.getLogger("matplotlib.backends.backend_ps")
     for ext in formats:
         ext = ext.lower().lstrip(".")
         if ext not in FIGURE_FORMATS:
             raise ValueError(f"Unsupported figure format '{ext}'")
         path = f"{base}.{ext}"
-        fig.savefig(path, dpi=dpi, bbox_inches="tight")
+        # EPS has no alpha channel; translucent legend frames/grid lines are
+        # flattened to opaque by design, so the backend's warning is suppressed.
+        previous = ps_logger.level
+        if ext == "eps":
+            ps_logger.setLevel(logging.ERROR)
+        try:
+            fig.savefig(path, dpi=dpi, bbox_inches="tight")
+        finally:
+            ps_logger.setLevel(previous)
         log(f"  Saved: {path}")
         paths.append(path)
     return paths
@@ -300,7 +316,9 @@ def plot_full_analysis(
     c_T = float(data["c_T"])
     st_mode = str(data["structure_mode"]) if "structure_mode" in data else ""
     c_R = float(data["c_R"]) if "c_R" in data and np.isfinite(data["c_R"]) else None
-    is_fluid_top = bool(data["is_fluid_top"]) if "is_fluid_top" in data else c_T < 50.0
+    is_fluid_top = (
+        bool(data["is_fluid_top"]) if "is_fluid_top" in data else c_T < FLUID_SHEAR_RATIO * c_L
+    )
     has_fluid = bool(data["has_fluid"]) if "has_fluid" in data else is_fluid_top
     c_fluid = float(data["c_fluid"]) if "c_fluid" in data else (c_L if is_fluid_top else None)
     if c_R is None and st_mode == "halfspace" and "E" in data and "nu" in data:
@@ -328,7 +346,7 @@ def plot_full_analysis(
         raise ValueError("f_center must be finite and positive")
 
     s_pitch = float(data["sensor_pitch"]) if "sensor_pitch" in data else sensor_x[1] - sensor_x[0]
-    c_ref = c_fluid if is_fluid_top and c_fluid else (c_T if c_T >= 50.0 else c_L)
+    c_ref = (c_fluid or c_L) if is_fluid_top else c_T
     limits = _resolve_limits(
         data,
         {"f_min": f_min, "f_max": f_max, "k_min": k_min, "k_max": k_max},
@@ -348,8 +366,10 @@ def plot_full_analysis(
     log(f"{'=' * 58}")
     log("  Computing forward-propagating 2D FFT dispersion (u1 and u2 separated)...")
     freqs, wavenumbers, power_u2 = dispersion_spectrum(dy, times, sensor_x)
-    f_mask = (freqs >= limits["f_min"]) & (freqs <= limits["f_max"])
-    k_mask = (wavenumbers >= limits["k_min"]) & (wavenumbers <= limits["k_max"])
+    # Keep every bin whose cell overlaps the plot range so the image fills the axes.
+    half_df, half_dk = 0.5 * (freqs[1] - freqs[0]), 0.5 * (wavenumbers[1] - wavenumbers[0])
+    f_mask = (freqs >= limits["f_min"] - half_df) & (freqs <= limits["f_max"] + half_df)
+    k_mask = (wavenumbers >= limits["k_min"] - half_dk) & (wavenumbers <= limits["k_max"] + half_dk)
     if not f_mask.any() or not k_mask.any():
         raise ValueError("Requested dispersion range contains no sampled FFT bins")
 
@@ -434,13 +454,18 @@ def plot_full_analysis(
             return rf"${sym} = {value:.0f}\,\mathrm{{m/s}}${suffix}"
 
         speed_lines = []
+        # c_L/c_T describe the top plate layer; say so when several regions exist.
+        layered = int(data.get("n_layers", 1)) > 1 or st_mode in (
+            "plate_on_halfspace",
+            "plate_in_halfspaces",
+        )
+        top_note = "top layer" if layered else ""
         if is_fluid_top:
             speed_lines.append((c_L, "--", "cyan", _speed("c_f", c_L, "fluid")))
         else:
-            speed_lines.append((c_L, "--", "cyan", _speed("c_L", c_L)))
-            if c_T >= 50.0:
-                speed_lines.append((c_T, ":", "lime", _speed("c_T", c_T)))
-        if c_R is not None and not is_fluid_top and c_T >= 50.0:
+            speed_lines.append((c_L, "--", "cyan", _speed("c_L", c_L, top_note)))
+            speed_lines.append((c_T, ":", "lime", _speed("c_T", c_T, top_note)))
+        if c_R is not None and not is_fluid_top:
             speed_lines.append((c_R, "-.", "gold", _speed("c_R", c_R, "Rayleigh")))
         elif has_fluid and not is_fluid_top and c_fluid is not None:
             speed_lines.append((c_fluid, "-.", "magenta", _speed("c_f", c_fluid, "fluid")))
@@ -467,7 +492,7 @@ def plot_full_analysis(
         disp_lines = []
         if is_fluid_top:
             disp_lines.append((c_L, "--", "cyan", _speed("c_f", c_L)))
-        elif c_R is not None and c_T >= 50.0:
+        elif c_R is not None:
             disp_lines.append((c_R, "--", "cyan", _speed("c_R", c_R)))
         if has_fluid and not is_fluid_top and c_fluid is not None:
             disp_lines.append((c_fluid, ":", "magenta", _speed("c_f", c_fluid)))

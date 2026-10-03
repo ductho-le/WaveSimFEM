@@ -39,12 +39,16 @@ _EXPORTS: dict[str, str] = {
     "preflight_estimate": "materials",
     "structure_from_config": "materials",
     # numerics
+    "PetscRK4": "numerics",
     "PointSensors": "numerics",
+    "RK4_STABILITY_RADIUS": "numerics",
     "dispersion_spectrum": "numerics",
     "operator_bound": "numerics",
     "rk4_step": "numerics",
     "time_grid": "numerics",
     "validate_tensor": "numerics",
+    # parallel
+    "limit_threads_per_rank": "parallel",
     # reporting
     "set_verbosity": "reporting",
     # sources
@@ -66,9 +70,11 @@ _EXPORTS: dict[str, str] = {
 }
 
 __all__ = [
+    "RK4_STABILITY_RADIUS",
     "SOURCE_TYPES",
     "DeviceInfo",
     "DeviceUnavailableError",
+    "PetscRK4",
     "PointSensors",
     "__version__",
     "bandpass_filter",
@@ -81,6 +87,7 @@ __all__ = [
     "flatten_config",
     "generate_template_config",
     "integrate_explicit_rk4",
+    "limit_threads_per_rank",
     "load_config",
     "operator_bound",
     "parse_and_resolve_config",
@@ -140,6 +147,8 @@ if TYPE_CHECKING:  # pragma: no cover - static analysers only
         structure_from_config,
     )
     from guidedwavefem.numerics import (
+        RK4_STABILITY_RADIUS,
+        PetscRK4,
         PointSensors,
         dispersion_spectrum,
         operator_bound,
@@ -147,6 +156,7 @@ if TYPE_CHECKING:  # pragma: no cover - static analysers only
         time_grid,
         validate_tensor,
     )
+    from guidedwavefem.parallel import limit_threads_per_rank
     from guidedwavefem.reporting import set_verbosity
     from guidedwavefem.solvers import build_problem, run_simulation, solve_explicit, solve_implicit
     from guidedwavefem.solvers_gpu import (

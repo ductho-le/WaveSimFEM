@@ -3,6 +3,18 @@
 The explicit solver uses classical RK4 on displacement and velocity. The
 stability estimate assumes symmetric positive (semi)definite FE operators.
 
+Explicit stability
+------------------
+For ``M_L ü + C u̇ + K u = f`` with diagonal positive ``M_L`` and symmetric
+positive semidefinite ``K`` and ``C``, every eigenpair of the first-order system
+satisfies ``λ² m + λ c + k = 0`` with Rayleigh quotients ``m > 0`` and
+``c, k ≥ 0``. Complex roots have ``|λ|² = k/m ≤ ρ(M_L⁻¹K)``; real roots have
+``|λ| ≤ c/m ≤ ρ(M_L⁻¹C)``; and always ``Re λ ≤ 0``. All eigenvalues therefore
+lie in the closed left half-disk of radius ``Ω = max(√B_K, B_C)``, where
+``B_K`` and ``B_C`` are Gershgorin bounds (:func:`operator_bound`). RK4 is
+stable for ``Δt Ω ≤ R``, with ``R`` the radius of the largest left half-disk in
+the RK4 stability region (:data:`RK4_STABILITY_RADIUS`).
+
 Heavy dependencies (DOLFINx, mpi4py) are imported lazily so that configuration
 handling and post-processing do not initialize MPI or the FEM stack.
 """
@@ -19,6 +31,44 @@ if TYPE_CHECKING:
 
 ArrayT = TypeVar("ArrayT")
 
+#: Radius of the largest closed half-disk ``{|z| ≤ R, Re z ≤ 0}`` inside the
+#: classical RK4 stability region ``|1 + z + z²/2 + z³/6 + z⁴/24| ≤ 1``. The
+#: exact value is 2.6156… (binding boundary point at ``arg z ≈ 122.5°``, see
+#: :func:`rk4_half_disk_radius`); it is rounded down for a safety margin.
+RK4_STABILITY_RADIUS = 2.6
+
+
+def rk4_amplification(z: complex | np.ndarray) -> complex | np.ndarray:
+    """RK4 amplification factor ``R(z) = 1 + z + z²/2 + z³/6 + z⁴/24``."""
+    return 1.0 + z + z**2 / 2.0 + z**3 / 6.0 + z**4 / 24.0
+
+
+def rk4_half_disk_radius(n_angles: int = 721, tol: float = 1e-12) -> float:
+    """Numerically compute the largest left half-disk inside the RK4 stability region.
+
+    For each ray ``z = r e^{iθ}`` with ``θ ∈ [π/2, π]`` the first exit radius is
+    bracketed on a fine grid and refined by bisection; the result is the minimum
+    over all rays. Used to verify :data:`RK4_STABILITY_RADIUS`.
+    """
+    radii = np.linspace(0.0, 3.5, 3501)
+    best = np.inf
+    for theta in np.linspace(np.pi / 2, np.pi, n_angles):
+        ray = np.exp(1j * theta)
+        unstable = np.abs(rk4_amplification(radii * ray)) > 1.0 + tol
+        unstable[0] = False
+        first = int(np.argmax(unstable))
+        if not unstable[first]:
+            continue
+        lo, hi = radii[first - 1], radii[first]
+        for _ in range(60):
+            mid = 0.5 * (lo + hi)
+            if abs(rk4_amplification(mid * ray)) > 1.0 + tol:
+                hi = mid
+            else:
+                lo = mid
+        best = min(best, lo)
+    return float(best)
+
 
 def rk4_step(
     u: ArrayT,
@@ -29,9 +79,9 @@ def rk4_step(
 ) -> tuple[ArrayT, ArrayT]:
     """Advance ``ü = a(u, u̇, t)`` by one classical RK4 step.
 
-    This functional reference implementation is used by the distributed
-    (PETSc/MPI) explicit solver and as the oracle for the array-backend engine
-    in :mod:`guidedwavefem.solvers_gpu`.
+    This functional reference implementation is the oracle for the distributed
+    :class:`PetscRK4` integrator and for the array-backend engine in
+    :mod:`guidedwavefem.solvers_gpu`.
     """
     k1u = v
     k1v = acceleration(u, v, t)
@@ -45,6 +95,109 @@ def rk4_step(
         u + dt * (k1u + 2 * k2u + 2 * k3u + k4u) / 6,
         v + dt * (k1v + 2 * k2v + 2 * k3v + k4v) / 6,
     )
+
+
+class PetscRK4:
+    """Allocation-free classical RK4 for ``M_L ü + C u̇ + K u = s(t) f`` on PETSc vectors.
+
+    Algebraically identical to :func:`rk4_step` (the functional oracle), but all
+    stage vectors are preallocated and updated with fused PETSc kernels, so a
+    step costs eight SpMVs and a handful of BLAS-1 operations with no temporaries.
+
+    Parameters
+    ----------
+    stiffness, damping
+        Assembled PETSc matrices ``K`` and ``C`` (same parallel layout).
+    inv_mass
+        Owned entries of the inverse lumped mass ``M_L⁻¹``.
+    load
+        Owned entries of the spatial load vector ``f``.
+    source
+        Scalar time function ``s(t)``.
+    """
+
+    def __init__(
+        self,
+        stiffness: Any,
+        damping: Any,
+        inv_mass: np.ndarray,
+        load: np.ndarray,
+        source: Callable[[float], float],
+    ) -> None:
+        self.K, self.C, self.source = stiffness, damping, source
+        self._inv_mass = stiffness.createVecLeft()
+        self._inv_mass.array[:] = inv_mass
+        self._load = stiffness.createVecLeft()
+        self._load.array[:] = load
+        names = ("u", "v", "_ut", "_vt", "_du", "_dv", "_a")
+        for name in names:
+            vec = stiffness.createVecLeft()
+            vec.set(0.0)
+            setattr(self, name, vec)
+        self._vectors = [self._inv_mass, self._load, *(getattr(self, n) for n in names)]
+
+    def _acceleration(self, u: Any, v: Any, t: float) -> Any:
+        a = self._a
+        self.K.mult(u, a)
+        self.C.multAdd(v, a, a)  # a = K u + C v
+        a.scale(-1.0)
+        a.axpy(float(self.source(t)), self._load)
+        a.pointwiseMult(a, self._inv_mass)
+        return a
+
+    def step(self, t: float, dt: float) -> None:
+        """Advance the state ``(u, v)`` from ``t`` to ``t + dt`` in place."""
+        u, v, ut, vt, du, dv = self.u, self.v, self._ut, self._vt, self._du, self._dv
+        h2 = 0.5 * dt
+        a = self._acceleration(u, v, t)
+        v.copy(du)
+        a.copy(dv)
+        ut.waxpy(h2, v, u)
+        vt.waxpy(h2, a, v)  # k2u
+        a = self._acceleration(ut, vt, t + h2)
+        du.axpy(2.0, vt)
+        dv.axpy(2.0, a)
+        ut.waxpy(h2, vt, u)  # uses k2u before vt becomes k3u
+        vt.waxpy(h2, a, v)
+        a = self._acceleration(ut, vt, t + h2)
+        du.axpy(2.0, vt)
+        dv.axpy(2.0, a)
+        ut.waxpy(dt, vt, u)
+        vt.waxpy(dt, a, v)
+        a = self._acceleration(ut, vt, t + dt)
+        du.axpy(1.0, vt)
+        dv.axpy(1.0, a)
+        u.axpy(dt / 6.0, du)
+        v.axpy(dt / 6.0, dv)
+
+    def destroy(self) -> None:
+        """Release the PETSc work vectors."""
+        for vec in self._vectors:
+            vec.destroy()
+
+
+def sample_stride(
+    dt: float,
+    n_steps: int,
+    sample_rate: float,
+    *,
+    f_max: float | None = None,
+    min_samples: int = 1,
+) -> int:
+    """Steps between recorded sensor samples for a target ``sample_rate`` [Hz].
+
+    The stride is reduced when needed so that the Nyquist frequency stays above
+    ``1.25 f_max`` and at least ``min_samples`` samples (including ``t = 0``) are
+    recorded. The returned stride is always ≥ 1.
+    """
+    if not (np.isfinite(dt) and dt > 0 and np.isfinite(sample_rate) and sample_rate > 0):
+        raise ValueError("dt and sample_rate must be finite and positive")
+    stride = max(1, int(np.floor(1.0 / (sample_rate * dt) * (1.0 + 1e-9))))
+    if f_max is not None and f_max > 0:
+        stride = min(stride, max(1, int(np.floor(1.0 / (2.5 * f_max * dt)))))
+    if min_samples > 1:
+        stride = min(stride, max(1, n_steps // (min_samples - 1)))
+    return stride
 
 
 def csr_row_abs_sums(indptr: np.ndarray, values: np.ndarray) -> np.ndarray:

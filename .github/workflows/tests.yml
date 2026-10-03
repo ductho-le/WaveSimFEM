@@ -28,12 +28,13 @@ jobs:
       - run: ruff format --check src tests tools
 
   test:
-    name: Tests (DOLFINx ${{ matrix.dolfinx }})
+    name: Tests (Python ${{ matrix.python }}, DOLFINx ${{ matrix.dolfinx }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
+        python: ["3.11", "3.12"]
         dolfinx: ["0.10.0"]
     defaults:
       run:
@@ -43,6 +44,9 @@ jobs:
       - uses: mamba-org/setup-micromamba@0dea6379afdaffa5d528b3d1dabc45da37f443fc # v2.0.4
         with:
           environment-file: environment.yml
+          create-args: >-
+            python=${{ matrix.python }}
+            fenics-dolfinx=${{ matrix.dolfinx }}
           cache-environment: true
       - name: Install package
         run: python -m pip install --no-deps --no-build-isolation -e .
@@ -54,6 +58,13 @@ jobs:
         run: |
           guided-waves --version
           for example in configs/*.yaml; do guided-waves -c "$example" --dry-run -q; done
+      - name: Example smoke runs (2 MPI ranks, shortened)
+        run: |
+          mpiexec -n 2 guided-waves -c configs/03_halfspace_steel_rayleigh.yaml -q \
+            --duration 4e-6 --max-frequency 5e5 --no-postprocess --output "$RUNNER_TEMP/ex03"
+          mpiexec -n 2 guided-waves -c configs/02_layers_bonded_joint.yaml -q \
+            --duration 10e-6 --max-frequency 3e5 --no-postprocess --output "$RUNNER_TEMP/ex02"
+          test -s "$RUNNER_TEMP/ex03/sensor_data.npz" && test -s "$RUNNER_TEMP/ex02/sensor_data.npz"
 
   build:
     name: Build distribution
@@ -64,8 +75,9 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
-      - run: python -m pip install build
+      - run: python -m pip install build twine
       - run: python -m build
+      - run: python -m twine check --strict dist/*
       - name: Install wheel and verify metadata
         run: |
           python -m pip install dist/*.whl

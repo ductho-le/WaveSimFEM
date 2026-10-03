@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from guidedwavefem.cli import main
+from guidedwavefem._launcher import main
 
 if __name__ == "__main__":
     main()

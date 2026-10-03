@@ -1,6 +1,11 @@
 # Changelog
 
-## 0.3.0 — production hardening
+All notable changes are documented here. Versions follow
+[Semantic Versioning](https://semver.org/).
+
+## [Unreleased]
+
+## [0.3.0] — 2026-10-03 — production hardening
 
 ### Breaking changes
 - Explicit device requests are strict: `cuda`, `cuda:N` and `mps` raise
@@ -23,8 +28,26 @@
   strings, `null` = automatic). The legacy `f_*_disp_MHz`/`k_*_disp` keys and
   archive fields are still read and converted; giving both forms is an error.
 - Defaults now scale with the problem: sponge `alpha/beta` (`null`) scale with
-  `f_center` (`alpha` unchanged at 1 MHz), the default duration adds the pulse length, and
-  the default `source_x` keeps the load one `excitation_width` (≥ 5 mm) from the sponge.
+  `f_center` (`alpha` unchanged at 1 MHz) and the default duration adds the pulse
+  length.
+- Source and sensor geometry defaults (`excitation_width`, `source_x`,
+  `sensor_offset`, `sensor_pitch`, `n_sensors`) are now `null` and derived from the
+  reference wavelength `λ_ref = c_slow / f_center` (width `λ/2`, sponge gap `λ`,
+  offset `2λ`, pitch `λ/8`, sensors filling the sensing region up to 1001), each
+  capped by a fraction of `sensing_length`. The former fixed millimetre defaults
+  (2 mm width, 5 mm gap, 50 mm
+  offset, 301 sensors at 0.5 mm) were meaningless at seismic scale.
+  Configurations that relied on them should set the values explicitly.
+- Implicit Newmark step is accuracy-driven: `Δt = 1 / (steps_per_period ·
+  max_frequency)` with the new `solver.steps_per_period` (default 40). It replaces
+  the element-size/CFL rule, which made thin layers force needlessly small steps
+  (example 02: 2,160 instead of about 11,200 steps). `CFL` now applies to the explicit
+  solver only. `materials.implicit_time_step` changed signature accordingly and
+  `explicit_time_step_heuristic` was removed.
+- Sensor archives are decimated: `times` and `sensor_data_*` hold every
+  `runtime.sample_stride`-th step (default 20 samples per period of
+  `max_frequency`, Nyquist kept above 1.25× the plotted band, ≥ 32 samples),
+  instead of every solver step. `sensors.sample_rate` sets the rate explicitly.
 - Default stiffness-proportional sponge damping lowered from 1e-8 s to 1e-9 s at
   1 MHz: it contributed < 4 % of the damping at `f_center` but made the explicit
   step damping-limited (4-33× more steps in the examples). The solver now warns
@@ -32,6 +55,22 @@
 - Example configurations replaced (see *Examples* below).
 
 ### Fixed
+- Explicit RK4 step limit: `Δt_crit` now uses the RK4 half-disk stability radius
+  `R = 2.6` (largest left half-disk in the RK4 stability region, 2.6156) instead
+  of 1, so the step is 2.6× larger while remaining rigorous. Example 03 runs
+  4,512 instead of 11,727 steps with an unchanged Rayleigh speed (2982 m/s vs
+  `c_R` = 2981 m/s).
+- Preflight explicit step now evaluates the same Gershgorin bound per element
+  before meshing (`materials.element_operator_bounds`), so it is a guaranteed
+  lower estimate of the solver step instead of a wave-speed heuristic.
+- BLAS/OpenMP oversubscription under MPI: `guided-waves` and `python -m
+  guidedwavefem` cap threads per rank at `cpus // ranks_per_node` unless the user
+  set them (`guidedwavefem.parallel`); the setting is shown in the run banner.
+- White strip in dispersion maps at the plot-limit edges (frequency/wavenumber
+  masks now include the boundary bins).
+- Fluid-layer detection in the analysis used an absolute `c_T < 50 m/s`
+  threshold; it is now relative (`c_T < 0.01 c_L`), so slow solids such as soft
+  soils are no longer misclassified.
 - `solver.device` and `solver.precision` in sectioned configs were ignored.
 - A shipped example silently dropped the bone viscosity tensor (now rejected by
   the strict material schema).
@@ -67,6 +106,14 @@
   CLI paths, and an end-to-end physics check (S0 plate velocity, ≈0.1 % error).
 
 ### Changed
+- Implicit solver: `K + c₁M + c₁c₅C` is assembled once and the right-hand side
+  is formed from two SpMVs with preassembled `M` and `C` (no per-step form
+  assembly; 2.1× faster per step in example 02, bit-identical results). GAMG
+  receives the rigid-body near-nullspace.
+- Distributed explicit solver: allocation-free `PetscRK4` integrator with fused
+  vector kernels; sensors are interpolated and gathered only at sample steps;
+  explicitly stored zeros are dropped from the damping matrix, so its SpMV
+  scales with the sponge volume.
 - Lazy package exports: `import guidedwavefem` no longer imports DOLFINx/MPI.
 - Vectorized `operator_bound` (≈100× faster on large meshes); sensor histories
   are collected with `Gatherv` instead of pickled object gathers.
@@ -90,7 +137,7 @@
 - Removed the previous examples 01-11 (including the TOML/JSON copies of 01 and the
   BoneDC benchmark cases). TOML and JSON remain supported formats.
 
-## 0.2.0 — numerical robustness update
+## [0.2.0] — numerical robustness update
 
 - Replace first-order damped Verlet with fourth-order explicit RK4.
 - Replace random fixed-count spectral iteration with conservative assembled

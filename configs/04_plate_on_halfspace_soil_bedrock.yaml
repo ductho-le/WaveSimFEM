@@ -32,7 +32,7 @@
 
 solver:
   type: "explicit"
-  CFL: 0.5
+  CFL: 0.5                      # Fraction (0, 1] of the rigorous RK4 stability limit
   time_factor: 1.2              # T = 1.2 * sensing_length / slowest speed + pulse length
 
 geometry:
@@ -70,7 +70,7 @@ excitation:
   f_center: 15.0                # [Hz]
   traction_max: 1.0e4           # [Pa] 10 kPa over the impact plate
   excitation_width: 3.0         # [m]
-  source_x: null                # [m] null = absorb_length + max(5 mm, excitation_width)
+  source_x: null                # [m] null = absorb_length + lambda_ref (<= sensing_length / 8)
   source_fx: 0.0                # Vertical impact
   source_fy: 1.0
 

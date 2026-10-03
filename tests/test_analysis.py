@@ -220,3 +220,41 @@ def test_quick_overview_tone_burst(tmp_path):
         n_cycles=5,
     )
     assert os.path.getsize(out) > 0
+
+
+def _legend_texts(monkeypatch):
+    texts: list[str] = []
+
+    def fake_save(fig, *args, **kwargs):
+        for ax in fig.axes:
+            legend = ax.get_legend()
+            if legend is not None:
+                texts.extend(t.get_text() for t in legend.get_texts())
+
+    monkeypatch.setattr("matplotlib.figure.Figure.savefig", fake_save)
+    return texts
+
+
+@pytest.mark.parametrize(
+    "c_l,c_t,fluid",
+    [
+        (120.0, 40.0, False),  # very soft soil: slow, but a solid (c_T/c_L = 1/3)
+        (1500.0, 1.5, True),  # regularized fluid: c_T/c_L = 1e-3
+    ],
+)
+def test_legacy_fluid_detection_is_relative(tmp_path, monkeypatch, c_l, c_t, fluid):
+    """Archives without ``is_fluid_top`` classify the top region by c_T/c_L, not by
+    an absolute speed, so slow solids keep their c_L/c_T guide lines."""
+    t = np.arange(512) * 1e-3
+    x = 2.0 + np.arange(32) * 0.5
+    sig = 1e-6 * np.sin(2 * np.pi * 15.0 * t[:, None] - 2.0 * x[None, :])
+    path = tmp_path / "soft.npz"
+    np.savez(
+        path, times=t, sensor_x=x, sensor_data_y=sig, sensor_data_x=sig, f_center=15.0,
+        c_L=c_l, c_T=c_t, source_x=0.0,
+    )  # fmt: skip
+    texts = _legend_texts(monkeypatch)
+    analysis.plot_full_analysis(str(path), str(tmp_path), usetex=False, formats=["png"])
+    joined = " ".join(texts)
+    assert ("fluid" in joined) is fluid
+    assert ("c_T" in joined) is not fluid

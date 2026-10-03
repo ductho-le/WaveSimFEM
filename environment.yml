@@ -3,7 +3,7 @@ channels:
   - conda-forge
 dependencies:
   # Runtime
-  - python=3.11
+  - python>=3.11,<3.13  # CI tests 3.11 and 3.12
   - fenics-dolfinx=0.10.0
   - petsc=3.24.*
   - petsc4py=3.24.*
@@ -16,6 +16,6 @@ dependencies:
   # Development / CI
   - pytest>=8
   - pytest-cov
-  - ruff
+  - ruff=0.16.9  # keep in sync with .pre-commit-config.yaml and CI
   - python-build
   - pip

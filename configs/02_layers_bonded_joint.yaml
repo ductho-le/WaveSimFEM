@@ -36,7 +36,7 @@ solver:
   # frequency, so in the explicit solver the adhesive viscosity would cap the step
   # about 4x below the wave-speed limit. Newmark is limited only by accuracy here.
   type: "implicit"
-  CFL: 0.5                      # Accuracy step fraction (h_min / c_L,max)
+  steps_per_period: 40          # Newmark steps per period at max_frequency (accuracy)
   duration: 90.0e-6             # [s] A0 needs ~45 us to cross the array + 16.7 us pulse
 
 geometry:
@@ -75,7 +75,7 @@ excitation:
   f_center: 300.0e3             # [Hz] 300 kHz
   traction_max: 1.0e6           # [Pa]
   excitation_width: 2.0e-3      # [m]
-  source_x: null                # [m] null = absorb_length + max(5 mm, excitation_width)
+  source_x: null                # [m] null = absorb_length + lambda_ref (<= sensing_length / 8)
   source_fx: 0.0                # Pure normal load (piezo wafer / contact transducer)
   source_fy: 1.0
 

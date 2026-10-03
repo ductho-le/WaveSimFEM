@@ -48,7 +48,7 @@ Issues = "https://github.com/ductho-le/GuidedWaveFEM/issues"
 Changelog = "https://github.com/ductho-le/GuidedWaveFEM/blob/main/CHANGELOG.md"
 
 [project.scripts]
-guided-waves = "guidedwavefem.cli:main"
+guided-waves = "guidedwavefem._launcher:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

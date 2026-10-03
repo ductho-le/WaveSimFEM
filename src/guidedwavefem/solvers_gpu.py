@@ -10,13 +10,14 @@ Design
   sparse product ``[K | C] @ z`` per stage instead of two.
 * **Allocation-free stages.** All stage vectors are preallocated; updates use
   ``out=``/in-place operations.
-* **Device-resident telemetry.** Sensor samples are written into a bounded
-  on-device ring buffer and flushed to host memory in large chunks, so there is
-  no host synchronization per time step.
+* **Device-resident telemetry.** Sensor samples (decimated to the configured
+  sample rate) are written into a bounded on-device ring buffer and flushed to
+  host memory in large chunks, so there is no host synchronization per time step.
 * **Lazy imports.** CuPy/PyTorch are only imported when their backend is used.
 
-The distributed (MPI) explicit solver uses :func:`guidedwavefem.numerics.rk4_step`
-with PETSc operators; both implement the identical scheme.
+The distributed (MPI) explicit solver uses :class:`guidedwavefem.numerics.PetscRK4`
+with PETSc operators; both implement the scheme of
+:func:`guidedwavefem.numerics.rk4_step`.
 """
 
 from __future__ import annotations
@@ -325,6 +326,7 @@ def integrate_explicit_rk4(
     report_interval: int = 0,
     log_func: Callable[[str], None] | None = None,
     history_chunk_bytes: int = DEFAULT_HISTORY_CHUNK_BYTES,
+    sample_every: int = 1,
 ) -> ExplicitRK4Result:
     """Integrate ``M_L ü + C u̇ + K u = s(t) f`` from rest with classical RK4.
 
@@ -344,6 +346,8 @@ def integrate_explicit_rk4(
         Progress/finite-check cadence in steps (``0`` → every ``n_steps//20``).
     history_chunk_bytes
         Upper bound of the on-device sensor ring buffer.
+    sample_every
+        Sensor sampling cadence in steps (samples at ``t = 0, sample_every·dt, ...``).
 
     Raises
     ------
@@ -352,6 +356,9 @@ def integrate_explicit_rk4(
     """
     if n_steps < 1 or not (np.isfinite(dt) and dt > 0):
         raise ValueError("n_steps must be >= 1 and dt finite and positive")
+    if int(sample_every) != sample_every or sample_every < 1:
+        raise ValueError("sample_every must be a positive integer")
+    sample_every = int(sample_every)
     log = log_func or (lambda _msg: None)
     n = len(inv_mass)
     K = _as_csr(stiffness, n)
@@ -362,9 +369,11 @@ def integrate_explicit_rk4(
     n_rows = S.shape[0]
     n_sensors = n_rows // 2
     stacked = sp.hstack([K, C], format="csr")
+    stacked.eliminate_zeros()  # sponge damping vanishes outside the absorbing layers
 
-    times = np.arange(n_steps + 1, dtype=np.float64) * dt
-    host_hist = np.zeros((n_steps + 1, n_rows), dtype=backend.dtype)
+    n_samples = n_steps // sample_every + 1
+    times = np.arange(n_samples, dtype=np.float64) * (sample_every * dt)
+    host_hist = np.zeros((n_samples, n_rows), dtype=backend.dtype)
     check_every = report_interval if report_interval > 0 else max(n_steps // 20, 1)
     h2 = 0.5 * dt
 
@@ -386,7 +395,9 @@ def integrate_explicit_rk4(
         a_scr = scratch[n:]
 
         itemsize = backend.dtype.itemsize
-        chunk_rows = int(min(n_steps, max(1, history_chunk_bytes // max(1, n_rows * itemsize))))
+        chunk_rows = int(
+            min(n_samples - 1 or 1, max(1, history_chunk_bytes // max(1, n_rows * itemsize)))
+        )
         ring = backend.zeros((chunk_rows, n_rows)) if n_rows else None
         backend.synchronize()
         log(
@@ -399,13 +410,14 @@ def integrate_explicit_rk4(
             r = backend.spmv(A, state)
             backend.force_balance(a, float(source(t)), load, r, inv_m)
 
-        def flush(last_step: int, count: int) -> None:
+        def flush(last_row: int, count: int) -> None:
             if ring is not None and count:
-                first = last_step - count + 1
-                host_hist[first : last_step + 1] = backend.to_host(ring[:count])
+                first = last_row - count + 1
+                host_hist[first : last_row + 1] = backend.to_host(ring[:count])
 
         t_loop = pytime.perf_counter()
         pending = 0
+        row = 0  # last recorded sample row (row 0 is the initial state)
         for step in range(n_steps):
             t = step * dt
             # Stage 1: k1 = (v, a(u, v, t))
@@ -433,11 +445,12 @@ def integrate_explicit_rk4(
             # z += dt/6 * acc
             backend.add_scaled(z, dt / 6.0, acc, scratch)
 
-            if ring is not None:
+            if ring is not None and (step + 1) % sample_every == 0:
                 ring[pending] = backend.spmv(S_dev, u)
                 pending += 1
+                row += 1
                 if pending == chunk_rows:
-                    flush(step + 1, pending)
+                    flush(row, pending)
                     pending = 0
 
             if snapshot_callback is not None and step % save_every == 0:
@@ -457,7 +470,7 @@ def integrate_explicit_rk4(
                         f"{rate:8.1f} steps/s | elapsed {elapsed:6.1f} s | "
                         f"ETA {(n_steps - step - 1) / rate:6.1f} s"
                     )
-        flush(n_steps, pending)
+        flush(row, pending)
         backend.synchronize()
         loop_seconds = pytime.perf_counter() - t_loop
 
@@ -488,6 +501,7 @@ def solve_explicit_rk4_device(
     snapshot_callback: SnapshotCallback | None = None,
     report_interval: int = 0,
     log_func: Callable[[str], None] | None = None,
+    sample_every: int = 1,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Run the explicit RK4 engine on ``device_info``; return ``(times, u_x, u_y)``."""
     backend = make_backend(device_info, precision, log_func)
@@ -505,5 +519,6 @@ def solve_explicit_rk4_device(
         snapshot_callback=snapshot_callback,
         report_interval=report_interval,
         log_func=log_func,
+        sample_every=sample_every,
     )
     return result.times, result.sensor_data_x, result.sensor_data_y

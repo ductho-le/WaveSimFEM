@@ -22,7 +22,12 @@ import numpy as np
 import yaml
 
 from guidedwavefem.device import DEVICE_CHOICES_HELP, normalize_device_request
-from guidedwavefem.materials import canonicalize_mode, structure_from_config
+from guidedwavefem.materials import (
+    DEFAULT_STEPS_PER_PERIOD,
+    canonicalize_mode,
+    reference_wave_speed,
+    structure_from_config,
+)
 from guidedwavefem.sources import DEFAULT_N_CYCLES, SOURCE_TYPES
 from guidedwavefem.units import parse_quantity
 
@@ -34,6 +39,7 @@ SECTION_KEYS: dict[str, dict[str, str]] = {
     "solver": {
         "type": "solver_type",
         "CFL": "CFL",
+        "steps_per_period": "steps_per_period",
         "time_factor": "time_factor",
         "beta": "beta_val",
         "gamma": "gamma_val",
@@ -71,7 +77,10 @@ SECTION_KEYS: dict[str, dict[str, str]] = {
         k: k
         for k in ("elems_per_wavelength", "min_elems_x", "min_elems_y", "degree", "max_frequency")
     },
-    "sensors": {k: k for k in ("n_sensors", "sensor_offset", "sensor_pitch", "sensor_y")},
+    "sensors": {
+        **{k: k for k in ("n_sensors", "sensor_offset", "sensor_pitch", "sensor_y")},
+        "sample_rate": "sensor_sample_rate",
+    },
     "postprocess": {
         "run_postprocess": "run_postprocess",
         # SI numbers (Hz, rad/m) or unit strings ("2 MHz", "3 rad/mm"); null = automatic
@@ -113,7 +122,8 @@ DEFAULTS: dict[str, Any] = {
     "solver_type": "explicit",
     "device": "auto",
     "precision": "double",
-    "CFL": 0.5,
+    "CFL": 0.5,  # explicit: fraction of the RK4 stability limit
+    "steps_per_period": DEFAULT_STEPS_PER_PERIOD,  # implicit: steps per max_frequency period
     "time_factor": 1.2,
     "beta_val": 0.25,
     "gamma_val": 0.5,
@@ -125,8 +135,10 @@ DEFAULTS: dict[str, Any] = {
     "source_type": "ricker",
     "n_cycles": None,  # tone_burst only (default DEFAULT_N_CYCLES)
     "traction_max": 1.0e6,
-    "excitation_width": 2.0e-3,
-    "source_x": None,
+    # Geometry defaults scale with the reference wavelength λ_ref = c_slow / f_center
+    # (see _resolve_layout_defaults), so they are valid from seismic to ultrasonic scales.
+    "excitation_width": None,  # auto: min(λ_ref / 2, sensing_length / 10)
+    "source_x": None,  # auto: absorb_length + min(max(λ_ref, width), sensing_length / 8)
     "source_fx": 0.0,
     "source_fy": 1.0,
     "elems_per_wavelength": 10,
@@ -134,10 +146,11 @@ DEFAULTS: dict[str, Any] = {
     "min_elems_y": 4,
     "degree": 2,
     "max_frequency": None,
-    "n_sensors": 301,
-    "sensor_offset": 0.05,
-    "sensor_pitch": 0.5e-3,
+    "n_sensors": None,  # auto: fill the sensing region up to MAX_AUTO_SENSORS
+    "sensor_offset": None,  # auto: min(2 λ_ref, sensing_length / 4)
+    "sensor_pitch": None,  # auto: min(λ_ref / 8, sensing_length / 100)
     "sensor_y": None,
+    "sensor_sample_rate": None,  # auto: 20 × mesh frequency (solvers.AUTO_SAMPLES_PER_MESH_PERIOD)
     "run_postprocess": True,
     "disp_f_min": None,  # auto: 0
     "disp_f_max": None,  # auto: 2 * f_center
@@ -152,10 +165,10 @@ DEFAULTS: dict[str, Any] = {
     "usetex": "auto",
 }
 
-#: Minimum lateral offset of the default source from the left sponge [m]; the
-#: actual default offset is ``max(DEFAULT_SOURCE_OFFSET, excitation_width)`` so
-#: wide (e.g. seismic) loads never overlap the sponge.
-DEFAULT_SOURCE_OFFSET = 0.005
+#: Upper limit for the automatic sensor count (``sensors.n_sensors: null``).
+MAX_AUTO_SENSORS = 1001
+#: Smallest accepted ``solver.steps_per_period`` (period error ≈ 20 % at 4).
+MIN_STEPS_PER_PERIOD = 4.0
 #: Sponge damping peaks at the 1 MHz reference; auto values scale so that
 #: ``alpha / f_center`` and ``beta * f_center`` stay constant across frequency scales.
 #: Mass-proportional ``alpha`` provides the absorption (damping ratio ≈ 0.8 at f0);
@@ -421,26 +434,71 @@ def _resolve_automatic_values(cfg: dict[str, Any], summary: Mapping[str, Any]) -
     _resolve_dispersion_limits(cfg)  # re-check ordering with the automatic values
 
 
+def _resolve_layout_defaults(cfg: dict[str, Any], summary: Mapping[str, Any]) -> None:
+    """Fill source/sensor geometry left as ``null`` from the reference wavelength.
+
+    ``λ_ref = c_slow / f_center`` (``c_R`` for a halfspace, else the slowest
+    physical speed) makes the defaults valid at any scale: the load is half a
+    wavelength wide and one wavelength from the sponge, sensors start two
+    wavelengths away, are spaced ``λ_ref / 8`` apart, and fill the remaining
+    sensing region (at most :data:`MAX_AUTO_SENSORS`). Each length is also
+    capped by a fixed fraction of ``sensing_length`` (width ≤ L/10, sponge gap
+    ≤ L/8, offset ≤ L/4, pitch ≤ L/100), so the automatic layout always fits
+    even when the domain is short compared with λ_ref.
+    """
+    wavelength = reference_wave_speed(summary) / cfg["f_center"]
+    sensing = cfg["sensing_length"]
+    if cfg["excitation_width"] is None:
+        cfg["excitation_width"] = min(0.5 * wavelength, 0.1 * sensing)
+    _float(cfg, "excitation_width", positive=True)
+    if cfg["source_x"] is None:
+        gap = min(max(wavelength, cfg["excitation_width"]), 0.125 * sensing)
+        cfg["source_x"] = cfg["absorb_length"] + max(gap, 0.5 * cfg["excitation_width"])
+    _float(cfg, "source_x")
+    length = 2 * cfg["absorb_length"] + sensing
+    if not 0 <= cfg["source_x"] <= length:
+        raise ValueError(f"source_x={cfg['source_x']} must lie inside [0, {length}]")
+    if cfg["sensor_offset"] is None:
+        cfg["sensor_offset"] = min(2.0 * wavelength, 0.25 * sensing)
+    _float(cfg, "sensor_offset")
+    if cfg["sensor_pitch"] is None:
+        cfg["sensor_pitch"] = min(wavelength / 8.0, 0.01 * sensing)
+    _float(cfg, "sensor_pitch", positive=True)
+    if cfg["n_sensors"] is None:
+        first = cfg["source_x"] + cfg["sensor_offset"]
+        span = cfg["absorb_length"] + sensing - first
+        count = int(np.floor(span / cfg["sensor_pitch"] * (1.0 + 1e-9))) + 1 if span > 0 else 0
+        if count < 3:
+            raise ValueError(
+                "The automatic sensor array does not fit in the sensing region; set "
+                "sensors.n_sensors / sensor_offset / sensor_pitch or enlarge sensing_length"
+            )
+        cfg["n_sensors"] = min(count, MAX_AUTO_SENSORS)
+
+
 def _validate_simulation(cfg: dict[str, Any], source: str) -> None:
     for key in ("sensing_length", "absorb_length", "f_center"):
         if cfg.get(key) is None:
             raise ValueError(f"Configuration '{source}' must specify '{key}'.")
 
-    for key in (
-        "sensing_length",
-        "absorb_length",
-        "f_center",
-        "excitation_width",
-        "sensor_pitch",
-        "CFL",
-        "time_factor",
-    ):
+    for key in ("sensing_length", "absorb_length", "f_center", "CFL", "time_factor"):
         _float(cfg, key, positive=True)
+    if _float(cfg, "steps_per_period", positive=True) < MIN_STEPS_PER_PERIOD:
+        raise ValueError(
+            f"'steps_per_period' must be >= {MIN_STEPS_PER_PERIOD:g}, got {cfg['steps_per_period']}"
+        )
     for key in ("dt", "duration", "max_frequency"):
         if cfg.get(key) is not None:
             _float(cfg, key, positive=True)
+    if cfg.get("sensor_sample_rate") is not None:
+        try:
+            rate = parse_quantity(cfg["sensor_sample_rate"], "frequency")
+        except ValueError as exc:
+            raise ValueError(f"'sensors.sample_rate': {exc}") from None
+        if not rate > 0:
+            raise ValueError(f"'sensors.sample_rate' must be positive, got {rate}")
+        cfg["sensor_sample_rate"] = rate
     for key, minimum in (
-        ("n_sensors", 2),
         ("elems_per_wavelength", 1),
         ("min_elems_x", 1),
         ("min_elems_y", 1),
@@ -448,10 +506,11 @@ def _validate_simulation(cfg: dict[str, Any], source: str) -> None:
         ("degree", 1),
     ):
         _int(cfg, key, minimum)
-    if cfg["source_x"] is None:
-        offset = max(DEFAULT_SOURCE_OFFSET, cfg["excitation_width"])
-        cfg["source_x"] = cfg["absorb_length"] + offset
-    for key in ("source_x", "source_fx", "source_fy", "traction_max", "sensor_offset"):
+
+    summary = structure_from_config(cfg)
+    _resolve_layout_defaults(cfg, summary)
+    _int(cfg, "n_sensors", 2)
+    for key in ("source_fx", "source_fy", "traction_max"):
         _float(cfg, key)
     if cfg["source_fx"] == 0 and cfg["source_fy"] == 0:
         raise ValueError("Source direction (source_fx, source_fy) cannot be zero")
@@ -462,14 +521,12 @@ def _validate_simulation(cfg: dict[str, Any], source: str) -> None:
 
     solver = cfg["solver_type"]
     if solver == "explicit" and cfg["CFL"] > 1:
-        raise ValueError("Explicit CFL must be in (0, 1]")
+        raise ValueError("Explicit CFL must be in (0, 1] (fraction of the RK4 stability limit)")
     beta, gamma = _float(cfg, "beta_val"), _float(cfg, "gamma_val")
     if solver == "implicit" and (gamma < 0.5 or beta < 0.25 * (gamma + 0.5) ** 2):
         raise ValueError("Newmark requires gamma >= 0.5 and beta >= (gamma+0.5)^2/4")
 
     length = 2 * cfg["absorb_length"] + cfg["sensing_length"]
-    if not 0 <= cfg["source_x"] <= length:
-        raise ValueError(f"source_x={cfg['source_x']} must lie inside [0, {length}]")
     sensor_start = cfg["source_x"] + cfg["sensor_offset"]
     sensor_end = sensor_start + (cfg["n_sensors"] - 1) * cfg["sensor_pitch"]
     if sensor_start < 0 or sensor_end > length:
@@ -479,7 +536,6 @@ def _validate_simulation(cfg: dict[str, Any], source: str) -> None:
     if cfg["run_postprocess"] and cfg["n_sensors"] < 3:
         raise ValueError("Postprocessing requires at least three sensors")
 
-    summary = structure_from_config(cfg)
     if cfg.get("sensor_y") is not None:
         y = _float(cfg, "sensor_y")
         if not summary["y_min"] <= y <= summary["y_max"]:
@@ -585,8 +641,9 @@ TEMPLATE_CONFIG = """# =========================================================
 
 solver:
   type: "explicit"              # "explicit" (lumped-mass RK4) or "implicit" (Newmark-beta)
-  CFL: 0.5                      # Fraction of the stability (explicit) / accuracy (implicit) step
-  time_factor: 1.2              # T = time_factor * sensing_length / c_slow (c_R or slowest speed)
+  CFL: 0.5                      # Explicit only: fraction (0, 1] of the rigorous RK4 stability limit
+  steps_per_period: 40          # Implicit only: Newmark steps per period at max_frequency
+  time_factor: 1.2              # T = time_factor * sensing_length / c_slow + pulse length
   beta: 0.25                    # Newmark-beta (implicit only)
   gamma: 0.5                    # Newmark-gamma (implicit only)
   dt: null                      # Optional maximum time step [s]
@@ -619,10 +676,12 @@ excitation:
   f_center: 1.0e6               # [Hz] Centre frequency
   n_cycles: null                # tone_burst only: number of cycles (null = 5)
   traction_max: 1.0e6           # [Pa] Peak traction amplitude
-  excitation_width: 2.0e-3      # [m] Spatial Gaussian width (≈ 6 sigma)
-  source_x: null                # [m] Source position (null = absorb_length + max(5 mm, excitation_width))
-  source_fx: 1.0                # Tangential traction component
-  source_fy: 1.0                # Normal traction component
+  # Below, lambda_ref = c_slow / f_center (c_R for a halfspace, else the slowest speed).
+  excitation_width: null        # [m] Gaussian load width, sigma = width / 3 (null = lambda_ref / 2)*
+  source_x: null                # [m] Source position (null = absorb_length + lambda_ref)*
+  source_fx: 0.0                # Tangential traction direction component
+  source_fy: 1.0                # Normal traction direction component (default: normal load)
+  # * capped at L_sensing/10 (width), L_sensing/8 (sponge gap), L_sensing/100 (pitch).
 
 mesh:
   elems_per_wavelength: 10      # Elements (not nodes) per shortest physical wavelength
@@ -632,10 +691,11 @@ mesh:
   max_frequency: null           # [Hz] Mesh sizing frequency (null = 3 * f_center)
 
 sensors:
-  n_sensors: 401                # Measurement points
-  sensor_offset: 0.05           # [m] Distance from source to first sensor
-  sensor_pitch: 0.5e-3          # [m] Sensor spacing
+  n_sensors: null               # Measurement points (null = fill the sensing region, max 1001)
+  sensor_offset: null           # [m] Source to first sensor (null = min(2 lambda_ref, L_sensing / 4))
+  sensor_pitch: null            # [m] Sensor spacing (null = lambda_ref / 8)*
   sensor_y: null                # [m] Sensor line height (null = loaded surface/interface)
+  sample_rate: null             # [Hz] Stored sampling rate, e.g. "20 MHz" (null = 20 * max_frequency)
 
 postprocess:
   run_postprocess: true         # 2D FFT dispersion analysis and figures

@@ -26,8 +26,8 @@
 
 solver:
   type: "explicit"              # "explicit" (lumped-mass RK4) or "implicit" (Newmark-beta)
-  CFL: 0.5                      # Courant-Friedrichs-Lewy stability coefficient
-  time_factor: 1.2              # T = time_factor * sensing_length / slowest speed + pulse length
+  CFL: 0.5                      # Fraction (0, 1] of the rigorous RK4 stability limit
+  time_factor: 1.5              # T = time_factor * sensing_length / c_T + pulse length (keeps slow low-frequency A0 at the far sensors)
 
 geometry:
   sensing_length: 0.30          # [m] Pristine sensing region (300 mm)
@@ -52,8 +52,8 @@ excitation:
   source_type: "ricker"         # Broadband pulse: best for dispersion-curve extraction
   f_center: 1.0e6               # [Hz] 1 MHz
   traction_max: 1.0e6           # [Pa] 1 MPa peak surface traction
-  excitation_width: 2.0e-3      # [m] Gaussian strip width (≈ 6 sigma)
-  source_x: null                # [m] null = absorb_length + max(5 mm, excitation_width)
+  excitation_width: 2.0e-3      # [m] Gaussian strip width (sigma = width / 3)
+  source_x: null                # [m] null = absorb_length + lambda_ref (<= sensing_length / 8)
   source_fx: 1.0                # Tangential component (favours S0)
   source_fy: 1.0                # Normal component (favours A0)
 
@@ -62,7 +62,7 @@ mesh:
   min_elems_x: 100
   min_elems_y: 4
   degree: 2
-  max_frequency: 1.0e6          # [Hz] Mesh sizing frequency
+  max_frequency: 1.5e6          # [Hz] Mesh sizing: 6 Q2 elements per shear wavelength at 2 MHz
 
 sensors:
   n_sensors: 401                # Points along the loaded (top) surface

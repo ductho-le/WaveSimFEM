@@ -16,7 +16,7 @@ from typing import Any
 
 import numpy as np
 
-from guidedwavefem.numerics import time_grid, validate_tensor
+from guidedwavefem.numerics import RK4_STABILITY_RADIUS, time_grid, validate_tensor
 from guidedwavefem.reporting import format_banner_box, log
 from guidedwavefem.sources import describe_source, source_duration
 from guidedwavefem.units import fmt_frequency, fmt_length, fmt_time
@@ -61,6 +61,12 @@ _MODEL_FIELDS: dict[str, frozenset[str]] = {
 _CONSTITUTIVE_FIELDS = frozenset().union(*_MODEL_FIELDS.values())
 
 DEFAULT_FLUID_SHEAR_REG = 1e-8
+
+#: Default number of implicit (Newmark) steps per period at the mesh-sizing
+#: frequency. Trapezoidal Newmark (beta = 1/4, gamma = 1/2) is unconditionally
+#: stable; its relative period error is about (omega dt)^2 / 12, i.e. 0.2 % at
+#: ``max_frequency`` and 0.05 % at half of it for 40 steps per period.
+DEFAULT_STEPS_PER_PERIOD = 40
 
 
 # ---------------------------------------------------------------------------
@@ -547,7 +553,7 @@ def compute_mesh_layout(cfg: Mapping[str, Any], summary: Mapping[str, Any]) -> M
         plate_length / nx,
         min(r["thickness"] / n for r, n in zip(regions, ny_per_region, strict=True)),
     )
-    speed_for_T = summary.get("c_R") or summary["c_wave_min"]
+    speed_for_T = reference_wave_speed(summary)
     pulse = source_duration(str(cfg.get("source_type") or "ricker"), f_center, cfg.get("n_cycles"))
     duration = float(
         cfg.get("duration")
@@ -565,14 +571,125 @@ def compute_mesh_layout(cfg: Mapping[str, Any], summary: Mapping[str, Any]) -> M
     )
 
 
-def implicit_time_step(h_min: float, c_L_max: float, cfl: float) -> float:
-    """Accuracy-driven Newmark step ``CFL · h_min / c_L,max`` (shared with preflight)."""
-    return cfl * h_min / c_L_max
+def reference_wave_speed(summary: Mapping[str, Any]) -> float:
+    """Slowest relevant wave speed: ``c_R`` for a halfspace, else the slowest physical speed.
+
+    Sets the default duration and the scale of the automatic source/sensor layout.
+    """
+    return float(summary.get("c_R") or summary["c_wave_min"])
 
 
-def explicit_time_step_heuristic(h_min: float, c_L_max: float, cfl: float, degree: int) -> float:
-    """Pre-assembly estimate of the explicit step (the solver uses assembled bounds)."""
-    return cfl * h_min / (degree * c_L_max)
+def implicit_time_step(mesh_frequency: float, steps_per_period: float) -> float:
+    """Accuracy-driven Newmark step ``1 / (steps_per_period · f_mesh)`` (shared with preflight).
+
+    Trapezoidal Newmark is unconditionally stable, so the step is set by temporal
+    accuracy at the highest resolved frequency only. It is deliberately independent
+    of the smallest element: thin layers (adhesives, coatings) no longer force tiny
+    steps.
+    """
+    if not (mesh_frequency > 0 and steps_per_period > 0):
+        raise ValueError("mesh_frequency and steps_per_period must be positive")
+    return 1.0 / (steps_per_period * mesh_frequency)
+
+
+def _voigt_stiffness(region: Mapping[str, Any]) -> np.ndarray:
+    if region["material_model"] in ("isotropic", "fluid"):
+        lam, mu = float(region["lmbda"]), float(region["mu"])
+        return np.array([[lam + 2 * mu, lam, 0.0], [lam, lam + 2 * mu, 0.0], [0.0, 0.0, mu]])
+    return np.asarray(region["C_mat"], dtype=float)
+
+
+def _element_integrands(
+    hx: float, hy: float, degree: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Quadrature weights, scalar shape values and strain operators on an ``hx × hy`` cell.
+
+    Uses the same Lagrange variant (GLL-warped) as the DOLFINx ``("Q", p)`` space.
+    """
+    import basix
+
+    element = basix.create_element(
+        basix.ElementFamily.P,
+        basix.CellType.quadrilateral,
+        degree,
+        basix.LagrangeVariant.gll_warped,
+    )
+    points, weights = basix.make_quadrature(basix.CellType.quadrilateral, 2 * degree + 1)
+    table = element.tabulate(1, points)
+    shape = table[0, :, :, 0]
+    d_dx, d_dy = table[1, :, :, 0] / hx, table[2, :, :, 0] / hy
+    n_q, n_nodes = shape.shape
+    strain = np.zeros((n_q, 3, 2 * n_nodes))  # [e_xx, e_yy, 2 e_xy], interleaved (u_x, u_y)
+    strain[:, 0, 0::2] = d_dx
+    strain[:, 1, 1::2] = d_dy
+    strain[:, 2, 0::2] = d_dy
+    strain[:, 2, 1::2] = d_dx
+    return weights * hx * hy, shape, strain
+
+
+def _tensor_row_sums(
+    weights: np.ndarray, strain: np.ndarray, tensor: np.ndarray, *, absolute_integrand: bool
+) -> np.ndarray:
+    """Absolute row sums of ``∫ Bᵀ D B``; optionally of ``∫ |Bᵀ D B|`` (entry-wise bound)."""
+    per_q = np.einsum("qai,ab,qbj->qij", strain, tensor, strain)
+    if absolute_integrand:
+        return np.einsum("q,qij->i", weights, np.abs(per_q))
+    return np.abs(np.einsum("q,qij->ij", weights, per_q)).sum(axis=1)
+
+
+def element_operator_bounds(
+    cfg: Mapping[str, Any], summary: Mapping[str, Any], layout: MeshLayout
+) -> tuple[float, float]:
+    """Upper bounds of the assembled Gershgorin bounds ``B_K`` and ``B_C`` before meshing.
+
+    For row-sum lumping, ``Σ_j |Σ_e Aᵉ_ij| / Σ_e mᵉ_i ≤ max_e Σ_j |Aᵉ_ij| / mᵉ_i``,
+    so element-level bounds of each region's (uniform) cell bound the solver's
+    assembled values from above. The sponge indicator is bounded by 1, or by 2
+    in halfspace regions where lateral and vertical sponges overlap; integrands
+    are bounded entry-wise by their absolute values.
+
+    Returns
+    -------
+    (B_K, B_C)
+        Bounds of ``ρ(M_L⁻¹K)`` [rad²/s²] and ``ρ(M_L⁻¹C)`` [1/s].
+    """
+    degree = int(cfg.get("degree", 2))
+    alpha = float(cfg.get("absorb_alpha") or 0.0)
+    beta = float(cfg.get("absorb_beta") or 0.0)
+    hx = layout.plate_length / layout.nx
+    bound_k = bound_c = 0.0
+    regions = summary["all_regions"]
+    for region, ny in zip(regions, layout.ny_per_region, strict=True):
+        weights, shape, strain = _element_integrands(hx, region["thickness"] / ny, degree)
+        rho = float(region["rho"])
+        mass_rows = np.repeat(rho * np.einsum("q,qi,qj->i", weights, shape, shape), 2)
+        abs_mass_rows = np.repeat(
+            rho * np.einsum("q,qi,qj->i", weights, np.abs(shape), np.abs(shape)), 2
+        )
+        stiffness = _voigt_stiffness(region)
+        k_rows = _tensor_row_sums(weights, strain, stiffness, absolute_integrand=False)
+        bound_k = max(bound_k, float(np.max(k_rows / mass_rows)))
+        indicator = 2.0 if region.get("is_halfspace") else 1.0
+        abs_k_rows = _tensor_row_sums(weights, strain, stiffness, absolute_integrand=True)
+        damping_rows = indicator * (alpha * abs_mass_rows + beta * abs_k_rows)
+        if region["material_model"] == "viscoelastic":  # exact: Cv is not indicator-weighted
+            damping_rows = damping_rows + _tensor_row_sums(
+                weights, strain, np.asarray(region["Cv_mat"]), absolute_integrand=False
+            )
+        bound_c = max(bound_c, float(np.max(damping_rows / mass_rows)))
+    return bound_k, bound_c
+
+
+def explicit_time_step_estimate(
+    cfg: Mapping[str, Any], summary: Mapping[str, Any], layout: MeshLayout
+) -> float:
+    """Pre-assembly explicit step ``CFL · R / max(√B_K, B_C)`` from element bounds.
+
+    Never larger than the solver's step (the solver uses the sharper assembled
+    bounds), so the preflight step count is an upper estimate.
+    """
+    bound_k, bound_c = element_operator_bounds(cfg, summary, layout)
+    return float(cfg.get("CFL", 0.5)) * RK4_STABILITY_RADIUS / max(np.sqrt(bound_k), bound_c)
 
 
 def preflight_estimate(cfg: dict[str, Any], rank: int = 0) -> dict[str, Any]:
@@ -588,11 +705,12 @@ def preflight_estimate(cfg: dict[str, Any], rank: int = 0) -> dict[str, Any]:
     if cfg.get("dt"):
         dt_est, dt_note = float(cfg["dt"]), "user-requested maximum"
     elif stype == "implicit":
-        dt_est = implicit_time_step(layout.h_min, summary["c_L_max"], cfl)
-        dt_note = f"accuracy limit, CFL={cfl}"
+        steps_per_period = float(cfg.get("steps_per_period") or DEFAULT_STEPS_PER_PERIOD)
+        dt_est = implicit_time_step(layout.mesh_frequency, steps_per_period)
+        dt_note = f"accuracy, {steps_per_period:g} steps/period"
     else:
-        dt_est = explicit_time_step_heuristic(layout.h_min, summary["c_L_max"], cfl, degree)
-        dt_note = f"heuristic, CFL={cfl}"
+        dt_est = explicit_time_step_estimate(cfg, summary, layout)
+        dt_note = f"element bound, CFL={cfl}"
     dt_val, nsteps_est = time_grid(layout.duration, dt_est)
 
     vec_mem_mb = ndofs_est * 8 / 1024**2

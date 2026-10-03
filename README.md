@@ -332,18 +332,23 @@ $$
 $$
 
 $$
-\Delta t_{\mathrm{crit}} = \frac{1}{\max\left(\sqrt{B_K}, B_C\right)}, \qquad \Delta t = \mathrm{CFL} \cdot \Delta t_{\mathrm{crit}} \quad (0 < \mathrm{CFL} \le 1)
+\Delta t_{\mathrm{crit}} = \frac{R}{\max\left(\sqrt{B_K}, B_C\right)}, \qquad R = 2.6, \qquad \Delta t = \mathrm{CFL} \cdot \Delta t_{\mathrm{crit}} \quad (0 < \mathrm{CFL} \le 1)
 $$
 
-The integer step count is fitted exactly: $N_{\mathrm{steps}} = \lceil T_{\mathrm{total}} / \Delta t \rceil, \, \Delta t_{\mathrm{actual}} = T_{\mathrm{total}} / N_{\mathrm{steps}}$.
+The integer step count is fitted exactly: $N_{\mathrm{steps}} = \lceil T_{\mathrm{total}} / \Delta t \rceil, \, \Delta t_{\mathrm{actual}} = T_{\mathrm{total}} / N_{\mathrm{steps}}$ (then rounded up to a multiple of the sensor stride, see below).
 
-Because Gershgorin row sums can only *over*-estimate the spectral radius, the resulting step is guaranteed stable but conservative — typically somewhat smaller than the true RK4 limit. The bound includes the assembled sponge and viscous damping, so strongly damped sponges can reduce $\Delta t$.
+**Why $R = 2.6$.** For a mode with frequency $\omega$ and damping rate $\zeta$ (both nonnegative, $\zeta \le B_C$, $\omega^2 \le B_K$), the eigenvalues of the first-order system satisfy $|\lambda| \le \max(\omega, \zeta) \le \max(\sqrt{B_K}, B_C)$ and $\mathrm{Re}\,\lambda \le 0$. Every $\lambda\,\Delta t$ therefore lies in the closed left half-disk of radius $\Delta t \max(\sqrt{B_K}, B_C)$. The largest such half-disk inside the RK4 stability region $|1 + z + z^2/2 + z^3/6 + z^4/24| \le 1$ has radius $2.6156$ (computed by [`rk4_half_disk_radius`](src/guidedwavefem/numerics.py) and checked in the tests); the constant [`RK4_STABILITY_RADIUS`](src/guidedwavefem/numerics.py) $= 2.6$ keeps a small margin.
+
+Gershgorin row sums can only *over*-estimate the spectral radius, so the step is guaranteed stable. The bound includes the assembled sponge and viscous damping, so strongly damped sponges or Kelvin–Voigt layers can reduce $\Delta t$ (a warning is printed when damping is the limiting term). The `--dry-run` preflight evaluates the same bound element-by-element before meshing; that value is never larger than the solver's.
 
 ##### (e) Execution Engines
 - **Single process** (`mpiexec -n 1` or no MPI): the array engine in [`solvers_gpu.py`](src/guidedwavefem/solvers_gpu.py) advances the stacked state $[\mathbf{u};\mathbf{v}]$ with one sparse product $[\mathbf{K}\,|\,\mathbf{C}]\,[\mathbf{u};\mathbf{v}]$ per stage, preallocated buffers, and a bounded on-device sensor buffer flushed to the host in chunks. Backends: SciPy (CPU), CuPy or PyTorch (CUDA).
-- **Multiple MPI ranks**: the distributed PETSc engine applies the identical RK4 scheme with parallel PETSc operators.
+- **Multiple MPI ranks**: the distributed PETSc engine ([`PetscRK4`](src/guidedwavefem/numerics.py)) applies the identical RK4 scheme with parallel PETSc operators, preallocated stage vectors, and fused vector kernels (no per-step allocations). Damping matrices are stored without their structural zeros, so the damping product costs only the sponge and viscoelastic volume.
 
 Both engines are verified to agree to a relative error below $10^{-8}$ (see `tests/test_mpi.py`).
+
+##### (f) Sensor Sampling
+The solver step is usually far finer than the signal bandwidth requires, so sensor traces are stored every `stride` steps. By default the archive is sampled at 20 samples per period of `max_frequency`; `sensors.sample_rate` (e.g. `"20 MHz"`) overrides this. The stride is always reduced so that the Nyquist frequency stays above $1.25\times$ both the dispersion plot range and the $3 f_0$ band-pass edge, and so that at least 32 samples are kept. The step count is a multiple of the stride, so `times` is uniform and ends exactly at $T_{\mathrm{total}}$. The stride is recorded as `runtime.sample_stride` in `simulation_config.yaml`.
 
 #### Branch B: Implicit Newmark-$\beta$ Solver
 
@@ -373,8 +378,19 @@ $$
 \mathbf{F}_{\mathrm{eff}} = \mathbf{F}_{\mathrm{ext}}(t_{n+1}) + \mathbf{M}\left[\frac{1}{\beta \Delta t^2}\mathbf{u}_n + \frac{1}{\beta \Delta t}\mathbf{v}_n + \left(\frac{1}{2\beta} - 1\right)\mathbf{a}_n\right] + \mathbf{C}\left[\frac{\gamma}{\beta \Delta t}\mathbf{u}_n + \left(\frac{\gamma}{\beta} - 1\right)\mathbf{v}_n + \Delta t\left(\frac{\gamma}{2\beta} - 1\right)\mathbf{a}_n\right]
 $$
 
-##### (c) PETSc Solvers
-Parallel MUMPS direct LU solver or iterative Preconditioned Conjugate Gradients (CG) with Geometric-Algebraic Multigrid (GAMG) preconditioning.
+The effective matrix and $\mathbf{M}$, $\mathbf{C}$ are assembled once; each step forms $\mathbf{F}_{\mathrm{eff}}$ with two sparse matrix-vector products and solves one linear system.
+
+##### (c) Time Step (Accuracy-Driven)
+Trapezoidal Newmark ($\beta = 1/4$, $\gamma = 1/2$) is unconditionally stable and non-dissipative; its only time error is a period elongation $\Delta T / T \approx (\omega \Delta t)^2 / 12$. The step is therefore set by accuracy at the mesh frequency $f_{\mathrm{mesh}}$ (`max_frequency`), not by the smallest element:
+
+$$
+\Delta t = \frac{1}{N_{\mathrm{ppp}} \, f_{\mathrm{mesh}}}, \qquad \frac{\Delta T}{T} \approx \frac{\pi^2}{3 N_{\mathrm{ppp}}^2}
+$$
+
+with $N_{\mathrm{ppp}}$ = `solver.steps_per_period` (default 40, i.e. a 0.2 % phase error per period at $f_{\mathrm{mesh}}$; minimum 4). Thin adhesive or coating layers no longer shrink the implicit step.
+
+##### (d) PETSc Solvers
+Parallel MUMPS direct LU for moderate sizes; above the iterative threshold, Conjugate Gradients with algebraic multigrid (GAMG). GAMG receives the three rigid-body modes (two translations and the in-plane rotation) as its near-nullspace, which it needs to build effective coarse spaces for elasticity.
 
 ---
 
@@ -405,7 +421,7 @@ $$
 
 ### 7. Excitation Waveforms & Physical Scales
 
-The surface (or interface) traction is $\mathbf{t}(x, t) = T_{\max} \, g(x) \, s(t) \, \hat{\mathbf{d}}$ with a Gaussian strip $g(x)$ of width `excitation_width`, direction $\hat{\mathbf{d}} \propto$ (`source_fx`, `source_fy`), and a time function selected by `excitation.source_type`:
+The surface (or interface) traction is $\mathbf{t}(x, t) = T_{\max} \, g(x) \, s(t) \, \hat{\mathbf{d}}$ with a Gaussian strip $g(x) = \exp[-(x - x_s)^2 / (2\sigma^2)]$, $\sigma$ = `excitation_width` / 3, direction $\hat{\mathbf{d}} \propto$ (`source_fx`, `source_fy`), and a time function selected by `excitation.source_type`:
 
 | `source_type` | $s(t)$ | Use |
 | :--- | :--- | :--- |
@@ -414,7 +430,19 @@ The surface (or interface) traction is $\mathbf{t}(x, t) = T_{\max} \, g(x) \, s
 
 Unless `solver.duration` is given, the simulated time is `time_factor` $\times$ `sensing_length` / $c_{\mathrm{slow}}$ plus the pulse length ($3/f_0$ for the Ricker wavelet, $N/f_0$ for the tone burst).
 
-All inputs are SI, and nothing in the solver assumes ultrasonic scales: logs, the preflight box and figures choose units from the data (μs/mm/MHz for an aluminium plate, ms/m/Hz for a soil profile). Dispersion plot limits accept SI numbers or unit strings (`"2 MHz"`, `"40 Hz"`, `"3 rad/mm"`, `"1.2 rad/m"`), and the default source position keeps the load at least one `excitation_width` away from the sponge.
+All inputs are SI, and nothing in the solver assumes ultrasonic scales: logs, the preflight box and figures choose units from the data (μs/mm/MHz for an aluminium plate, ms/m/Hz for a soil profile). Dispersion plot limits accept SI numbers or unit strings (`"2 MHz"`, `"40 Hz"`, `"3 rad/mm"`, `"1.2 rad/m"`).
+
+Source and sensor geometry left as `null` scales with the reference wavelength $\lambda_{\mathrm{ref}} = c_{\mathrm{slow}} / f_0$ ($c_R$ for a halfspace, otherwise the slowest physical wave speed), so the defaults are equally valid for a 1 MHz plate and a 10 Hz soil profile. With $L$ = `sensing_length`:
+
+| Key | Default |
+| :--- | :--- |
+| `excitation_width` | $\min(\lambda_{\mathrm{ref}}/2, \, L/10)$ |
+| `source_x` | `absorb_length` $+ \min(\max(\lambda_{\mathrm{ref}}, \text{width}), \, L/8)$ |
+| `sensor_offset` | $\min(2\lambda_{\mathrm{ref}}, \, L/4)$ |
+| `sensor_pitch` | $\min(\lambda_{\mathrm{ref}}/8, \, L/100)$ |
+| `n_sensors` | fill the rest of the sensing region (at most 1001) |
+
+The caps keep the automatic layout inside the sensing region even when $\lambda_{\mathrm{ref}}$ is comparable to the domain. The resolved values are written to `simulation_config.yaml`.
 
 ---
 
@@ -481,6 +509,8 @@ mpiexec -n 4 guided-waves -c configs/05_plate_in_halfspaces_bone_qus.yaml
 mpiexec -n 4 python -m guidedwavefem -c configs/05_plate_in_halfspaces_bone_qus.yaml
 ```
 
+**Threads per rank.** Parallelism comes from MPI (one rank per core). Threaded BLAS/OpenMP libraries would otherwise start one thread per core *in every rank* and oversubscribe the machine. When launched through `guided-waves` or `python -m guidedwavefem` under `mpiexec`/`srun`, each rank is therefore capped at `cpus // ranks_per_node` threads (Open MPI, MPICH/Intel MPI, MVAPICH2 and Slurm launch variables are recognised). The setting is reported in the run banner (`Threads: ...`). It never overrides a value you set yourself, e.g. `OMP_NUM_THREADS=1 mpiexec -n 8 guided-waves ...`. Library users calling `run_simulation` from their own scripts can call `guidedwavefem.limit_threads_per_rank()` before importing NumPy.
+
 ### 3. Preflight Resource Estimation (`--dry-run`)
 
 Preview mesh sizing, DOF counts, time step limits, and memory requirements upfront without allocating FEM structures:
@@ -495,19 +525,19 @@ Output preview:
 ║  PREFLIGHT NUMERICAL ESTIMATE (EXPLICIT)                         ║
 ║  ──────────────────────────────────────────────────────────────  ║
 ║  Excitation:            Ricker wavelet, f₀ = 1 MHz               ║
-║  Mesh frequency:        1 MHz (λ_min = 3.122 mm)                 ║
-║  Target element size h: 390.2 μm (actual min h = 166.7 μm)       ║
-║  Grid resolution:       1538 × 6 Q2 elements (9,228 total)       ║
-║  Estimated global DOFs: 80,002                                   ║
-║  Simulation duration:   118.3 μs                                 ║
-║  Time step:             ~6.723 ns (heuristic, CFL=0.5)           ║
-║  Estimated step count:  ~17,599 steps                            ║
-║  Estimated memory RAM:  ~143.4 MB (single state vector: 0.6 MB)  ║
+║  Mesh frequency:        1.5 MHz (λ_min = 2.081 mm)               ║
+║  Target element size h: 260.2 μm (actual min h = 166.7 μm)       ║
+║  Grid resolution:       2307 × 6 Q2 elements (13,842 total)      ║
+║  Estimated global DOFs: 119,990                                  ║
+║  Simulation duration:   147.1 μs                                 ║
+║  Time step:             ~4.317 ns (element bound, CFL=0.5)       ║
+║  Estimated step count:  ~34,082 steps                            ║
+║  Estimated memory RAM:  ~215.1 MB (single state vector: 0.9 MB)  ║
 ║  Explicit Δt is finalized from the assembled operator bound.     ║
 ╚══════════════════════════════════════════════════════════════════╝
 ```
 
-Units follow the problem scale (the seismic example reports metres, milliseconds and hertz). The preflight uses the same mesh-layout code as the solver, so mesh sizes and DOF counts match the actual run. The implicit step is exact; the explicit step shown is a pre-assembly heuristic (the solver derives the final value from the assembled operators).
+Units follow the problem scale (the seismic example reports metres, milliseconds and hertz). The preflight uses the same mesh-layout code as the solver, so mesh sizes and DOF counts match the actual run. The implicit step is exact. The explicit step comes from the same Gershgorin bound evaluated per element before meshing; it is never larger than the solver's final value (example 01: 34,082 steps estimated, 34,083 run after rounding to the sensor stride).
 
 > [!NOTE]
 > `elems_per_wavelength` counts **elements** per shortest physical wavelength, independent of the polynomial degree; a Q2 element already carries two node spacings, so Q2 meshes are effectively twice as fine in nodes per wavelength as Q1 meshes with the same setting.
@@ -597,8 +627,9 @@ solver:
   type: explicit           # "explicit" (lumped RK4) or "implicit" (Newmark-beta)
   device: auto             # auto | cpu | cuda | cuda:N | mps (explicit solver only)
   precision: double        # double | single (single-process explicit engine only)
-  CFL: 0.5                 # Courant-Friedrichs-Lewy stability factor
-  time_factor: 1.2         # Duration multiplier: T = time_factor * L / c_R (or slowest wave speed)
+  CFL: 0.5                 # Explicit only: fraction (0, 1] of the rigorous RK4 stability limit
+  steps_per_period: 40     # Implicit only: Newmark steps per period at max_frequency
+  time_factor: 1.2         # T = time_factor * sensing_length / c_slow + pulse length
   dt: null                 # Maximum requested time step [s] (null = auto)
   duration: null           # Physical duration [s] (overrides time_factor)
   beta: 0.25               # Newmark-beta parameter (implicit only)
@@ -617,10 +648,10 @@ excitation:
   f_center: 1.0e6          # [Hz] Centre frequency
   n_cycles: null           # tone_burst only (null = 5)
   traction_max: 1.0e6      # [Pa] Peak traction
-  excitation_width: 2.0e-3 # [m] Gaussian strip width
-  source_x: null           # [m] null = absorb_length + max(5 mm, excitation_width)
-  source_fx: 1.0           # Tangential traction component
-  source_fy: 1.0           # Normal traction component
+  excitation_width: null   # [m] Gaussian strip width, sigma = width / 3 (null = lambda_ref / 2)
+  source_x: null           # [m] null = absorb_length + lambda_ref (see Physical Scales)
+  source_fx: 0.0           # Tangential traction component
+  source_fy: 1.0           # Normal traction component (default: normal load)
 
 mesh:
   elems_per_wavelength: 10 # Elements (not nodes) per shortest wavelength
@@ -628,6 +659,13 @@ mesh:
   min_elems_y: 4           # Transverse element floor through thickness
   degree: 2                # Polynomial order (Q2 quadrilateral elements)
   max_frequency: null      # [Hz] Mesh sizing frequency (defaults to 3 * f_center)
+
+sensors:
+  n_sensors: null          # null = fill the sensing region (at most 1001)
+  sensor_offset: null      # [m] Source to first sensor (null = min(2 lambda_ref, L / 4))
+  sensor_pitch: null       # [m] Sensor spacing (null = lambda_ref / 8)
+  sensor_y: null           # [m] Sensor line height (null = loaded surface/interface)
+  sample_rate: null        # [Hz] Stored sampling rate (null = 20 * max_frequency)
 
 postprocess:
   run_postprocess: true    # 2D FFT dispersion analysis and figures
@@ -662,7 +700,7 @@ The schema is **strict**: unknown keys, misspelled section fields, unknown mater
 | [`04_plate_on_halfspace_soil_bedrock.yaml`](configs/04_plate_on_halfspace_soil_bedrock.yaml) | `plate_on_halfspace` | 10 m soft soil on bedrock | Seismic MASW / site characterisation | Ricker, 15 Hz |
 | [`05_plate_in_halfspaces_bone_qus.yaml`](configs/05_plate_in_halfspaces_bone_qus.yaml) | `plate_in_halfspaces` | Anisotropic viscoelastic cortical bone between soft tissue and marrow | Axial-transmission bone QUS | Ricker, 500 kHz |
 
-Together the examples exercise every material model (isotropic, anisotropic, viscoelastic, fluid), both excitation types, both time integrators, and the full frequency range from 15 Hz to 1 MHz. Example 05 uses the regularized-elastic fluid model; see the limitations in [Constitutive Material Models](#d-acoustic-fluid-regularized-small-shear-elasticity).
+Together the examples exercise the `isotropic`, `viscoelastic` and `fluid` material models, anisotropic stiffness (the full plane-strain tensor of the cortical bone in example 05, given through its `viscoelastic` layer), both excitation types, both time integrators, and the full frequency range from 15 Hz to 1 MHz. A purely elastic anisotropic layer uses `material_model: anisotropic` with the same `C` tensor and no `Cv`. Example 05 uses the regularized-elastic fluid model; see the limitations in [Constitutive Material Models](#d-acoustic-fluid-regularized-small-shear-elasticity).
 
 > [!TIP]
 > Run `guided-waves -c <config> --dry-run` to inspect the computational footprint first; example 05 (≈ 0.66 M DOFs) benefits from `mpiexec -n 4`.
@@ -741,11 +779,17 @@ Hooks run in the order listed:
 | Area | Verification Target | Test Method |
 | :--- | :--- | :--- |
 | **Physics** | Low-frequency $S_0$ speed equals the plate velocity $\sqrt{E/(\rho(1-\nu^2))}$ | End-to-end explicit and implicit runs, cross-correlation arrival time (agreement ≈ 0.1 %) |
+| **Physics** | Rayleigh speed on a truncated halfspace; sponge residual | End-to-end run vs. closed-form $c_R$ (within 1 %); late-window residual after the direct pulse < 5 % |
+| **Examples** | Every shipped configuration (all five structure modes) runs end to end | Shortened CLI runs (`tests/test_examples.py`, slow) and 2-rank CI smoke runs |
 | **Damped Time Integration** | 4th-order temporal convergence | Analytical matrix-exponential oscillator solution $\exp(\mathbf{A}t)$ |
-| **Array RK4 Engine** | Bit-level agreement with the reference RK4 step | Random damped system, incl. tiny sensor ring buffers, instability detection, optional Torch/CuPy backends |
+| **RK4 Step Limit** | Half-disk radius $R$ and stability at the rigorous limit | Numerical radius 2.6156 ≥ $R$ = 2.6; bounded energy at $0.999\,R/\max(\sqrt{B_K}, B_C)$ for wave- and damping-limited FE systems (detects instability at 3×) |
+| **PETSc RK4** | Agreement with the functional reference step | `PetscRK4` vs. `rk4_step` on a damped system (rtol $10^{-12}$) |
+| **Array RK4 Engine** | Bit-level agreement with the reference RK4 step | Random damped system, incl. tiny sensor ring buffers, decimated sampling, instability detection, optional Torch/CuPy backends |
 | **FE Sensor Evaluation** | Exact off-node evaluation | Distributed bounding-box search; sparse sensor operator vs. DOLFINx `eval` (shared/adjacent cells) |
 | **Spectral Analysis** | Exact frequency and wavenumber peaks | Monochromatic traveling wave with exact $f_0$ and $k_0$ |
-| **Stability Limits** | Assembled operator bounds $B_K$ and $B_C$ | SciPy generalized eigensolution $\mathbf{K}\mathbf{v} = \lambda \mathbf{M}_L \mathbf{v}$ |
+| **Stability Limits** | Assembled operator bounds $B_K$ and $B_C$; pre-mesh element bounds | SciPy generalized eigensolution $\mathbf{K}\mathbf{v} = \lambda \mathbf{M}_L \mathbf{v}$; element bounds ≥ assembled bounds (Q1, Q2) |
+| **Implicit Solver Helpers** | GAMG near-nullspace; zero-filtered damping | Rigid-body modes orthonormal with $\mathbf{K}\mathbf{r} \approx 0$; filtered matrix reproduces the mat-vec |
+| **Thread Policy** | Per-rank BLAS/OpenMP cap | Launcher variables of Open MPI, MPICH, MVAPICH2, Slurm; user settings respected; no heavy imports |
 | **Material Energy** | Positive definiteness enforcement | Voigt tensor and viscosity eigenvalue validation |
 | **Distributed Solver Agreement** | Single-process array engine vs. 2-rank PETSc engine | Coupled fluid–solid waveguide regression with relative error $< 10^{-8}$ |
 | **Configuration Schema** | Strict, typed validation; one valid shipped example per structure mode | Dedicated schema tests (`tests/test_config.py`), example coverage test |
@@ -758,13 +802,15 @@ Hooks run in the order listed:
 ## Version Compatibility & Numerical Changes
 
 ### Version 0.3 Highlights
+- **Time stepping:** Explicit RK4 uses the rigorous half-disk radius $R = 2.6$ (2.6× larger steps, still provably stable); implicit Newmark is accuracy-driven (`steps_per_period`), so thin layers no longer force tiny steps; the preflight explicit estimate uses the same bound per element and never overestimates the step.
+- **Performance:** Implicit right-hand side from two SpMVs (no per-step assembly), allocation-free `PetscRK4`, zero-filtered damping matrices, decimated sensor sampling (`sensors.sample_rate`), GAMG rigid-body near-nullspace, and per-rank BLAS/OpenMP thread capping under MPI. On 4 MPI ranks, example 03 now completes in 101 s instead of 296 s, and example 02 in 41 s instead of an estimated 11.5 min.
 - **Explicit engine:** One backend-agnostic, allocation-free RK4 engine (SciPy/CuPy/PyTorch) with a stacked $[\mathbf{K}|\mathbf{C}]$ operator, device-resident sensor buffering, and non-finite detection; verified against the distributed PETSc engine.
 - **Device handling:** Strict device requests (explicit GPU requests fail instead of silently falling back), MPI-aware selection, and provenance in `simulation_config.yaml`.
 - **Configuration:** Strict schema with suggestions, typed validation, a single table of defaults, `solver.device`/`solver.precision` sections, and new output options (`compress_output`, `figure_formats`, `usetex`).
 - **Materials:** Fields ignored by the chosen material model are rejected (e.g. `Cv` on a non-`viscoelastic` layer is an error instead of being silently dropped).
 - **Figures:** Labels render identically with and without LaTeX; no global Matplotlib/PATH side effects.
 - **Excitation:** Hann-windowed $N$-cycle tone burst (`source_type: tone_burst`) next to the Ricker wavelet.
-- **Scale awareness:** Units in logs, preflight and figures follow the problem scale (seismic to ultrasonic); dispersion limits are SI or unit strings; sponge damping defaults scale with $f_0$.
+- **Scale awareness:** Units in logs, preflight and figures follow the problem scale (seismic to ultrasonic); dispersion limits are SI or unit strings; sponge damping and source/sensor geometry defaults scale with $f_0$ and the reference wavelength.
 - **Examples:** One documented example per structure mode (NDE, aerospace, rail, seismic, biomedical).
 - **Engineering:** `logging`-based output with `-q/-v`, lazy imports, vectorized operator bounds, `Gatherv` sensor collection, physics verification test, hardened CI, pre-commit.
 

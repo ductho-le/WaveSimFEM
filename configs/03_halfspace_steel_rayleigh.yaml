@@ -25,7 +25,7 @@
 
 solver:
   type: "explicit"
-  CFL: 0.5
+  CFL: 0.5                      # Fraction (0, 1] of the rigorous RK4 stability limit
   time_factor: 1.2              # T = 1.2 * sensing_length / c_R + pulse length
 
 geometry:
@@ -48,7 +48,7 @@ excitation:
   f_center: 1.0e6               # [Hz] 1 MHz (typical angle-beam/wedge frequency)
   traction_max: 1.0e6           # [Pa]
   excitation_width: 2.0e-3      # [m]
-  source_x: null                # [m] null = absorb_length + max(5 mm, excitation_width)
+  source_x: null                # [m] null = absorb_length + lambda_ref (<= sensing_length / 8)
   source_fx: 0.0                # Normal point-like load (Lamb's problem)
   source_fy: 1.0
 

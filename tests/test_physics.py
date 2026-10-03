@@ -57,3 +57,59 @@ def test_s0_plate_velocity_low_frequency(tmp_path, solver):
     lag = _arrival_lag(ux[:, 0], ux[:, -1], times[1] - times[0])
     c_measured = (n_sensors - 1) * pitch / lag
     assert c_measured == pytest.approx(c_plate, rel=0.01), (c_measured, c_plate)
+
+
+STEEL = {"rho": 7850.0, "E": 210e9, "nu": 0.29}
+
+
+def _rayleigh_run(tmp_path, **output):
+    f0 = 500e3
+    return run_simulation(
+        cfg={
+            "solver": {"type": "explicit", "device": "cpu"},
+            "geometry": {"sensing_length": 0.04, "absorb_length": 0.018},
+            "structure": {
+                "mode": "halfspace",
+                "halfspace": {"thickness": 0.015, "absorb_depth": 0.009, **STEEL},
+            },
+            "excitation": {"f_center": f0},
+            "mesh": {"elems_per_wavelength": 6, "max_frequency": 1.5 * f0, "degree": 2},
+            "sensors": {"n_sensors": 21, "sensor_offset": 0.012, "sensor_pitch": 1e-3},
+            "postprocess": {"run_postprocess": False},
+            "output": {"output_dir": str(tmp_path), **output},
+        }
+    )[0]
+
+
+@pytest.mark.slow
+def test_rayleigh_speed_and_sponge_reflection(tmp_path):
+    """Surface waves on a truncated halfspace travel at the closed-form Rayleigh
+    speed, and the lateral/bottom sponges return only a small residual."""
+    from guidedwavefem import compute_rayleigh_speed
+
+    mu = STEEL["E"] / (2 * (1 + STEEL["nu"]))
+    c_r = compute_rayleigh_speed(np.sqrt(mu / STEEL["rho"]), nu=STEEL["nu"])
+    with np.load(_rayleigh_run(tmp_path)) as data:
+        times, uy, x = data["times"], data["sensor_data_y"], data["sensor_x"]
+        f0 = float(data["f_center"])
+    dt = times[1] - times[0]
+    lag = _arrival_lag(uy[:, 0], uy[:, -1], dt)
+    c_measured = (x[-1] - x[0]) / lag
+    assert c_measured == pytest.approx(c_r, rel=0.01), (c_measured, c_r)
+
+    # After the direct Rayleigh pulse has passed the last receiver, only waves
+    # returned by the absorbing layers remain.
+    last = uy[:, -1]
+    t_direct = times[int(np.argmax(np.abs(last)))]
+    late = times > t_direct + 3.0 / f0
+    assert late.sum() > 10
+    residual = np.abs(last[late]).max() / np.abs(last).max()
+    assert residual < 0.05, residual
+
+
+@pytest.mark.slow
+def test_vtx_snapshots_are_written(tmp_path):
+    pytest.importorskip("adios2")
+    _rayleigh_run(tmp_path, write_vtx=True, target_snapshots=5)
+    bp = tmp_path / "guided_wave.bp"
+    assert bp.is_dir() and any(bp.iterdir())

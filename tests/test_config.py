@@ -6,18 +6,20 @@ import argparse
 import copy
 import math
 
+import numpy as np
 import pytest
 
 from guidedwavefem.config import (
     ABSORB_ALPHA_REF,
     ABSORB_BETA_REF,
     LEGACY_DISPERSION_KEYS,
+    MAX_AUTO_SENSORS,
     dump_config,
     flatten_config,
     load_config,
     parse_and_resolve_config,
 )
-from guidedwavefem.materials import structure_from_config
+from guidedwavefem.materials import reference_wave_speed, structure_from_config
 from guidedwavefem.sources import DEFAULT_N_CYCLES
 
 ALUMINUM = {"thickness": 1e-3, "rho": 2700.0, "E": 70e9, "nu": 0.33, "material_model": "isotropic"}
@@ -40,11 +42,64 @@ def test_valid_base_resolves_with_defaults():
     cfg = parse_and_resolve_config(custom_cfg=_base())
     assert cfg["device"] == "auto"
     assert cfg["precision"] == "double"
-    assert cfg["source_x"] == pytest.approx(0.1 + 0.005)
+    wavelength = reference_wave_speed(structure_from_config(cfg)) / 1e6
+    assert cfg["excitation_width"] == pytest.approx(wavelength / 2)
+    assert cfg["source_x"] == pytest.approx(0.1 + wavelength)
+    assert cfg["sensor_pitch"] == pytest.approx(wavelength / 8)
+    assert cfg["steps_per_period"] == 40 and cfg["sensor_sample_rate"] is None
     assert cfg["absorb_alpha"] == pytest.approx(ABSORB_ALPHA_REF)  # f0 = 1 MHz reference
     assert cfg["absorb_beta"] == pytest.approx(ABSORB_BETA_REF)
     assert cfg["source_type"] == "ricker" and cfg["n_cycles"] is None
     assert cfg["figure_formats"] == ["png", "pdf", "svg", "eps"]
+
+
+def test_auto_layout_scales_with_wavelength():
+    """Scaling every length by s and f0 by 1/s scales the automatic layout by s."""
+    keys = ("excitation_width", "source_x", "sensor_offset", "sensor_pitch")
+    small = parse_and_resolve_config(custom_cfg=_base())
+    scale = 1000.0
+    big = _base(excitation__f_center=1e6 / scale)
+    big["geometry"] = {"sensing_length": 0.3 * scale, "absorb_length": 0.1 * scale}
+    big["structure"]["single_layer"]["thickness"] = 1e-3 * scale
+    big = parse_and_resolve_config(custom_cfg=big)
+    for key in keys:
+        assert big[key] == pytest.approx(scale * small[key]), key
+    assert big["n_sensors"] == small["n_sensors"]
+
+
+def test_auto_layout_fits_short_domains():
+    """A wavelength much longer than the domain still yields a valid sensor array."""
+    cfg = parse_and_resolve_config(custom_cfg=_base(excitation__f_center=15.0))
+    sensing, absorb = 0.3, 0.1
+    assert cfg["excitation_width"] == pytest.approx(sensing / 10)
+    assert cfg["source_x"] == pytest.approx(absorb + sensing / 8)
+    assert cfg["sensor_pitch"] == pytest.approx(sensing / 100)
+    last = cfg["source_x"] + cfg["sensor_offset"] + (cfg["n_sensors"] - 1) * cfg["sensor_pitch"]
+    assert last <= absorb + sensing + 1e-12
+
+
+def test_auto_sensor_count_is_capped():
+    cfg = _base()
+    cfg["geometry"] = {"sensing_length": 10.0, "absorb_length": 0.1}
+    assert parse_and_resolve_config(custom_cfg=cfg)["n_sensors"] == MAX_AUTO_SENSORS
+
+
+@pytest.mark.parametrize(
+    "key,value,match",
+    [
+        ("solver__steps_per_period", 2, "steps_per_period"),
+        ("sensors__sample_rate", "-1 MHz", "sample_rate"),
+        ("sensors__sample_rate", "fast", "sample_rate"),
+    ],
+)
+def test_time_sampling_options_are_validated(key, value, match):
+    with pytest.raises(ValueError, match=match):
+        parse_and_resolve_config(custom_cfg=_base(**{key: value}))
+
+
+def test_sample_rate_accepts_units():
+    cfg = parse_and_resolve_config(custom_cfg=_base(sensors__sample_rate="20 MHz"))
+    assert cfg["sensor_sample_rate"] == pytest.approx(20e6)
 
 
 @pytest.mark.parametrize("f0", [15.0, 50e3, 5e6])
@@ -362,3 +417,23 @@ def test_material_model_is_inferred():
 def test_unknown_structure_mode():
     with pytest.raises(ValueError, match="mode"):
         _structure(mode="sandwich", single_layer=dict(ALUMINUM))
+
+
+def test_anisotropic_layer_bounds_match_isotropic_equivalent():
+    """An isotropic tensor entered as ``anisotropic`` gives the exact shear speed and a
+    rigorous upper bound for the fastest speed (Kelvin eigenvalue bounds)."""
+    E, nu, rho = ALUMINUM["E"], ALUMINUM["nu"], ALUMINUM["rho"]
+    lam, mu = E * nu / ((1 + nu) * (1 - 2 * nu)), E / (2 * (1 + nu))
+    tensor = [lam + 2 * mu, lam, 0.0, lam + 2 * mu, 0.0, mu]
+    cfg = _base()
+    cfg["structure"]["single_layer"] = {
+        "thickness": 1e-3,
+        "rho": rho,
+        "material_model": "anisotropic",
+        "C": tensor,
+    }
+    aniso = structure_from_config(parse_and_resolve_config(custom_cfg=cfg))["all_regions"][0]
+    iso = structure_from_config(parse_and_resolve_config(custom_cfg=_base()))["all_regions"][0]
+    assert aniso["c_T"] == pytest.approx(iso["c_T"], rel=1e-12)
+    assert aniso["c_L"] >= iso["c_L"]
+    assert np.allclose(aniso["C_mat"], aniso["C_mat"].T)

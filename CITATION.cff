@@ -1,6 +1,15 @@
 cff-version: 1.2.0
 message: "If you use GuidedWaveFEM in academic research or industrial applications, please cite it as below."
 title: "GuidedWaveFEM: Unified Guided & Surface Wave Finite Element Framework"
+type: software
+abstract: >-
+  GuidedWaveFEM is an MPI-parallel finite element framework built on DOLFINx and
+  PETSc for simulating elastic guided and surface waves (Lamb, Rayleigh, leaky and
+  interface waves) in layered plates and halfspaces with isotropic, anisotropic,
+  viscoelastic and regularized fluid layers. It provides a rigorously stable
+  lumped-mass explicit RK4 solver, an implicit Newmark solver, absorbing sponge
+  layers, exact point sensors and 2D FFT dispersion analysis from seismic to
+  ultrasonic scales.
 authors:
   - family-names: "Le"
     given-names: "Duc-Tho"
