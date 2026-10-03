@@ -1,0 +1,19 @@
+name: Numerical regression tests
+on: [push, pull_request]
+jobs:
+  fenicsx:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mamba-org/setup-micromamba@v2
+        with:
+          environment-file: environment.yml
+          cache-environment: true
+      - name: Lint and serial regression tests
+        shell: micromamba-shell {0}
+        run: |
+          ruff check guided_waves.py wave_numerics.py tests
+          pytest -q
+      - name: Distributed interpolation regression
+        shell: micromamba-shell {0}
+        run: mpiexec -n 2 python -m pytest -q tests/test_numerics.py -k exact_point

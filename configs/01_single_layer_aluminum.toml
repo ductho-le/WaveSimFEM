@@ -25,6 +25,9 @@ E = 70.0e9
 nu = 0.33
 min_elems_y = 6
 
+[absorbing_boundaries]
+beta = 1.0e-9
+
 [excitation]
 f_center = 1.0e6
 traction_max = 1.0e6
@@ -33,10 +36,11 @@ source_fx = 1.0
 source_fy = 1.0
 
 [mesh]
-elems_per_wavelength = 10
+elems_per_wavelength = 8
 min_elems_x = 100
 min_elems_y = 4
 degree = 2
+max_frequency = 1.0e6
 
 [sensors]
 n_sensors = 401

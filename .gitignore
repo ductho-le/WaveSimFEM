@@ -54,3 +54,5 @@ Thumbs.db
 results_guided_waves_*/
 *.bp/
 *.npz
+.pytest_cache/
+.ruff_cache/

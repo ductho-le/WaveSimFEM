@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "guidedwavefem"
+version = "0.2.0"
+description = "Transient plane-strain guided-wave finite element simulations"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["numpy>=1.26", "scipy>=1.12", "matplotlib>=3.8", "PyYAML>=6"]
+
+[project.scripts]
+guided-waves = "guided_waves:main"
+
+[tool.setuptools]
+py-modules = ["guided_waves", "wave_numerics"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

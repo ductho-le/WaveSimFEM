@@ -23,7 +23,7 @@
   },
   "absorbing_boundaries": {
     "alpha": null,
-    "beta": null
+    "beta": 1.0e-9
   },
   "excitation": {
     "f_center": 1.0e6,
@@ -34,10 +34,11 @@
     "source_fy": 1.0
   },
   "mesh": {
-    "elems_per_wavelength": 10,
+    "elems_per_wavelength": 8,
     "min_elems_x": 100,
     "min_elems_y": 4,
-    "degree": 2
+    "degree": 2,
+    "max_frequency": 1.0e6
   },
   "sensors": {
     "n_sensors": 401,

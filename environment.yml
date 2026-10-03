@@ -3,7 +3,10 @@ channels:
   - conda-forge
 dependencies:
   - python=3.11
-  - fenics-dolfinx
+  - fenics-dolfinx=0.10.0
+  - petsc=3.24.*
+  - petsc4py=3.24.*
+  - mpi4py
   - mpich
   - pyvista
   - matplotlib
@@ -13,3 +16,7 @@ dependencies:
   - tqdm
   - ipython
   - gmsh
+  - pyyaml>=6
+  - pytest>=8
+  - ruff
+  - pip
