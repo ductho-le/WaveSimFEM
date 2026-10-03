@@ -41,45 +41,28 @@ Powered by **DOLFINx / FEniCSx**, **PETSc**, and **MPI**, `GuidedWaveFEM` provid
 
 ## Code Architecture & Modular Structure
 
-The finite element simulation engine, material constitutive modeling, configuration handling, and signal processing workflows are organized in [`guided_waves.py`](guided_waves.py). Its five numbered architectural sections are complemented by [`wave_numerics.py`](wave_numerics.py), which isolates reusable, independently testable integration, sampling, spectral analysis, and material-validation utilities.
+`GuidedWaveFEM` is organized following modern Python packaging standards (`src` layout) under `src/guidedwavefem/`. The framework cleanly separates configuration management, material constitutive models, testable numerical algorithms, finite element wave propagation solvers, spectral signal processing, and CLI execution into dedicated modules. Root compatibility shims (`guided_waves.py` and `wave_numerics.py`) ensure 100% backwards compatibility with standalone scripts and legacy imports.
 
 ### Architecture Tree
 
 ```text
 GuidedWaveFEM/
-├── guided_waves.py
-│   ├── MPI Communicator Initialization & Fail-Fast Handling
-│   ├── SECTION 1: Configuration Management
-│   │   ├── load_config(...)
-│   │   ├── dump_config(...)
-│   │   ├── flatten_config(...)
-│   │   ├── parse_and_resolve_config(...)
-│   │   └── generate_template_config(...)
-│   ├── SECTION 2: Structural Geometry & Material Modeling
-│   │   ├── _canonicalize_mode(...)
-│   │   ├── compute_rayleigh_speed(...)
-│   │   ├── _normalize_region(...)
-│   │   ├── _normalize_structure(...)
-│   │   ├── _format_banner_box(...)
-│   │   └── _print_structure_table(...)
-│   ├── SECTION 3: Signal Processing & 2D FFT Dispersion Analysis
-│   │   └── plot_full_analysis(...)
-│   ├── SECTION 4: Finite Element Wave Propagation Simulation
-│   │   └── run_simulation(...)  [Implicit Newmark-β & Explicit Lumped RK4]
-│   └── SECTION 5: Command-Line Interface & Orchestration
-│       └── main()
-├── wave_numerics.py
-│   ├── rk4_step(...)
-│   ├── operator_bound(...)
-│   ├── time_grid(...)
-│   ├── PointSensors
-│   ├── validate_tensor(...)
-│   └── dispersion_spectrum(...)
-├── configs/                     # YAML, TOML, and JSON examples
-├── tests/                       # Numerical and serial/MPI regressions
-├── .github/workflows/tests.yml  # Continuous integration
-├── environment.yml              # Supported conda numerical stack
-└── pyproject.toml               # Package, CLI, test, and lint configuration
+├── src/
+│   └── guidedwavefem/
+│       ├── __init__.py         # Package entry point & public API exports
+│       ├── config.py           # Multi-format loaders (YAML/TOML/JSON), resolution, template generator
+│       ├── materials.py        # Voigt tensors, Kelvin-Voigt, Rayleigh speed, structure normalization
+│       ├── numerics.py         # RK4 integrator, assembled-operator bounds, exact PointSensors
+│       ├── solvers.py          # Conforming mesh generation, ALID sponges, RK4 & Newmark-β time loops
+│       ├── analysis.py         # 2D spatio-temporal FFT, Hann tapering, 2x2 publication figures
+│       └── cli.py              # Argparse, preflight estimator (--dry-run), main() orchestration
+├── guided_waves.py             # Backwards-compatible shim: `python guided_waves.py`
+├── wave_numerics.py            # Backwards-compatible shim for numerical routines
+├── configs/                    # YAML, TOML, and JSON examples
+├── tests/                      # Numerical and serial/MPI regressions
+├── .github/workflows/tests.yml # Continuous integration
+├── environment.yml             # Supported conda numerical stack
+└── pyproject.toml              # Package, CLI, test, and lint configuration
 ```
 
 ---

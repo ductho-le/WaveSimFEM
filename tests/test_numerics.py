@@ -116,3 +116,23 @@ def test_assembled_operator_bound():
     assert operator_bound(stiffness, lumped) >= exact*(1-1e-12)
     for matrix in (kd, md, stiffness, mass):
         matrix.destroy()
+
+
+def test_package_namespace_exports():
+    import guidedwavefem as gw
+    assert gw.__version__ == "0.2.0"
+    for name in (
+        "run_simulation",
+        "plot_full_analysis",
+        "load_config",
+        "dump_config",
+        "parse_and_resolve_config",
+        "preflight_estimate",
+        "rk4_step",
+        "operator_bound",
+        "time_grid",
+        "PointSensors",
+        "validate_tensor",
+        "dispersion_spectrum",
+    ):
+        assert hasattr(gw, name) and callable(getattr(gw, name))
