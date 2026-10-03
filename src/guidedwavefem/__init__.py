@@ -14,6 +14,7 @@ from guidedwavefem.config import (
     resolve_and_apply_config,
 )
 from guidedwavefem.materials import compute_rayleigh_speed, preflight_estimate
+from guidedwavefem.device import DeviceInfo, detect_available_devices, select_device
 from guidedwavefem.numerics import (
     PointSensors,
     dispersion_spectrum,
@@ -23,11 +24,18 @@ from guidedwavefem.numerics import (
     validate_tensor,
 )
 from guidedwavefem.solvers import run_simulation
+from guidedwavefem.solvers_gpu import (
+    build_sensor_interpolation_matrix,
+    solve_explicit_rk4_device,
+)
 
 __all__ = [
     "__version__",
+    "DeviceInfo",
     "PointSensors",
+    "build_sensor_interpolation_matrix",
     "compute_rayleigh_speed",
+    "detect_available_devices",
     "dispersion_spectrum",
     "dump_config",
     "flatten_config",
@@ -40,6 +48,8 @@ __all__ = [
     "resolve_and_apply_config",
     "rk4_step",
     "run_simulation",
+    "select_device",
+    "solve_explicit_rk4_device",
     "time_grid",
     "validate_tensor",
 ]

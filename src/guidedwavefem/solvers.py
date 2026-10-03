@@ -42,6 +42,11 @@ from guidedwavefem.materials import (
     preflight_estimate,
 )
 from guidedwavefem.numerics import PointSensors, operator_bound, rk4_step, time_grid
+from guidedwavefem.device import select_device
+from guidedwavefem.solvers_gpu import (
+    build_sensor_interpolation_matrix,
+    solve_explicit_rk4_device,
+)
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 comm = MPI.COMM_WORLD
@@ -797,92 +802,154 @@ def run_simulation(
 
         t_setup_end = pytime.perf_counter()
 
-        sensor_data_x = np.zeros((Nsteps + 1, n_owned))
-        sensor_data_y = np.zeros((Nsteps + 1, n_owned))
-        times = np.zeros(Nsteps + 1)
-
-        if write_vtx:
-            vtx = io.VTXWriter(comm, f"{out_dir}/guided_wave.bp", [u], engine="BP4")
+        target_device = str(cfg.get("device", "auto"))
+        target_precision = str(cfg.get("precision", "double"))
         save_freq = max(Nsteps // target_snapshots, 1)
-
-        u_arr = u.x.array
-        v_arr = v.x.array
-        vh_arr = v_half.x.array
-
-        u_petsc = u.x.petsc_vec
-        v_half_petsc = v_half.x.petsc_vec
-
         report_interval = max(Nsteps // 20, 1)
 
-        def acceleration(displacement, velocity, t):
-            u_arr[:n_owned_dofs] = displacement
-            vh_arr[:n_owned_dofs] = velocity
-            K_mat.mult(u_petsc, r_vec)
-            C_mat.mult(v_half_petsc, f_vec)
-            r_vec.axpy(1.0, f_vec)
-            force = traction_max * ricker(t, f_center, t0_ricker)
-            return (
-                force * f_spatial.array_r[:n_owned_dofs]
-                - r_vec.array_r[:n_owned_dofs]
-            ) * M_inv_np
-
-        time_update = 0.0
-        time_io = 0.0
-
-        if rank == 0:
-            log(f"\n{'═' * 58}")
-            log(f"  Starting EXPLICIT time-stepping  ({Nsteps} steps)")
-            log(f"{'═' * 58}")
-
-        t_loop_start = pytime.perf_counter()
-
-        for i in range(Nsteps):
-            t_previous = i * dt_val
-            t_current = (i + 1) * dt_val
-            times[i + 1] = t_current
-
-            t0 = pytime.perf_counter()
-            displacement, velocity = rk4_step(
-                u_arr[:n_owned_dofs].copy(),
-                v_arr[:n_owned_dofs].copy(),
-                t_previous,
-                dt_val,
-                acceleration,
+        if comm.size == 1:
+            dev_info = select_device(target_device, log_func=log if rank == 0 else None)
+            sensor_mat = build_sensor_interpolation_matrix(
+                V, probes.points, probes.cells, n_owned_dofs
             )
-            u_arr[:n_owned_dofs] = displacement
-            v_arr[:n_owned_dofs] = velocity
-            u.x.scatter_forward()
-            t1 = pytime.perf_counter()
-            time_update += t1 - t0
+            K_csr = K_mat.getValuesCSR()
+            C_csr = C_mat.getValuesCSR()
+            f_spatial_np = f_spatial.array_r[:n_owned_dofs].copy()
+            def source_func(t: float) -> float:
+                return float(traction_max * ricker(t, f_center, t0_ricker))
 
-            if n_owned > 0:
-                values = probes.sample(u)
-                sensor_data_x[i + 1] = values[:, 0]
-                sensor_data_y[i + 1] = values[:, 1]
+            if write_vtx:
+                vtx = io.VTXWriter(comm, f"{out_dir}/guided_wave.bp", [u], engine="BP4")
 
-            if write_vtx and i % save_freq == 0:
-                t5 = pytime.perf_counter()
-                vtx.write(t_current)
-                time_io += pytime.perf_counter() - t5
+                def snapshot_cb(step_idx: int, t_snap: float, u_snapshot: np.ndarray) -> None:
+                    u.x.array[:n_owned_dofs] = u_snapshot
+                    u.x.scatter_forward()
+                    vtx.write(t_snap)
+            else:
+                vtx = None
+                snapshot_cb = None
 
-            if rank == 0 and (i + 1) % report_interval == 0:
-                pct = 100.0 * (i + 1) / Nsteps
-                elapsed = pytime.perf_counter() - t_loop_start
-                eta = elapsed / (i + 1) * (Nsteps - i - 1)
-                log(
-                    f"  [{pct:5.1f}%]  step {i + 1}/{Nsteps}  elapsed {elapsed:.1f}s  ETA {eta:.1f}s"
+            if rank == 0:
+                log(f"\n{'═' * 58}")
+                log(f"  Starting EXPLICIT time-stepping ({dev_info.summary()}) ({Nsteps} steps)")
+                log(f"{'═' * 58}")
+
+            t_loop_start = pytime.perf_counter()
+            times, sensor_data_x, sensor_data_y = solve_explicit_rk4_device(
+                K_csr=K_csr,
+                C_csr=C_csr,
+                M_inv_np=M_inv_np,
+                f_spatial_np=f_spatial_np,
+                sensor_mat_csr=sensor_mat,
+                dt=dt_val,
+                Nsteps=Nsteps,
+                source_func=source_func,
+                device_info=dev_info,
+                precision=target_precision,
+                save_freq=save_freq,
+                snapshot_callback=snapshot_cb,
+                report_interval=report_interval,
+                log_func=log if rank == 0 else lambda msg: None,
+            )
+            t_loop_end = pytime.perf_counter()
+
+            if vtx is not None:
+                vtx.close()
+
+            K_mat.destroy()
+            C_mat.destroy()
+            M_lumped.destroy()
+            f_spatial.destroy()
+            f_vec.destroy()
+            r_vec.destroy()
+
+        else:
+            sensor_data_x = np.zeros((Nsteps + 1, n_owned))
+            sensor_data_y = np.zeros((Nsteps + 1, n_owned))
+            times = np.zeros(Nsteps + 1)
+
+            if write_vtx:
+                vtx = io.VTXWriter(comm, f"{out_dir}/guided_wave.bp", [u], engine="BP4")
+            save_freq = max(Nsteps // target_snapshots, 1)
+
+            u_arr = u.x.array
+            v_arr = v.x.array
+            vh_arr = v_half.x.array
+
+            u_petsc = u.x.petsc_vec
+            v_half_petsc = v_half.x.petsc_vec
+
+            report_interval = max(Nsteps // 20, 1)
+
+            def acceleration(displacement, velocity, t):
+                u_arr[:n_owned_dofs] = displacement
+                vh_arr[:n_owned_dofs] = velocity
+                K_mat.mult(u_petsc, r_vec)
+                C_mat.mult(v_half_petsc, f_vec)
+                r_vec.axpy(1.0, f_vec)
+                force = traction_max * ricker(t, f_center, t0_ricker)
+                return (
+                    force * f_spatial.array_r[:n_owned_dofs]
+                    - r_vec.array_r[:n_owned_dofs]
+                ) * M_inv_np
+
+            time_update = 0.0
+            time_io = 0.0
+
+            if rank == 0:
+                log(f"\n{'═' * 58}")
+                log(f"  Starting EXPLICIT time-stepping  ({Nsteps} steps)")
+                log(f"{'═' * 58}")
+
+            t_loop_start = pytime.perf_counter()
+
+            for i in range(Nsteps):
+                t_previous = i * dt_val
+                t_current = (i + 1) * dt_val
+                times[i + 1] = t_current
+
+                t0 = pytime.perf_counter()
+                displacement, velocity = rk4_step(
+                    u_arr[:n_owned_dofs].copy(),
+                    v_arr[:n_owned_dofs].copy(),
+                    t_previous,
+                    dt_val,
+                    acceleration,
                 )
+                u_arr[:n_owned_dofs] = displacement
+                v_arr[:n_owned_dofs] = velocity
+                u.x.scatter_forward()
+                t1 = pytime.perf_counter()
+                time_update += t1 - t0
 
-        t_loop_end = pytime.perf_counter()
-        if write_vtx:
-            vtx.close()
+                if n_owned > 0:
+                    values = probes.sample(u)
+                    sensor_data_x[i + 1] = values[:, 0]
+                    sensor_data_y[i + 1] = values[:, 1]
 
-        K_mat.destroy()
-        C_mat.destroy()
-        M_lumped.destroy()
-        f_spatial.destroy()
-        f_vec.destroy()
-        r_vec.destroy()
+                if write_vtx and i % save_freq == 0:
+                    t5 = pytime.perf_counter()
+                    vtx.write(t_current)
+                    time_io += pytime.perf_counter() - t5
+
+                if rank == 0 and (i + 1) % report_interval == 0:
+                    pct = 100.0 * (i + 1) / Nsteps
+                    elapsed = pytime.perf_counter() - t_loop_start
+                    eta = elapsed / (i + 1) * (Nsteps - i - 1)
+                    log(
+                        f"  [{pct:5.1f}%]  step {i + 1}/{Nsteps}  elapsed {elapsed:.1f}s  ETA {eta:.1f}s"
+                    )
+
+            t_loop_end = pytime.perf_counter()
+            if write_vtx:
+                vtx.close()
+
+            K_mat.destroy()
+            C_mat.destroy()
+            M_lumped.destroy()
+            f_spatial.destroy()
+            f_vec.destroy()
+            r_vec.destroy()
 
     # ── Gather sensor data across all MPI ranks ────────────────
     if comm.allreduce(

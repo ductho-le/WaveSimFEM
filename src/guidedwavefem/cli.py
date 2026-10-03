@@ -45,6 +45,18 @@ def main() -> None:
         help="Time integration solver scheme override ('implicit' or 'explicit')",
     )
     parser.add_argument(
+        "--device",
+        type=str,
+        default=None,
+        help="Compute device for explicit solver ('auto', 'cuda', 'cuda:0', 'mps', 'cpu')",
+    )
+    parser.add_argument(
+        "--precision",
+        choices=["double", "single"],
+        default=None,
+        help="Floating point precision for explicit solver ('double' or 'single')",
+    )
+    parser.add_argument(
         "--structure-mode",
         choices=[
             "1_layer",

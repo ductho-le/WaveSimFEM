@@ -450,6 +450,16 @@ Override configuration settings directly from the terminal:
 # Select implicit Newmark time integration
 guided-waves -c configs/01_single_layer_aluminum.yaml --solver implicit
 
+# Enable GPU acceleration (auto-detects NVIDIA CUDA via CuPy or Apple Silicon via PyTorch)
+guided-waves -c configs/01_single_layer_aluminum.yaml --device auto
+
+# Target specific CUDA GPU device or Apple Silicon MPS
+guided-waves -c configs/01_single_layer_aluminum.yaml --device cuda:0
+guided-waves -c configs/01_single_layer_aluminum.yaml --device mps
+
+# Select single precision (float32) for 2x memory throughput (Komatitsch et al. 2010)
+guided-waves -c configs/01_single_layer_aluminum.yaml --device auto --precision single
+
 # Specify custom output directory
 guided-waves -c configs/04_halfspace_rayleigh_aluminum.yaml --output results_rayleigh
 
@@ -462,6 +472,8 @@ guided-waves -c configs/01_single_layer_aluminum.yaml --f-max 3.0 --k-max 4.0
 # Disable postprocessing and plot generation
 guided-waves -c configs/01_single_layer_aluminum.yaml --no-postprocess
 ```
+
+> **GPU Acceleration Architecture:** The explicit RK4 engine implements zero-copy device-resident time integration, fused CUDA kernels, and asynchronous pinned host telemetry streaming based on Trotter et al. (2023), Komatitsch et al. (2010), Cao et al. (2026), and Li et al. (2026).
 
 ### 5. Standalone Signal Post-Processing
 

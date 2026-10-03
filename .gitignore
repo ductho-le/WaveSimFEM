@@ -56,3 +56,9 @@ results_guided_waves_*/
 *.npz
 .pytest_cache/
 .ruff_cache/
+
+# Development materials & local scratch
+.dev/
+.dev*
+GPU_papers/
+GPU_ACCELERATION_PLAN.md

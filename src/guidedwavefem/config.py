@@ -321,11 +321,17 @@ def parse_and_resolve_config(
             resolved["dt"] = args.dt
         if getattr(args, "cfl", None) is not None:
             resolved["CFL"] = args.cfl
+        if getattr(args, "device", None) is not None:
+            resolved["device"] = args.device
+        if getattr(args, "precision", None) is not None:
+            resolved["precision"] = args.precision
         if getattr(args, "no_postprocess", False):
             resolved["run_postprocess"] = False
 
     # Numerical solver fallbacks
     resolved.setdefault("solver_type", "explicit")
+    resolved.setdefault("device", "auto")
+    resolved.setdefault("precision", "double")
     resolved.setdefault("CFL", 0.5)
     resolved.setdefault("time_factor", 1.2)
     resolved.setdefault("beta_val", 0.25)

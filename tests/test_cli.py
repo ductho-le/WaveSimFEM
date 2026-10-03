@@ -69,3 +69,25 @@ def test_cli_postprocess(tmp_path):
     ]
     main()
     assert (out_dir / "full_analysis.png").exists()
+
+
+def test_cli_device_and_precision_args(capsys):
+    cfg_path = (
+        Path(__file__).resolve().parents[1]
+        / "configs"
+        / "01_single_layer_aluminum.yaml"
+    )
+    sys.argv = [
+        "guided-waves",
+        "-c",
+        str(cfg_path),
+        "--dry-run",
+        "--device",
+        "cpu",
+        "--precision",
+        "single",
+    ]
+    main()
+    captured = capsys.readouterr()
+    assert "Dry run complete" in captured.out
+
