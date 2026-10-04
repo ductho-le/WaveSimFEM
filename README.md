@@ -834,7 +834,7 @@ If you use `GuidedWaveFEM` in academic research or industrial publications, plea
 
 ```bibtex
 @software{Le_GuidedWaveFEM_2026,
-  author       = {Le, Duc-Tho},
+  author       = {Le, Ductho},
   title        = {{GuidedWaveFEM: Unified Guided \& Surface Wave Finite Element Framework}},
   year         = {2026},
   version      = {0.3.0},
