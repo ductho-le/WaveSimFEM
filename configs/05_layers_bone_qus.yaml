@@ -52,7 +52,7 @@ solver:
   time_factor: 1.2              # T = 1.2 * sensing_length / slowest speed + pulse length
 
 geometry:
-  sensing_length: 0.06          # [m] 60 mm along the bone axis
+  sensing_length: 0.08          # [m] 80 mm along the bone axis
   absorb_length: 0.03           # [m] 30 mm lateral sponges
 
 structure:
@@ -98,9 +98,9 @@ mesh:
   max_frequency: 1.0e6          # [Hz]
 
 sensors:
-  n_sensors: 81                 # Transducer array on the skin surface (y = 6.0 mm)
+  n_sensors: 241                # Dense transducer array along skin surface (y = 6.0 mm)
   sensor_offset: 0.01           # [m] 10 mm source-to-first-receiver
-  sensor_pitch: 0.5e-3          # [m] 0.5 mm pitch (40 mm total receiver aperture)
+  sensor_pitch: 0.25e-3         # [m] 0.25 mm pitch (60 mm aperture -> Nyquist 12.6 rad/mm)
   sensor_y: null                # null = top surface of soft tissue (y = 6.0 mm)
 
 postprocess:

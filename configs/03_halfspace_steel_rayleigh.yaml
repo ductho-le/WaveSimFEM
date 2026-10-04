@@ -9,16 +9,17 @@
 #     c_L ≈ 5.92 km/s, c_T ≈ 3.22 km/s, c_R ≈ 2.98 km/s (nu = 0.29).
 #   The Rayleigh wave is confined to about one wavelength (≈ 3 mm at 1 MHz)
 #   below the surface, so it is sensitive to near-surface defects such as rolling
-#   contact fatigue cracks in rail heads. The 2D-FFT shows a straight line
-#   f = c_R k / (2 pi) through the origin.
+#   contact fatigue cracks in rail heads. The 2D-FFT shows a sharp straight line
+#   f = c_R k / (2 pi) through the origin, along with bulk wave radiation cones.
 #
 # Truncation of the halfspace
-#   The depth is truncated at 20 mm: 8 mm physical zone (> 2.5 lambda_R at f0)
-#   above a 12 mm absorbing sponge (≈ 2 P-wavelengths at f0). Low-frequency
+#   The depth is truncated at 18 mm: 8 mm physical zone (> 2.5 lambda_R at f0)
+#   above a 10 mm absorbing sponge (≈ 1.7 P-wavelengths at f0). Low-frequency
 #   bulk waves are only partially absorbed; this does not affect the surface wave.
 #
 # References
-#   - I. A. Viktorov (1967), Rayleigh and Lamb Waves, Plenum Press.
+#   - I. A. Viktorov (1967), "Rayleigh and Lamb Waves: Physical Theory and Applications",
+#     Plenum Press, New York.
 #   - D. Hesse, P. Cawley (2006), "Surface wave modes in rails",
 #     J. Acoust. Soc. Am. 120, 733-740.
 # ==============================================================================
@@ -29,15 +30,15 @@ solver:
   time_factor: 1.2              # T = 1.2 * sensing_length / c_R + pulse length
 
 geometry:
-  sensing_length: 0.07          # [m] 70 mm along the surface
+  sensing_length: 0.08          # [m] 80 mm along the surface
   absorb_length: 0.03           # [m] 30 mm lateral sponges (10 Rayleigh wavelengths)
 
 structure:
   mode: "halfspace"
   halfspace:
     name: "Rail steel"
-    thickness: 20.0e-3          # [m] Truncation depth
-    absorb_depth: 12.0e-3       # [m] Bottom sponge inside the truncation depth
+    thickness: 18.0e-3          # [m] Truncation depth (8 mm physical + 10 mm sponge)
+    absorb_depth: 10.0e-3       # [m] Bottom sponge inside the truncation depth
     material_model: "isotropic"
     rho: 7850.0                 # [kg/m^3]
     E: 210.0e9                  # [Pa]
@@ -60,9 +61,9 @@ mesh:
   max_frequency: 1.5e6          # [Hz]
 
 sensors:
-  n_sensors: 91                 # Surface (y = 0) receivers, 45 mm array
-  sensor_offset: 0.01           # [m] 10 mm
-  sensor_pitch: 0.5e-3          # [m]
+  n_sensors: 241                # Dense receiver array along the free surface (y = 0)
+  sensor_offset: 0.01           # [m] 10 mm source-to-first-receiver
+  sensor_pitch: 0.25e-3         # [m] 0.25 mm pitch (60 mm aperture -> Nyquist 12.6 rad/mm)
 
 postprocess:
   run_postprocess: true

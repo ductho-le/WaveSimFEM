@@ -22,12 +22,12 @@ Together they cover every structure mode (`1_layer`, `N_layers`, `halfspace`,
 
 | # | Q2 elements | DOFs | Duration | Steps (preflight) | Notes |
 | :-- | --: | --: | --: | --: | :-- |
-| 01 | 13.8 k | 120 k | 147 μs | ≈ 34 k | Mesh resolves the 2 MHz plot edge; long window for slow A0 |
-| 02 | 12.6 k | 105 k | 90 μs | 2.2 k | Implicit Newmark: the viscous adhesive would cap the explicit step |
-| 03 | 36.4 k | 293 k | 31 μs | 4.5 k | Truncated halfspace with a bottom sponge |
-| 04 | 12.5 k | 101 k | 800 ms | 9.8 k | Same solver at seismic scale; reduced sponge `beta` (high Vp contrast) |
-| 05 | 22.1 k | 179 k | 55 μs | 13.6 k | Stratified solid-fluid plate in vacuum (Le et al., 2025) |
-| 06 | 63.0 k | 507 k | 55 μs | 13.4 k | Plate with bilateral acoustic sponges; `mpiexec -n 4` recommended |
+| 01 | 13.8 k | 120 k | 147 μs | ≈ 34 k | 401 sensors; mesh resolves 2 MHz edge; long window for slow A0 |
+| 02 | 12.6 k | 104 k | 80 μs | 1.68 k | 251 sensors; implicit Newmark; avoids viscous explicit step cap |
+| 03 | 35.5 k | 286 k | 35 μs | 5.12 k | 241 sensors; truncated halfspace with bottom sponge; Rayleigh wave |
+| 04 | 8.8 k | 71 k | 680 ms | 8.38 k | 201 sensors; seismic MASW scale; reduced sponge `beta` |
+| 05 | 25.7 k | 209 k | 71 μs | 17.7 k | 241 sensors; stratified solid-fluid plate in vacuum (Le et al., 2025) |
+| 06 | 56.8 k | 458 k | 71 μs | 17.4 k | 241 sensors; bilateral acoustic sponges; `mpiexec -n 4` recommended |
 
 The preflight explicit step evaluates the solver's Gershgorin bound element by
 element, so it is never larger than the final step, and the step counts agree

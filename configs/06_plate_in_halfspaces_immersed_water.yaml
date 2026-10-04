@@ -7,8 +7,8 @@
 #   (bilateral fluid loading), representative of ultrasonic immersion testing
 #   (UT), acoustic leak detection in submerged piping, and naval structures.
 #     - Central plate (y in [0, 1.5] mm): Aluminium plate (isotropic solid)
-#     - Bottom substrate (y in [-8, 0] mm): Water halfspace with absorbing sponge
-#     - Top superstrate (y in [1.5, 9.5] mm): Water halfspace with absorbing sponge
+#     - Bottom substrate (y in [-6, 0] mm): Water halfspace with absorbing sponge
+#     - Top superstrate (y in [1.5, 7.5] mm): Water halfspace with absorbing sponge
 #
 # Boundary & Acoustic Coupling
 #   - Conforming displacement-based fluid elements with shear regularisation
@@ -34,7 +34,7 @@ solver:
   time_factor: 1.2              # T = 1.2 * sensing_length / slowest speed + pulse length
 
 geometry:
-  sensing_length: 0.06          # [m] 60 mm sensing region along upper plate-water interface
+  sensing_length: 0.08          # [m] 80 mm sensing region along upper plate-water interface
   absorb_length: 0.03           # [m] 30 mm lateral sponge width
 
 structure:
@@ -50,21 +50,21 @@ structure:
 
   substrate:
     name: "Water (bottom halfspace)"
-    thickness: 8.0e-3           # [m] 8 mm truncation depth
-    absorb_depth: 5.0e-3        # [m] 5 mm bottom acoustic sponge
+    thickness: 6.0e-3           # [m] 6 mm truncation depth
+    absorb_depth: 4.0e-3        # [m] 4 mm bottom acoustic sponge
     material_model: "fluid"
     rho: 1000.0                 # [kg/m^3] Water density
     c: 1480.0                   # [m/s] Sound speed in water
-    min_elems_y: 10
+    min_elems_y: 8
 
   superstrate:
     name: "Water (top halfspace)"
-    thickness: 8.0e-3           # [m] 8 mm truncation height
-    absorb_depth: 5.0e-3        # [m] 5 mm top acoustic sponge
+    thickness: 6.0e-3           # [m] 6 mm truncation height
+    absorb_depth: 4.0e-3        # [m] 4 mm top acoustic sponge
     material_model: "fluid"
     rho: 1000.0                 # [kg/m^3] Water density
     c: 1480.0                   # [m/s] Sound speed in water
-    min_elems_y: 10
+    min_elems_y: 8
 
 excitation:
   source_type: "ricker"
@@ -83,9 +83,9 @@ mesh:
   max_frequency: 1.0e6          # [Hz]
 
 sensors:
-  n_sensors: 81                 # Sensors on the upper plate-water interface (y = 1.5 mm)
+  n_sensors: 241                # Dense receiver array along upper plate-water interface (y = 1.5 mm)
   sensor_offset: 0.01           # [m] 10 mm source-to-first-receiver
-  sensor_pitch: 0.5e-3          # [m] 0.5 mm pitch (40 mm aperture)
+  sensor_pitch: 0.25e-3         # [m] 0.25 mm pitch (60 mm aperture -> Nyquist 12.6 rad/mm)
 
 postprocess:
   run_postprocess: true

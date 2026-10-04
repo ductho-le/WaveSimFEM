@@ -704,7 +704,7 @@ The schema is **strict**: unknown keys, misspelled section fields, unknown mater
 Together the examples exercise the `isotropic`, `viscoelastic` and `fluid` material models, anisotropic stiffness (the full plane-strain tensor of the cortical bone in example 05, given through its `viscoelastic` layer), both excitation types, both time integrators, and the full frequency range from 15 Hz to 1 MHz. A purely elastic anisotropic layer uses `material_model: anisotropic` with the same `C` tensor and no `Cv`. Examples 05 and 06 use the regularized-elastic fluid model; see the limitations in [Constitutive Material Models](#d-acoustic-fluid-regularized-small-shear-elasticity).
 
 > [!TIP]
-> Run `guided-waves -c <config> --dry-run` to inspect the computational footprint first; example 06 (≈ 0.51 M DOFs) benefits from `mpiexec -n 4`.
+> Run `guided-waves -c <config> --dry-run` to inspect the computational footprint first; example 06 (≈ 0.46 M DOFs) benefits from `mpiexec -n 4`.
 
 ---
 

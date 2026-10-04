@@ -36,12 +36,12 @@ solver:
   # frequency, so in the explicit solver the adhesive viscosity would cap the step
   # about 4x below the wave-speed limit. Newmark is limited only by accuracy here.
   type: "implicit"
-  steps_per_period: 40          # Newmark steps per period at max_frequency (accuracy)
-  duration: 90.0e-6             # [s] A0 needs ~45 us to cross the array + 16.7 us pulse
+  steps_per_period: 35          # Newmark steps per period at max_frequency (accuracy)
+  duration: 80.0e-6             # [s] Wave packets propagate across array + pulse length
 
 geometry:
-  sensing_length: 0.12          # [m] 120 mm
-  absorb_length: 0.06           # [m] 60 mm (≈ 7 A0 wavelengths at f0)
+  sensing_length: 0.10          # [m] 100 mm sensing region
+  absorb_length: 0.04           # [m] 40 mm lateral sponges (≈ 5 A0 wavelengths at f0)
 
 structure:
   mode: "N_layers"              # Layers are listed bottom -> top
@@ -52,6 +52,7 @@ structure:
       rho: 2780.0               # [kg/m^3]
       E: 73.1e9                 # [Pa]
       nu: 0.33
+      min_elems_y: 6
 
     - name: "Epoxy adhesive"
       thickness: 0.2e-3         # [m] 0.2 mm bond line
@@ -60,7 +61,7 @@ structure:
       # Plane-strain Voigt order [C11, C12, C16, C22, C26, C66]
       C: [8.112e9, 5.208e9, 0.0, 8.112e9, 0.0, 1.452e9]   # [Pa]
       Cv: [215.2, 138.2, 0.0, 215.2, 0.0, 38.5]            # [Pa*s] = 2.65e-8 s * C
-      min_elems_y: 2
+      min_elems_y: 4
 
     - name: "Aluminium adherend, top (2024-T3)"
       thickness: 1.0e-3         # [m]
@@ -68,6 +69,7 @@ structure:
       rho: 2780.0
       E: 73.1e9
       nu: 0.33
+      min_elems_y: 6
 
 excitation:
   source_type: "tone_burst"     # Hann-windowed sine burst (narrowband, mode-selective)
@@ -87,9 +89,9 @@ mesh:
   max_frequency: 600.0e3        # [Hz] 2 * f0 covers the tone-burst spectrum
 
 sensors:
-  n_sensors: 201                # Top surface, 100 mm array
-  sensor_offset: 0.01           # [m] 10 mm
-  sensor_pitch: 0.5e-3          # [m]
+  n_sensors: 251                # High-density receiver array along loaded top surface
+  sensor_offset: 0.01           # [m] 10 mm source-to-first-receiver
+  sensor_pitch: 0.30e-3         # [m] 0.30 mm pitch (75 mm total aperture -> Nyquist 10.5 rad/mm)
 
 postprocess:
   run_postprocess: true
