@@ -10,10 +10,13 @@ physics, the application, the modelling choices, and references.
 | 02 | [`02_layers_bonded_joint.yaml`](02_layers_bonded_joint.yaml) | `N_layers` | Al / 0.2 mm viscoelastic epoxy / Al bonded joint | Aerospace bond inspection | 5-cycle Hann tone burst, 300 kHz (implicit solver) | mm, μs, kHz |
 | 03 | [`03_halfspace_steel_rayleigh.yaml`](03_halfspace_steel_rayleigh.yaml) | `halfspace` | Rail steel halfspace | Rail / surface-crack NDE | Ricker, 1 MHz | mm, μs, MHz |
 | 04 | [`04_plate_on_halfspace_soil_bedrock.yaml`](04_plate_on_halfspace_soil_bedrock.yaml) | `plate_on_halfspace` | 10 m soft soil on bedrock | Seismic MASW / site characterisation | Ricker, 15 Hz | m, s, Hz |
-| 05 | [`05_plate_in_halfspaces_bone_qus.yaml`](05_plate_in_halfspaces_bone_qus.yaml) | `plate_in_halfspaces` | Anisotropic viscoelastic cortical bone between soft tissue and marrow (fluids) | Biomedical QUS (axial transmission) | Ricker, 500 kHz | mm, μs, kHz |
+| 05 | [`05_layers_bone_qus.yaml`](05_layers_bone_qus.yaml) | `N_layers` | Stratified solid-fluid plate: bone marrow / cortical bone / soft tissue | Biomedical QUS (axial transmission) | Ricker, 500 kHz | mm, μs, kHz |
+| 06 | [`06_plate_in_halfspaces_immersed_water.yaml`](06_plate_in_halfspaces_immersed_water.yaml) | `plate_in_halfspaces` | Aluminium plate immersed in water (bilateral fluid loading) | Ultrasonic immersion NDE | Ricker, 500 kHz | mm, μs, kHz |
 
-Together they cover every material model: `isotropic` (01–04), `viscoelastic`
-(02, 05; anisotropic stiffness in 05), and `fluid` (05).
+Together they cover every structure mode (`1_layer`, `N_layers`, `halfspace`,
+`plate_on_halfspace`, `plate_in_halfspaces`) and every material model: `isotropic`
+(01, 03, 04, 06), `viscoelastic` (02, 05; anisotropic stiffness in 05), and
+`fluid` (05, 06).
 
 ## Preflight sizes (`--dry-run`, default settings)
 
@@ -23,7 +26,8 @@ Together they cover every material model: `isotropic` (01–04), `viscoelastic`
 | 02 | 12.6 k | 105 k | 90 μs | 2.2 k | Implicit Newmark: the viscous adhesive would cap the explicit step |
 | 03 | 36.4 k | 293 k | 31 μs | 4.5 k | Truncated halfspace with a bottom sponge |
 | 04 | 12.5 k | 101 k | 800 ms | 9.8 k | Same solver at seismic scale; reduced sponge `beta` (high Vp contrast) |
-| 05 | 82.4 k | 662 k | 55 μs | 13.8 k | Largest case; `mpiexec -n 4` recommended |
+| 05 | 22.1 k | 179 k | 55 μs | 13.6 k | Stratified solid-fluid plate in vacuum (Le et al., 2025) |
+| 06 | 63.0 k | 507 k | 55 μs | 13.4 k | Plate with bilateral acoustic sponges; `mpiexec -n 4` recommended |
 
 The preflight explicit step evaluates the solver's Gershgorin bound element by
 element, so it is never larger than the final step, and the step counts agree
@@ -41,7 +45,7 @@ guided-waves -c configs/04_plate_on_halfspace_soil_bedrock.yaml --dry-run
 guided-waves -c configs/01_plate_aluminum_lamb.yaml
 
 # Parallel run with CLI overrides (no file edits)
-mpiexec -n 4 guided-waves -c configs/05_plate_in_halfspaces_bone_qus.yaml \
+mpiexec -n 4 guided-waves -c configs/05_layers_bone_qus.yaml \
     --max-frequency 800e3 --duration 40e-6
 
 # Re-plot an existing archive with different limits (SI numbers or unit strings)

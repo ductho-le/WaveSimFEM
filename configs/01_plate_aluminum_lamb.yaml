@@ -37,7 +37,7 @@ structure:
   mode: "1_layer"
   single_layer:
     name: "Aluminium alloy plate (6061-T6)"
-    thickness: 1.0e-3           # [m] 1 mm
+    thickness: 3.0e-3           # [m] 3 mm
     material_model: "isotropic"
     rho: 2700.0                 # [kg/m^3]
     E: 70.0e9                   # [Pa]   -> c_L = 6.20 km/s (plane strain), c_T = 3.12 km/s

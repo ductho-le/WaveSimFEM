@@ -138,8 +138,8 @@ def test_plot_limits_do_not_stretch_fft(tmp_path, monkeypatch):
     assert extents[1][1] < 3.3  # Nyquist ~pi rad/mm, NOT the requested 10
 
 
-def test_shipped_examples_cover_each_structure_once():
-    """configs/ holds exactly one valid example per supported structure mode."""
+def test_shipped_examples_cover_every_structure_mode():
+    """configs/ holds valid examples covering every supported structure mode."""
     from collections import Counter
     from pathlib import Path
 
@@ -156,7 +156,9 @@ def test_shipped_examples_cover_each_structure_once():
         summary = structure_from_config(cfg)
         assert summary["H_domain"] > 0
         modes[cfg["structure_mode"]] += 1
-    assert modes == Counter(STRUCTURE_MODES), modes
+    assert set(STRUCTURE_MODES).issubset(modes), (
+        f"Missing modes: {set(STRUCTURE_MODES) - set(modes)}"
+    )
 
 
 def test_assembled_operator_bound():

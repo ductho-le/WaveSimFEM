@@ -504,9 +504,9 @@ python -m guidedwavefem -c configs/01_plate_aluminum_lamb.yaml
 Distribute simulation work across processes (uses the distributed PETSc engines):
 
 ```bash
-mpiexec -n 4 guided-waves -c configs/05_plate_in_halfspaces_bone_qus.yaml
+mpiexec -n 4 guided-waves -c configs/05_layers_bone_qus.yaml
 # Or:
-mpiexec -n 4 python -m guidedwavefem -c configs/05_plate_in_halfspaces_bone_qus.yaml
+mpiexec -n 4 python -m guidedwavefem -c configs/05_layers_bone_qus.yaml
 ```
 
 **Threads per rank.** Parallelism comes from MPI (one rank per core). Threaded BLAS/OpenMP libraries would otherwise start one thread per core *in every rank* and oversubscribe the machine. When launched through `guided-waves` or `python -m guidedwavefem` under `mpiexec`/`srun`, each rank is therefore capped at `cpus // ranks_per_node` threads (Open MPI, MPICH/Intel MPI, MVAPICH2 and Slurm launch variables are recognised). The setting is reported in the run banner (`Threads: ...`). It never overrides a value you set yourself, e.g. `OMP_NUM_THREADS=1 mpiexec -n 8 guided-waves ...`. Library users calling `run_simulation` from their own scripts can call `guidedwavefem.limit_threads_per_rank()` before importing NumPy.
@@ -690,7 +690,7 @@ The schema is **strict**: unknown keys, misspelled section fields, unknown mater
 
 ## Pre-Configured Examples & Benchmark Setups
 
-[`configs/`](configs/) holds **one example per supported structure mode**, each built from a real application with documented materials and references (see [`configs/README.md`](configs/README.md)):
+[`configs/`](configs/) holds **runnable benchmark examples covering every supported structure mode**, each built from a real application with documented materials and references (see [`configs/README.md`](configs/README.md)):
 
 | Config file | Mode | Physical system | Application | Excitation |
 | :--- | :--- | :--- | :--- | :--- |
@@ -698,12 +698,13 @@ The schema is **strict**: unknown keys, misspelled section fields, unknown mater
 | [`02_layers_bonded_joint.yaml`](configs/02_layers_bonded_joint.yaml) | `N_layers` | Al / 0.2 mm viscoelastic epoxy / Al | Adhesive bond inspection (aerospace) | 5-cycle tone burst, 300 kHz; implicit solver |
 | [`03_halfspace_steel_rayleigh.yaml`](configs/03_halfspace_steel_rayleigh.yaml) | `halfspace` | Rail steel, truncated halfspace | Rayleigh-wave surface-crack NDE ($c_R \approx 2.98$ km/s) | Ricker, 1 MHz |
 | [`04_plate_on_halfspace_soil_bedrock.yaml`](configs/04_plate_on_halfspace_soil_bedrock.yaml) | `plate_on_halfspace` | 10 m soft soil on bedrock | Seismic MASW / site characterisation | Ricker, 15 Hz |
-| [`05_plate_in_halfspaces_bone_qus.yaml`](configs/05_plate_in_halfspaces_bone_qus.yaml) | `plate_in_halfspaces` | Anisotropic viscoelastic cortical bone between soft tissue and marrow | Axial-transmission bone QUS | Ricker, 500 kHz |
+| [`05_layers_bone_qus.yaml`](configs/05_layers_bone_qus.yaml) | `N_layers` | Stratified solid-fluid plate: bone marrow / cortical bone / soft tissue | Axial-transmission bone QUS (Le et al., 2025) | Ricker, 500 kHz |
+| [`06_plate_in_halfspaces_immersed_water.yaml`](configs/06_plate_in_halfspaces_immersed_water.yaml) | `plate_in_halfspaces` | Aluminium plate immersed in water | Ultrasonic immersion NDE (leaky Lamb & Scholte waves) | Ricker, 500 kHz |
 
-Together the examples exercise the `isotropic`, `viscoelastic` and `fluid` material models, anisotropic stiffness (the full plane-strain tensor of the cortical bone in example 05, given through its `viscoelastic` layer), both excitation types, both time integrators, and the full frequency range from 15 Hz to 1 MHz. A purely elastic anisotropic layer uses `material_model: anisotropic` with the same `C` tensor and no `Cv`. Example 05 uses the regularized-elastic fluid model; see the limitations in [Constitutive Material Models](#d-acoustic-fluid-regularized-small-shear-elasticity).
+Together the examples exercise the `isotropic`, `viscoelastic` and `fluid` material models, anisotropic stiffness (the full plane-strain tensor of the cortical bone in example 05, given through its `viscoelastic` layer), both excitation types, both time integrators, and the full frequency range from 15 Hz to 1 MHz. A purely elastic anisotropic layer uses `material_model: anisotropic` with the same `C` tensor and no `Cv`. Examples 05 and 06 use the regularized-elastic fluid model; see the limitations in [Constitutive Material Models](#d-acoustic-fluid-regularized-small-shear-elasticity).
 
 > [!TIP]
-> Run `guided-waves -c <config> --dry-run` to inspect the computational footprint first; example 05 (≈ 0.66 M DOFs) benefits from `mpiexec -n 4`.
+> Run `guided-waves -c <config> --dry-run` to inspect the computational footprint first; example 06 (≈ 0.51 M DOFs) benefits from `mpiexec -n 4`.
 
 ---
 

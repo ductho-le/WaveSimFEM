@@ -126,14 +126,14 @@ All notable changes are documented here. Versions follow
   mesh sizing.
 
 ### Examples
-- `configs/` now holds exactly one documented example per structure mode, each
-  with real materials and references (enforced by a test):
+- `configs/` holds documented benchmark examples covering every structure mode,
+  each with real materials and references (enforced by a test):
   `01_plate_aluminum_lamb` (`1_layer`, Lamb-wave NDE),
   `02_layers_bonded_joint` (`N_layers`, Al/viscoelastic epoxy/Al, tone burst),
   `03_halfspace_steel_rayleigh` (`halfspace`, rail steel Rayleigh waves),
   `04_plate_on_halfspace_soil_bedrock` (`plate_on_halfspace`, seismic MASW at 15 Hz),
-  `05_plate_in_halfspaces_bone_qus` (`plate_in_halfspaces`, cortical bone between
-  soft tissue and marrow).
+  `05_layers_bone_qus` (`N_layers`, stratified solid-fluid plate: bone marrow / cortical bone / soft tissue, Le et al. 2025),
+  `06_plate_in_halfspaces_immersed_water` (`plate_in_halfspaces`, aluminium plate immersed in water).
 - Removed the previous examples 01-11 (including the TOML/JSON copies of 01 and the
   BoneDC benchmark cases). TOML and JSON remain supported formats.
 
