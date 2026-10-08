@@ -125,7 +125,7 @@ def test_cli_invalid_device_rejected(capsys):
         main(["-c", str(CONFIG_01), "--dry-run", "--device", "gpu0"])
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
-    assert "guided-waves: error: invalid configuration" in err and "Invalid device" in err
+    assert "gwfem: error: invalid configuration" in err and "Invalid device" in err
     assert "Traceback" not in err
 
 
@@ -210,3 +210,25 @@ def test_cli_postprocess_missing_file(tmp_path, capsys):
         main(["--postprocess", str(tmp_path / "missing.npz")])
     assert exc_info.value.code == 2
     assert "sensor data file not found" in capsys.readouterr().err
+
+
+def test_cli_frequency_overrides_dry_run(capsys):
+    # Verify that overriding max_frequency below YAML min_frequency cleanly adapts
+    main(["-c", str(CONFIG_01), "--max-frequency", "500000", "--dry-run"])
+    out = capsys.readouterr().out
+    assert "Dry run complete" in out
+
+    # Verify explicit --min-frequency override
+    main(
+        [
+            "-c",
+            "configs/03_halfspace_steel_rayleigh.yaml",
+            "--min-frequency",
+            "100000",
+            "--max-frequency",
+            "500000",
+            "--dry-run",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert "Dry run complete" in out

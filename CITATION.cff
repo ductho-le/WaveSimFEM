@@ -18,6 +18,7 @@ date-released: 2026-10-03
 license: MIT
 repository-code: "https://github.com/ductho-le/GuidedWaveFEM"
 keywords:
+  - "gwfem"
   - "guided-waves"
   - "finite-element-method"
   - "ultrasonics"

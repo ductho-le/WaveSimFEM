@@ -1,7 +1,7 @@
 #!/bin/sh
 # Four MPI ranks, one numerical-library thread per rank, using the active environment.
 # Usage (repository root): sh tools/run_cpu4.sh -c configs/template.yaml
-# All arguments are forwarded to guided-waves; CPU/double are enforced last.
+# All arguments are forwarded to gwfem; CPU/double are enforced last.
 set -eu
 
 export OMP_NUM_THREADS=1

@@ -23,9 +23,9 @@ rank = comm.rank
 _MISSING_CONFIG_MESSAGE = (
     "\n" + "=" * 70 + "\nERROR: Configuration file is required to run simulation.\n"
     "Please provide a YAML/TOML/JSON configuration file using:\n"
-    "    guided-waves -c configs/01_plate_aluminum_lamb.yaml\n\n"
+    "    gwfem -c configs/01_plate_aluminum_lamb.yaml\n\n"
     "Or generate a template configuration with:\n"
-    "    guided-waves --generate-config my_config.yaml\n" + "=" * 70 + "\n"
+    "    gwfem --generate-config my_config.yaml\n" + "=" * 70 + "\n"
 )
 
 #: Exit status for invalid user input (unreadable or invalid configuration, missing files).
@@ -41,14 +41,14 @@ def _exit_with_error(
     if verbose and exc is not None:
         raise exc
     if rank == 0:
-        print(f"guided-waves: error: {message}", file=sys.stderr)
+        print(f"gwfem: error: {message}", file=sys.stderr)
     sys.exit(code)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Construct the ``guided-waves`` argument parser."""
+    """Construct the ``gwfem`` argument parser."""
     parser = argparse.ArgumentParser(
-        prog="guided-waves",
+        prog="gwfem",
         description="Unified Guided Wave FEM Simulation & Dispersion Extraction",
         epilog="Options left unset fall back to the configuration file, then built-in defaults.",
     )
@@ -125,6 +125,12 @@ def build_parser() -> argparse.ArgumentParser:
         "(requires -c/--config)",
     )
     parser.add_argument(
+        "--min-frequency",
+        type=float,
+        default=None,
+        help="Analysis/sizing lower frequency bound override [Hz]",
+    )
+    parser.add_argument(
         "--max-frequency",
         type=float,
         default=None,
@@ -176,7 +182,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         if rank == 0:
             if args.dry_run:
                 parser.print_usage(sys.stderr)
-                print("guided-waves: error: --dry-run requires -c/--config", file=sys.stderr)
+                print("gwfem: error: --dry-run requires -c/--config", file=sys.stderr)
             else:
                 parser.print_help()
                 print(_MISSING_CONFIG_MESSAGE, file=sys.stderr)

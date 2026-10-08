@@ -22,6 +22,8 @@ All notable changes are documented here. Versions follow
 
 ### Changed
 
+- Rename the CLI launcher executable to `gwfem` for consistent and concise
+  simulation invocation.
 - Standardize all figure exports at 190 mm width with 10-point text,
   including ticks, legends and colourbars. Compact panel layouts replace figure
   headers and explanatory annotations; accompanying README files retain the

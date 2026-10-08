@@ -672,6 +672,7 @@ def _apply_cli_overrides(resolved: dict[str, Any], args: argparse.Namespace) -> 
         "f_max": "disp_f_max",
         "k_min": "disp_k_min",
         "k_max": "disp_k_max",
+        "min_frequency": "min_frequency",
         "max_frequency": "max_frequency",
         "duration": "duration",
         "dt": "dt",
@@ -685,6 +686,17 @@ def _apply_cli_overrides(resolved: dict[str, Any], args: argparse.Namespace) -> 
         if value is not None:
             resolved[key] = value
             resolved.pop(legacy_for.get(key, ""), None)  # CLI wins over legacy file keys
+    if (
+        getattr(args, "max_frequency", None) is not None
+        and getattr(args, "min_frequency", None) is None
+    ):
+        min_f = resolved.get("min_frequency")
+        if min_f is not None:
+            try:
+                if float(min_f) >= resolved["max_frequency"]:
+                    resolved["min_frequency"] = None
+            except (ValueError, TypeError):
+                pass
     if getattr(args, "no_postprocess", False):
         resolved["run_postprocess"] = False
 

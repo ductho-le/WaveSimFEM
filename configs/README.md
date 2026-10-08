@@ -29,14 +29,14 @@ from the repository root:
 
 ```sh
 # Inspect the configuration and estimate resources without running the solver.
-guided-waves -c configs/template.yaml --dry-run
+gwfem -c configs/template.yaml --dry-run
 
 # Run with four CPU processes.
 sh tools/run_cpu4.sh -c configs/template.yaml
 
 # Create a separate configuration for a new study.
 cp configs/template.yaml my_case.yaml
-guided-waves -c my_case.yaml --dry-run
+gwfem -c my_case.yaml --dry-run
 ```
 
 Set a unique `output.output_dir` for each case and resolution. The output archive
@@ -49,7 +49,7 @@ recording times used for a result.
 `tools/run_cpu4.sh` launches four MPI ranks, sets numerical-library thread pools
 to one thread per rank, and selects CPU/double precision. It uses the active
 environment's Python and MPI. Rank count is a launch parameter; it is not a YAML
-input. A direct `guided-waves -c ...` invocation uses a single process unless
+input. A direct `gwfem -c ...` invocation uses a single process unless
 started under MPI.
 
 ```sh
@@ -169,7 +169,7 @@ material attenuation. No automated velocity or loss estimate is inferred from
 these reconstructed signals.
 
 ```sh
-guided-waves -c configs/01_plate_aluminum_lamb.yaml \
+gwfem -c configs/01_plate_aluminum_lamb.yaml \
     --postprocess results_01_plate_aluminum_lamb/sensor_data.npz
 ```
 
@@ -266,7 +266,7 @@ Figure explanations and provenance are written to accompanying README files.
 Replot an existing archive without rerunning the simulation:
 
 ```sh
-guided-waves --postprocess results_03_halfspace_steel_rayleigh/sensor_data.npz \
+gwfem --postprocess results_03_halfspace_steel_rayleigh/sensor_data.npz \
     --f-min "0.5 MHz" --f-max "1.5 MHz"
 ```
 
@@ -327,7 +327,7 @@ An omitted or disabled report leaves standard dispersion processing unchanged.
 Use the same settings when analysing an existing archive:
 
 ```sh
-guided-waves -c my_case.yaml --postprocess results_case/sensor_data.npz
+gwfem -c my_case.yaml --postprocess results_case/sensor_data.npz
 ```
 
 The `characterisation/` subdirectory contains four figure families:

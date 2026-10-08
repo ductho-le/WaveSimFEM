@@ -9,7 +9,7 @@ from __future__ import annotations
 
 
 def main() -> None:
-    """Apply the MPI thread policy, then run the ``guided-waves`` CLI."""
+    """Apply the MPI thread policy, then run the ``gwfem`` CLI."""
     from guidedwavefem.parallel import apply_thread_policy
 
     apply_thread_policy()

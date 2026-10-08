@@ -65,7 +65,7 @@ GuidedWaveFEM/
 │       ├── device.py           # Accelerator discovery and device-request validation
 │       ├── analysis.py         # Band-pass filtering, dispersion figures, quick-look plot
 │       ├── reporting.py        # `guidedwavefem` logger, verbosity, banners and structure tables
-│       └── cli.py              # `guided-waves` argument parsing and orchestration
+│       └── cli.py              # `gwfem` argument parsing and orchestration
 ├── configs/                    # One documented example per structure mode
 ├── tests/                      # Unit, regression, physics, MPI, and CLI tests
 ├── tools/clean_junk.py         # Safe cache/build/OS-junk cleaner (used by pre-commit)
@@ -457,7 +457,7 @@ cd GuidedWaveFEM
 
 # 2. Create and activate the conda environment
 conda env create -f environment.yml
-conda activate fenicsx-waves
+conda activate gwfem
 
 # 3. Install GuidedWaveFEM in editable mode (dependencies come from conda)
 python -m pip install --no-deps -e .
@@ -489,12 +489,12 @@ conda list --explicit > environment-explicit.txt
 
 ## Usage Guide & Command-Line Interface
 
-All simulations require an explicit configuration file via `-c` / `--config`, including exact mesh counts (`mesh.nx`, `mesh.ny_per_region`). Explicit runs also require a user-selected `solver.CFL`; the solver then calculates the time step from the assembled operators. Simulations can be launched using either the installed CLI `guided-waves` or module invocation `python -m guidedwavefem`.
+All simulations require an explicit configuration file via `-c` / `--config`, including exact mesh counts (`mesh.nx`, `mesh.ny_per_region`). Explicit runs also require a user-selected `solver.CFL`; the solver then calculates the time step from the assembled operators. Simulations can be launched using either the installed CLI `gwfem` or module invocation `python -m guidedwavefem`.
 
 ### 1. Running a Simulation
 
 ```bash
-guided-waves -c configs/01_plate_aluminum_lamb.yaml
+gwfem -c configs/01_plate_aluminum_lamb.yaml
 # Or alternatively:
 python -m guidedwavefem -c configs/01_plate_aluminum_lamb.yaml
 ```
@@ -504,19 +504,19 @@ python -m guidedwavefem -c configs/01_plate_aluminum_lamb.yaml
 Distribute simulation work across processes (uses the distributed PETSc engines):
 
 ```bash
-mpiexec -n 4 guided-waves -c configs/05_layers_bone_qus.yaml
+mpiexec -n 4 gwfem -c configs/05_layers_bone_qus.yaml
 # Or:
 mpiexec -n 4 python -m guidedwavefem -c configs/05_layers_bone_qus.yaml
 ```
 
-**Threads per rank.** Parallelism comes from MPI (one rank per core). Threaded BLAS/OpenMP libraries would otherwise start one thread per core *in every rank* and oversubscribe the machine. When launched through `guided-waves` or `python -m guidedwavefem` under `mpiexec`/`srun`, each rank is therefore capped at `cpus // ranks_per_node` threads (Open MPI, MPICH/Intel MPI, MVAPICH2 and Slurm launch variables are recognised). The setting is reported in the run banner (`Threads: ...`). It never overrides a value you set yourself, e.g. `OMP_NUM_THREADS=1 mpiexec -n 8 guided-waves ...`. Library users calling `run_simulation` from their own scripts can call `guidedwavefem.limit_threads_per_rank()` before importing NumPy.
+**Threads per rank.** Parallelism comes from MPI (one rank per core). Threaded BLAS/OpenMP libraries would otherwise start one thread per core *in every rank* and oversubscribe the machine. When launched through `gwfem` or `python -m guidedwavefem` under `mpiexec`/`srun`, each rank is therefore capped at `cpus // ranks_per_node` threads (Open MPI, MPICH/Intel MPI, MVAPICH2 and Slurm launch variables are recognised). The setting is reported in the run banner (`Threads: ...`). It never overrides a value you set yourself, e.g. `OMP_NUM_THREADS=1 mpiexec -n 8 gwfem ...`. Library users calling `run_simulation` from their own scripts can call `guidedwavefem.limit_threads_per_rank()` before importing NumPy.
 
 ### 3. Preflight Resource Estimation (`--dry-run`)
 
 Preview the supplied mesh counts, actual element sizes, DOF counts, time step limits, and memory requirements without allocating FEM structures:
 
 ```bash
-guided-waves -c configs/01_plate_aluminum_lamb.yaml --dry-run
+gwfem -c configs/01_plate_aluminum_lamb.yaml --dry-run
 ```
 
 Units follow the problem scale (the seismic example reports metres, milliseconds and hertz). The preflight uses the same mesh-layout and sampled-time-grid code as the solver. The implicit step follows the same accuracy rule as the solver. The automatic explicit step uses a conservative element bound. A requested explicit `dt` beyond that certificate produces a warning and conservative resource estimates; only the assembled-operator check can accept or reject that request. Final step counts reflect rounding to the sensor stride.
@@ -530,31 +530,31 @@ Override configuration settings directly from the terminal:
 
 ```bash
 # Select implicit Newmark time integration
-guided-waves -c configs/01_plate_aluminum_lamb.yaml --solver implicit
+gwfem -c configs/01_plate_aluminum_lamb.yaml --solver implicit
 
 # Use an accelerator if one is available, otherwise the CPU engine
-guided-waves -c configs/01_plate_aluminum_lamb.yaml --device auto
+gwfem -c configs/01_plate_aluminum_lamb.yaml --device auto
 
 # Require a specific CUDA GPU (fails with exit code 3 if unavailable)
-guided-waves -c configs/01_plate_aluminum_lamb.yaml --device cuda:0
+gwfem -c configs/01_plate_aluminum_lamb.yaml --device cuda:0
 
 # Single precision (float32) halves memory traffic on the array engine
-guided-waves -c configs/01_plate_aluminum_lamb.yaml --device auto --precision single
+gwfem -c configs/01_plate_aluminum_lamb.yaml --device auto --precision single
 
 # Specify custom output directory
-guided-waves -c configs/03_halfspace_steel_rayleigh.yaml --output results_rayleigh
+gwfem -c configs/03_halfspace_steel_rayleigh.yaml --output results_rayleigh
 
 # Override duration, analysis frequency, and the user-supplied CFL factor
-guided-waves -c configs/01_plate_aluminum_lamb.yaml --duration 5.0e-5 --max-frequency 1.0e6 --cfl 0.4
+gwfem -c configs/01_plate_aluminum_lamb.yaml --duration 5.0e-5 --max-frequency 1.0e6 --cfl 0.4
 
 # Set dispersion display limits: SI numbers (Hz, rad/m) or strings with units
-guided-waves -c configs/01_plate_aluminum_lamb.yaml --f-max "3 MHz" --k-max "4 rad/mm"
+gwfem -c configs/01_plate_aluminum_lamb.yaml --f-max "3 MHz" --k-max "4 rad/mm"
 
 # Disable postprocessing and plot generation
-guided-waves -c configs/01_plate_aluminum_lamb.yaml --no-postprocess
+gwfem -c configs/01_plate_aluminum_lamb.yaml --no-postprocess
 
 # Quiet (warnings only) or verbose (debug) console output
-guided-waves -c configs/01_plate_aluminum_lamb.yaml -q
+gwfem -c configs/01_plate_aluminum_lamb.yaml -q
 ```
 
 #### Device Selection Semantics
@@ -579,17 +579,17 @@ Console output goes through the standard `logging` logger named `guidedwavefem`;
 | `2` | Usage or input error: invalid/unreadable configuration, `--dry-run` without `-c`, missing sensor archive |
 | `3` | Explicitly requested compute device is unavailable |
 
-Input errors print a single `guided-waves: error: ...` line; add `-v` to see the full traceback.
+Input errors print a single `gwfem: error: ...` line; add `-v` to see the full traceback.
 
 ### 5. Standalone Signal Post-Processing
 
 Reprocess existing measurement archives without rerunning the FEM solver:
 
 ```bash
-guided-waves --postprocess results_01_plate_aluminum_lamb/sensor_data.npz --output reprocessed_figures
+gwfem --postprocess results_01_plate_aluminum_lamb/sensor_data.npz --output reprocessed_figures
 
 # Optionally apply output settings (figure_formats, usetex, plot limits) from a config file
-guided-waves -c my_plot_settings.yaml --postprocess results_01_plate_aluminum_lamb/sensor_data.npz
+gwfem -c my_plot_settings.yaml --postprocess results_01_plate_aluminum_lamb/sensor_data.npz
 ```
 
 Without `-c`, the plot limits stored in the archive are used unless overridden with `--f-min/--f-max/--k-min/--k-max` (SI numbers or unit strings such as `--f-max 40Hz`). Archives written by earlier versions (limits in MHz and rad/mm) are still understood.
@@ -753,7 +753,7 @@ prescribed illustrative dispersion, not independently solved physical modes.
 Generate a fully annotated template YAML file:
 
 ```bash
-guided-waves --generate-config my_custom_waveguide.yaml
+gwfem --generate-config my_custom_waveguide.yaml
 ```
 
 ### 7. Configuration Parameter Hierarchy
@@ -840,7 +840,7 @@ preflight or runtime metadata. Explicit configurations must also supply
 `solver.CFL`; `solver.dt` remains an optional checked override. The bundled
 examples retain their previous resolved element counts and configured CFLs.
 
-The schema is **strict**: unknown keys, misspelled section fields, unknown material fields, constitutive fields the chosen `material_model` would ignore (e.g. `Cv` on an `isotropic` layer), parameters defined twice, and non-boolean values for boolean switches are all rejected with a descriptive error (including a "did you mean" suggestion where possible). Run `guided-waves --generate-config template.yaml` for the full, commented schema.
+The schema is **strict**: unknown keys, misspelled section fields, unknown material fields, constitutive fields the chosen `material_model` would ignore (e.g. `Cv` on an `isotropic` layer), parameters defined twice, and non-boolean values for boolean switches are all rejected with a descriptive error (including a "did you mean" suggestion where possible). Run `gwfem --generate-config template.yaml` for the full, commented schema.
 
 ---
 
@@ -860,7 +860,7 @@ The schema is **strict**: unknown keys, misspelled section fields, unknown mater
 Together the examples exercise the `isotropic`, `viscoelastic` and `fluid` material models, anisotropic stiffness (the full plane-strain tensor of the cortical bone in example 05, given through its `viscoelastic` layer), both excitation types, both time integrators, and the full frequency range from 15 Hz to 1 MHz. A purely elastic anisotropic layer uses `material_model: anisotropic` with the same `C` tensor and no `Cv`. Examples 05 and 06 use the regularized-elastic fluid model; see the limitations in [Constitutive Material Models](#d-acoustic-fluid-regularized-small-shear-elasticity).
 
 > [!TIP]
-> Run `guided-waves -c <config> --dry-run` to inspect the computational footprint first; example 06 (≈ 0.46 M DOFs) benefits from `mpiexec -n 4`.
+> Run `gwfem -c <config> --dry-run` to inspect the computational footprint first; example 06 (≈ 0.46 M DOFs) benefits from `mpiexec -n 4`.
 
 ---
 
@@ -894,27 +894,27 @@ The repository includes an automated testing and verification suite evaluated ag
 
 ```bash
 # Complete serial test suite (unit, regression, physics, MPI-subprocess, and CLI tests)
-conda run -n fenicsx-waves python -m pytest
+conda run -n gwfem python -m pytest
 
 # Skip the longer end-to-end physics verification runs
-conda run -n fenicsx-waves python -m pytest -m "not slow"
+conda run -n gwfem python -m pytest -m "not slow"
 
 # Coverage report
-conda run -n fenicsx-waves python -m pytest --cov
+conda run -n gwfem python -m pytest --cov
 
 # Distributed tests (2 ranks)
-conda run -n fenicsx-waves mpiexec -n 2 python -m pytest -q -p no:cacheprovider tests/test_numerics.py -k "exact_point or gather"
+conda run -n gwfem mpiexec -n 2 python -m pytest -q -p no:cacheprovider tests/test_numerics.py -k "exact_point or gather"
 
 # Lint and format (also run by pre-commit and CI)
-conda run -n fenicsx-waves ruff check src tests tools
-conda run -n fenicsx-waves ruff format --check src tests tools
+conda run -n gwfem ruff check src tests tools
+conda run -n gwfem ruff format --check src tests tools
 
 # All pre-commit hooks on the whole repository
-conda run -n fenicsx-waves pre-commit run --all-files
+conda run -n gwfem pre-commit run --all-files
 
 # Remove junk files and folders (preview first with --dry-run)
-conda run -n fenicsx-waves python tools/clean_junk.py --dry-run
-conda run -n fenicsx-waves python tools/clean_junk.py
+conda run -n gwfem python tools/clean_junk.py --dry-run
+conda run -n gwfem python tools/clean_junk.py
 ```
 
 #### Pre-commit Hooks

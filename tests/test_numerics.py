@@ -1,4 +1,4 @@
-"""Independent numerical checks; run inside the fenicsx-waves environment."""
+"""Independent numerical checks; run inside the gwfem environment."""
 
 import numpy as np
 import pytest

@@ -68,7 +68,7 @@ def test_mpi_shutdown_on_rank_local_failure(case):
         assert "collective validation completed" in stdout
     elif case in ("help", "version"):
         assert proc.returncode == 0, stdout + stderr
-        assert "guided-waves" in stdout
+        assert "gwfem" in stdout
     else:
         assert proc.returncode != 0, stdout + stderr
         assert "injected" in stderr, stdout + stderr
