@@ -18,7 +18,9 @@ import functools
 import hashlib
 import os
 import platform
+import tempfile
 import time as pytime
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,6 +49,7 @@ from guidedwavefem.materials import (
     compute_mesh_layout,
     implicit_time_step,
     preflight_estimate,
+    sampled_time_grid,
     structure_from_config,
 )
 from guidedwavefem.numerics import (
@@ -54,8 +57,6 @@ from guidedwavefem.numerics import (
     PetscRK4,
     PointSensors,
     operator_bound,
-    sample_stride,
-    time_grid,
 )
 from guidedwavefem.parallel import describe_thread_state
 from guidedwavefem.reporting import format_banner_box, log, print_structure_table, warn
@@ -65,6 +66,12 @@ from guidedwavefem.solvers_gpu import (
     make_backend,
 )
 from guidedwavefem.sources import describe_source, ricker, source_signal
+from guidedwavefem.storage import (
+    HISTORY_CHUNK_BYTES,
+    HistoryStore,
+    all_finite_history,
+    atomic_output,
+)
 from guidedwavefem.units import fmt_length, fmt_time
 
 __all__ = [
@@ -88,7 +95,7 @@ nprocs = comm.size
 MIN_POSTPROCESS_SAMPLES = 32
 #: Global DOF count above which the implicit solver switches to CG + GAMG.
 ITERATIVE_DOF_THRESHOLD = 500_000
-#: Default sensor sampling rate in multiples of the mesh-sizing frequency
+#: Default sensor sampling rate in multiples of the analysis maximum frequency
 #: (``sensors.sample_rate: null``). Sensor histories are decimated to this rate
 #: instead of being stored at every (much finer) solver step.
 AUTO_SAMPLES_PER_MESH_PERIOD = 20
@@ -101,8 +108,14 @@ def mpi_fail_fast(function: Callable[..., Any]) -> Callable[..., Any]:
     def wrapped(*args: Any, **kwargs: Any) -> Any:
         try:
             return function(*args, **kwargs)
-        except Exception:
-            if nprocs > 1:
+        except BaseException as exc:
+            # argparse --help/--version exit successfully on every rank. Other
+            # SystemExit paths can be rank-local (e.g. an unreadable config),
+            # and must abort peers just like ordinary errors and interrupts.
+            successful_exit = isinstance(exc, SystemExit) and (
+                exc.code is None or (isinstance(exc.code, int) and exc.code == 0)
+            )
+            if nprocs > 1 and not successful_exit:
                 import traceback
 
                 traceback.print_exc()
@@ -189,7 +202,7 @@ def _create_layered_mesh(summary: dict[str, Any], layout: MeshLayout) -> tuple[A
     y_frac = np.clip((domain.geometry.x[:, 1] - y_min) / summary["H_domain"], 0.0, 1.0)
     domain.geometry.x[:, 1] = np.interp(y_frac, frac_grid, interfaces)
 
-    tol = min(thicknesses) * 1e-4
+    tol = min(layout.h_y_per_region) * 1e-4
     n_local = domain.topology.index_map(tdim).size_local
     indices, values = [], []
     for tag, reg in enumerate(regions, start=1):
@@ -234,11 +247,14 @@ def build_problem(cfg: dict[str, Any], summary: dict[str, Any] | None = None) ->
     fx, fy = cfg["source_fx"], cfg["source_fy"]
     norm = float(np.hypot(fx, fy))
     traction = traction_amplitude * profile * ufl.as_vector([fx / norm, fy / norm])
-    tol_geom = min(r["thickness"] for r in regions) * 1e-4
+    # Use actual vertical cell spacing, not relative coordinate magnitude.
+    tol_geom = min(layout.h_y_per_region) * 1e-4
     if has_top_hs:
         domain.topology.create_connectivity(fdim, dim)
         domain.topology.create_connectivity(dim, fdim)
-        facets = locate_entities(domain, fdim, lambda xc: np.isclose(xc[1], H_plate, atol=tol_geom))
+        facets = locate_entities(
+            domain, fdim, lambda xc: np.isclose(xc[1], H_plate, atol=tol_geom, rtol=0)
+        )
         tags = meshtags(domain, fdim, facets, np.full(len(facets), 1, dtype=np.int32))
         load_form = ufl.dot(traction, u_("+")) * ufl.Measure(
             "dS", domain=domain, subdomain_data=tags
@@ -246,7 +262,7 @@ def build_problem(cfg: dict[str, Any], summary: dict[str, Any] | None = None) ->
         load_y = H_plate
     else:
         facets = locate_entities_boundary(
-            domain, fdim, lambda xc: np.isclose(xc[1], y_max, atol=tol_geom)
+            domain, fdim, lambda xc: np.isclose(xc[1], y_max, atol=tol_geom, rtol=0)
         )
         tags = meshtags(domain, fdim, facets, np.full(len(facets), 1, dtype=np.int32))
         load_form = ufl.dot(traction, u_) * ufl.Measure("ds", domain=domain, subdomain_data=tags)(1)
@@ -366,47 +382,11 @@ def build_problem(cfg: dict[str, Any], summary: dict[str, Any] | None = None) ->
     )
 
 
-def _check_postprocess_samples(cfg: dict[str, Any], n_steps: int) -> None:
-    if cfg["run_postprocess"] and n_steps + 1 < MIN_POSTPROCESS_SAMPLES:
-        raise ValueError(
-            f"Postprocessing requires at least {MIN_POSTPROCESS_SAMPLES} time samples "
-            f"(got {n_steps + 1}); reduce dt or disable postprocessing"
-        )
-
-
-def _sensor_stride(cfg: dict[str, Any], layout: MeshLayout, dt: float, n_steps: int) -> int:
-    """Solver steps between stored sensor samples (see ``sensors.sample_rate``).
-
-    Keeps the Nyquist frequency above 1.25× the dispersion plot range and the
-    3 f0 band-pass edge, and at least :data:`MIN_POSTPROCESS_SAMPLES` samples.
-    """
-    rate = cfg.get("sensor_sample_rate") or AUTO_SAMPLES_PER_MESH_PERIOD * layout.mesh_frequency
-    f_needed = max(float(cfg["disp_f_max"]), 3.0 * float(cfg["f_center"]))
-    return sample_stride(
-        dt,
-        n_steps,
-        float(rate),
-        f_max=f_needed,
-        min_samples=MIN_POSTPROCESS_SAMPLES if cfg["run_postprocess"] else 2,
-    )
-
-
 def _sampled_time_grid(
     cfg: dict[str, Any], layout: MeshLayout, requested_dt: float
 ) -> tuple[float, int, int]:
-    """Time step, step count, and sensor stride with ``n_steps % stride == 0``.
-
-    The step count is rounded *up* to a multiple of the stride, so ``Δt`` can
-    only shrink (never past a stability or accuracy limit) and the recorded
-    samples are uniform and end exactly at ``t = duration``.
-    """
-    dt_val, n_steps = time_grid(layout.duration, requested_dt)
-    _check_postprocess_samples(cfg, n_steps)
-    stride = _sensor_stride(cfg, layout, dt_val, n_steps)
-    if n_steps % stride:
-        n_steps = -(-n_steps // stride) * stride
-        dt_val = layout.duration / n_steps
-    return dt_val, n_steps, stride
+    """Shared preflight/solver grid, including sample-stride rounding."""
+    return sampled_time_grid(cfg, layout, requested_dt)
 
 
 def _drop_zero_entries(matrix: Any) -> Any:
@@ -426,7 +406,11 @@ def _drop_zero_entries(matrix: Any) -> Any:
         csr=(new_indptr, indices[keep].astype(PETSc.IntType), values[keep]),
         comm=matrix.getComm(),
     )
-    filtered.assemble()
+    try:
+        filtered.assemble()
+    except BaseException:
+        filtered.destroy()
+        raise
     return filtered
 
 
@@ -496,7 +480,7 @@ def _fallback_bjacobi(solver: Any, ndofs_global: int) -> str:
     return f"GMRES + BJacobi (parallel, {ndofs_global} DOFs; MUMPS unavailable)"
 
 
-def solve_implicit(problem: WaveProblem) -> SolveResult:
+def solve_implicit(problem: WaveProblem, history_store: HistoryStore | None = None) -> SolveResult:
     """Unconditionally stable Newmark-β with a once-factorized effective matrix.
 
     With constant ``M``, ``C`` (sponge + Kelvin-Voigt) and ``K``, each step solves
@@ -538,8 +522,9 @@ def solve_implicit(problem: WaveProblem) -> SolveResult:
     u = fem.Function(V, name="Displacement")
     n_owned = len(problem.probes.indices)
     n_samples = n_steps // stride + 1
-    sensor_x = np.zeros((n_samples, n_owned))
-    sensor_y = np.zeros((n_samples, n_owned))
+    allocate = history_store.zeros if history_store is not None else np.zeros
+    sensor_x = allocate((n_samples, n_owned))
+    sensor_y = allocate((n_samples, n_owned))
     times = np.arange(n_samples) * (stride * dt_val)
     save_every = max(n_steps // int(cfg["target_snapshots"]), 1)
     report_every = max(n_steps // 20, 1)
@@ -547,17 +532,18 @@ def solve_implicit(problem: WaveProblem) -> SolveResult:
 
     with contextlib.ExitStack() as stack:
 
-        def assembled(form: Any) -> Any:
+        def assembled(form: Any, owner: Any = stack) -> Any:
             matrix = fem.petsc.assemble_matrix(fem.form(form), bcs=[])
+            owner.callback(matrix.destroy)
             matrix.assemble()
-            stack.callback(matrix.destroy)
             return matrix
 
         t_setup = pytime.perf_counter()
         A = assembled(effective_form)
         M = assembled(mass_form)
-        C = _drop_zero_entries(assembled(damping_form))
-        stack.callback(C.destroy)
+        with contextlib.ExitStack() as temporary:
+            C = _drop_zero_entries(assembled(damping_form, temporary))
+            stack.callback(C.destroy)
 
         def work_vector() -> Any:
             vec = A.createVecRight()
@@ -672,7 +658,11 @@ def solve_implicit(problem: WaveProblem) -> SolveResult:
 # ---------------------------------------------------------------------------
 # Explicit lumped-mass RK4
 # ---------------------------------------------------------------------------
-def solve_explicit(problem: WaveProblem, device: DeviceInfo | None = None) -> SolveResult:
+def solve_explicit(
+    problem: WaveProblem,
+    device: DeviceInfo | None = None,
+    history_store: HistoryStore | None = None,
+) -> SolveResult:
     """Explicit RK4 with row-sum lumped mass and a rigorous Gershgorin step limit.
 
     The limit ``Δt ≤ R / max(√B_K, B_C)`` with ``R = RK4_STABILITY_RADIUS``
@@ -739,7 +729,8 @@ def solve_explicit(problem: WaveProblem, device: DeviceInfo | None = None) -> So
             log(f"  Frequency upper bound = {omega_max:.2e} rad/s")
             log(f"  Damping spectral bound = {damping_bound:.2e} 1/s")
             log(f"  RK4 stability limit   = {fmt_time(dt_crit)}")
-            log(f"  Δt (CFL={cfg['CFL']}) = {fmt_time(dt_val)}")
+            step_control = f"user dt={fmt_time(cfg['dt'])}" if cfg["dt"] else f"CFL={cfg['CFL']}"
+            log(f"  Δt ({step_control}) = {fmt_time(dt_val)}")
             log(f"  Number of steps: {n_steps}")
             log(f"  Total time T   = {fmt_time(problem.layout.duration)}")
             log(f"  Sensor sampling: every {stride} step(s) ({fmt_time(stride * dt_val)})")
@@ -769,6 +760,19 @@ def solve_explicit(problem: WaveProblem, device: DeviceInfo | None = None) -> So
                 V, problem.probes.points, problem.probes.cells, n_owned_dofs
             )
             backend = make_backend(device, cfg["precision"], log if rank == 0 else None)
+            disk_history = history_store is not None and history_store.mode == "disk"
+            if disk_history:
+                shape = (n_steps // stride + 1, len(problem.probes.indices))
+                sensor_x = history_store.zeros(shape, dtype=backend.dtype)
+                sensor_y = history_store.zeros(shape, dtype=backend.dtype)
+            recorded = 0
+
+            def record_history(_times: np.ndarray, values: np.ndarray) -> None:
+                nonlocal recorded
+                last = recorded + len(values)
+                sensor_x[recorded:last] = values[:, 0::2]
+                sensor_y[recorded:last] = values[:, 1::2]
+                recorded = last
 
             def snapshot(_step: int, t_snap: float, u_host: np.ndarray) -> None:
                 u.x.array[:n_owned_dofs] = u_host
@@ -795,12 +799,15 @@ def solve_explicit(problem: WaveProblem, device: DeviceInfo | None = None) -> So
                 snapshot_callback=snapshot if vtx is not None else None,
                 report_interval=report_every,
                 log_func=log if rank == 0 else None,
+                history_chunk_bytes=HISTORY_CHUNK_BYTES,
+                history_callback=record_history if disk_history else None,
+                retain_history=not disk_history,
             )
             runtime.update(engine=backend.name, device=device.device, precision=backend.dtype.name)
             return SolveResult(
                 times=result.times,
-                sensor_data_x=result.sensor_data_x,
-                sensor_data_y=result.sensor_data_y,
+                sensor_data_x=sensor_x if disk_history else result.sensor_data_x,
+                sensor_data_y=sensor_y if disk_history else result.sensor_data_y,
                 dt=dt_val,
                 n_steps=n_steps,
                 setup_seconds=setup_seconds,
@@ -814,8 +821,9 @@ def solve_explicit(problem: WaveProblem, device: DeviceInfo | None = None) -> So
         u_arr = u.x.array
         n_owned = len(problem.probes.indices)
         n_samples = n_steps // stride + 1
-        sensor_x = np.zeros((n_samples, n_owned))
-        sensor_y = np.zeros((n_samples, n_owned))
+        allocate = history_store.zeros if history_store is not None else np.zeros
+        sensor_x = allocate((n_samples, n_owned))
+        sensor_y = allocate((n_samples, n_owned))
         times = np.arange(n_samples) * (stride * dt_val)
         if rank == 0:
             log(
@@ -860,6 +868,39 @@ def solve_explicit(problem: WaveProblem, device: DeviceInfo | None = None) -> So
 # ---------------------------------------------------------------------------
 # Outputs
 # ---------------------------------------------------------------------------
+def _publish_results(cfg: dict[str, Any], archive: dict[str, Any], out_dir: str) -> str:
+    """Commit a complete archive; its embedded configuration is authoritative.
+
+    Both files are fully written before publishing. NPZ replacement is the
+    commit point. The YAML sidecar is a convenience copy: an interrupted update
+    cannot invalidate the configuration embedded in the committed archive.
+    """
+    saved_npz = os.path.join(out_dir, "sensor_data.npz")
+    saved_cfg = os.path.join(out_dir, "simulation_config.yaml")
+    with tempfile.TemporaryDirectory(prefix=".gwfem-output-", dir=out_dir) as staging:
+        staged_cfg = os.path.join(staging, "simulation_config.yaml")
+        staged_npz = os.path.join(staging, "sensor_data.npz")
+        dump_config(cfg, staged_cfg)
+        with open(staged_cfg, encoding="utf-8") as stream:
+            config_text = stream.read()
+        complete = {**archive, "simulation_config_yaml": config_text}
+        with atomic_output(staged_npz, binary=True) as stream:
+            writer = np.savez_compressed if cfg["compress_output"] else np.savez
+            writer(stream, **complete)
+        os.replace(staged_npz, saved_npz)
+        try:
+            os.replace(staged_cfg, saved_cfg)
+        except OSError as exc:
+            warn(
+                f"Sensor archive committed, but configuration sidecar could not be updated: {exc}. "
+                "Use the archive's simulation_config_yaml for this run."
+            )
+        else:
+            log(f"  Saved simulation configuration: {saved_cfg}")
+    log(f"  Saved simulation sensor data: {saved_npz}")
+    return saved_npz
+
+
 def _material_fields(region: dict[str, Any]) -> dict[str, Any]:
     model = region["material_model"]
     if model == "isotropic":
@@ -955,8 +996,12 @@ def _runtime_record(problem: WaveProblem, result: SolveResult) -> dict[str, Any]
         "duration": result.n_steps * result.dt,
         "nx": problem.layout.nx,
         "ny_per_region": problem.layout.ny_per_region,
+        "h_x": problem.layout.h_x,
+        "h_y_per_region": problem.layout.h_y_per_region,
         "ndofs": problem.ndofs_global,
         "mpi_ranks": nprocs,
+        "history_storage": problem.cfg["history_storage"],
+        "run_id": str(uuid.uuid4()),
         "mesh_frequency": problem.layout.mesh_frequency,
         **result.runtime,
         "python": platform.python_version(),
@@ -1040,17 +1085,22 @@ def run_simulation(
     layout = problem.layout
     if rank == 0:
         if summary["has_fluid"]:
-            c_shear = max(r["c_T"] for r in summary["all_regions"] if r["is_fluid"])
-            ratio = c_shear / layout.mesh_frequency / layout.h_target
+            ratio = min(
+                region["c_T"] / layout.mesh_frequency / max(layout.h_x, hy)
+                for region, hy in zip(summary["all_regions"], layout.h_y_per_region, strict=True)
+                if region["is_fluid"]
+            )
             log(
                 "  Fluid model: regularized elasticity (small shear modulus) with continuous "
                 "tangential displacement; not a mixed acoustic formulation. Its spurious shear "
-                f"wavelength is {ratio:.1e} element sizes at the mesh frequency (unresolved; "
-                "carries negligible energy)."
+                f"wavelength-to-cell-size ratio reaches {ratio:.1e} at the analysis maximum "
+                "frequency. Validate fluid-interface results for the intended model."
             )
         log(f"  Excitation: {describe_source(cfg['source_type'], cfg.get('n_cycles'))}")
-        log(f"  Shortest wavelength λ_min = {fmt_length(layout.lambda_min)}")
-        log(f"  Target element size h     = {fmt_length(layout.h_target)}")
+        log(f"  Element size dx = {fmt_length(layout.h_x)}")
+        log(
+            f"  Element sizes dy by region = {', '.join(fmt_length(h) for h in layout.h_y_per_region)}"
+        )
         log(f"  Mesh: {layout.nx} × {layout.ny} elements, ny_per_region = {layout.ny_per_region}")
         log(f"  DOFs: {problem.ndofs_global} global")
         log(
@@ -1061,53 +1111,69 @@ def run_simulation(
         os.makedirs(out_dir, exist_ok=True)
     comm.Barrier()
 
-    result = solve_implicit(problem) if stype == "implicit" else solve_explicit(problem, device)
+    with HistoryStore(cfg["history_storage"], directory=out_dir) as histories:
+        result = (
+            solve_implicit(problem, histories)
+            if stype == "implicit"
+            else solve_explicit(problem, device, histories)
+        )
 
-    if comm.allreduce(
-        not (np.isfinite(result.sensor_data_x).all() and np.isfinite(result.sensor_data_y).all()),
-        op=MPI.LOR,
-    ):
-        raise FloatingPointError("Non-finite sensor data: simulation failed")
-    data_x = problem.probes.gather(result.sensor_data_x)
-    data_y = problem.probes.gather(result.sensor_data_y)
+        if comm.allreduce(
+            not (
+                all_finite_history(result.sensor_data_x)
+                and all_finite_history(result.sensor_data_y)
+            ),
+            op=MPI.LOR,
+        ):
+            raise FloatingPointError("Non-finite sensor data: simulation failed")
 
-    saved_npz = os.path.join(out_dir, "sensor_data.npz")
-    if rank == 0:
-        wall = pytime.perf_counter() - wall_t0
-        loop = max(result.loop_seconds, 1e-12)
-        log(f"\n{'═' * 58}\n  Performance Summary ({stype.upper()})\n{'═' * 58}")
-        log(f"  Total wall time:     {wall:.2f} s")
-        log(f"  ├─ Setup / factorise: {result.setup_seconds:.2f} s")
-        log(f"  ├─ Time-step loop:    {result.loop_seconds:.2f} s")
-        log(f"  └─ Per-step average:  {loop / result.n_steps * 1e3:.3f} ms/step")
-        log(f"  Throughput:           {result.n_steps / loop:.0f} steps/s\n{'═' * 58}")
-
-        cfg["sensor_y"] = float(problem.sensor_y)
-        cfg["load_y"] = float(problem.load_y)
-        cfg["runtime"] = _runtime_record(problem, result)
-        saved_cfg = os.path.join(out_dir, "simulation_config.yaml")
-        dump_config(cfg, saved_cfg)
-        log(f"  Saved simulation configuration: {saved_cfg}")
-
-        archive = {
-            "times": result.times,
-            "sensor_data_x": data_x,
-            "sensor_data_y": data_y,
-            **_archive_fields(problem),
-        }
-        (np.savez_compressed if cfg["compress_output"] else np.savez)(saved_npz, **archive)
-        log(f"  Saved simulation sensor data: {saved_npz}")
-
-        if cfg["quick_plot"] and cfg["run_postprocess"]:
-            plot_quick_overview(
-                result.times,
-                problem.sensor_x,
-                data_y,
-                cfg["f_center"],
-                cfg["source_x"],
-                os.path.join(out_dir, "quick_results.png"),
-                source_type=cfg["source_type"],
-                n_cycles=cfg.get("n_cycles"),
+        def collect(local: np.ndarray) -> np.ndarray | None:
+            out = (
+                histories.zeros((len(result.times), problem.probes.count), dtype=local.dtype)
+                if rank == 0 and histories.mode == "disk"
+                else None
             )
-    comm.Barrier()
-    return saved_npz, out_dir
+            return problem.probes.gather(local, out=out, chunk_bytes=HISTORY_CHUNK_BYTES)
+
+        data_x = collect(result.sensor_data_x)
+        data_y = collect(result.sensor_data_y)
+
+        saved_npz = os.path.join(out_dir, "sensor_data.npz")
+        if rank == 0:
+            wall = pytime.perf_counter() - wall_t0
+            loop = max(result.loop_seconds, 1e-12)
+            log(f"\n{'═' * 58}\n  Performance Summary ({stype.upper()})\n{'═' * 58}")
+            log(f"  Total wall time:     {wall:.2f} s")
+            log(f"  ├─ Setup / factorise: {result.setup_seconds:.2f} s")
+            log(f"  ├─ Time-step loop:    {result.loop_seconds:.2f} s")
+            log(f"  └─ Per-step average:  {loop / result.n_steps * 1e3:.3f} ms/step")
+            log(f"  Throughput:           {result.n_steps / loop:.0f} steps/s\n{'═' * 58}")
+
+            cfg["sensor_y"] = float(problem.sensor_y)
+            cfg["load_y"] = float(problem.load_y)
+            cfg["runtime"] = _runtime_record(problem, result)
+            archive = {
+                "times": result.times,
+                "dt": result.dt,
+                "sample_stride": result.runtime["sample_stride"],
+                "sensor_data_x": data_x,
+                "sensor_data_y": data_y,
+                "run_id": cfg["runtime"]["run_id"],
+                **_archive_fields(problem),
+            }
+            _publish_results(cfg, archive, out_dir)
+
+            if cfg["quick_plot"] and cfg["run_postprocess"]:
+                plot_quick_overview(
+                    result.times,
+                    problem.sensor_x,
+                    data_y,
+                    cfg["f_center"],
+                    cfg["source_x"],
+                    os.path.join(out_dir, "quick_results.png"),
+                    source_type=cfg["source_type"],
+                    n_cycles=cfg.get("n_cycles"),
+                    usetex=cfg["usetex"],
+                )
+        comm.Barrier()
+        return saved_npz, out_dir

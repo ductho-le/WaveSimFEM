@@ -12,13 +12,15 @@ from __future__ import annotations
 import difflib
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any
 
 import numpy as np
 
-from guidedwavefem.numerics import RK4_STABILITY_RADIUS, time_grid, validate_tensor
-from guidedwavefem.reporting import format_banner_box, log
+from guidedwavefem.numerics import RK4_STABILITY_RADIUS, sample_stride, time_grid, validate_tensor
+from guidedwavefem.reporting import format_banner_box, log, warn
 from guidedwavefem.sources import describe_source, source_duration
+from guidedwavefem.storage import HISTORY_CHUNK_BYTES
 from guidedwavefem.units import fmt_frequency, fmt_length, fmt_time
 
 STRUCTURE_MODES = (
@@ -43,7 +45,6 @@ REGION_KEYS = frozenset(
         "C",
         "Cv",
         "fluid_shear_reg",
-        "min_elems_y",
         "absorb_depth",
         *_FLUID_SPEED_KEYS,
         *_FLUID_BULK_KEYS,
@@ -62,7 +63,7 @@ _CONSTITUTIVE_FIELDS = frozenset().union(*_MODEL_FIELDS.values())
 
 DEFAULT_FLUID_SHEAR_REG = 1e-8
 
-#: Default number of implicit (Newmark) steps per period at the mesh-sizing
+#: Default number of implicit (Newmark) steps per period at the analysis-band
 #: frequency. Trapezoidal Newmark (beta = 1/4, gamma = 1/2) is unconditionally
 #: stable; its relative period error is about (omega dt)^2 / 12, i.e. 0.2 % at
 #: ``max_frequency`` and 0.05 % at half of it for 40 steps per period.
@@ -184,6 +185,11 @@ def _normalize_region(
     if not isinstance(item, Mapping):
         raise ValueError(f"{role} definition must be a mapping, got {type(item).__name__}")
     name = str(item.get("name", default_name))
+    if "min_elems_y" in item:
+        raise ValueError(
+            f"Region '{name}': min_elems_y is no longer supported. Specify exact "
+            "mesh.ny_per_region counts for all regions in bottom-to-top order."
+        )
     unknown = set(item) - REGION_KEYS
     if unknown:
         key = sorted(unknown)[0]
@@ -229,20 +235,21 @@ def _normalize_region(
         "y_top": y_bot + h,
         "is_halfspace": is_halfspace,
         "halfspace_type": halfspace_type,
-        "min_elems_y": None,
         "is_fluid": model == "fluid",
     }
-    if item.get("min_elems_y") is not None:
-        value = item["min_elems_y"]
-        if (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float, np.integer))
-            or (int(value) != value or value < 1)
-        ):
-            raise ValueError(f"Region '{name}' min_elems_y must be a positive integer")
-        entry["min_elems_y"] = int(value)
 
     if model == "fluid":
+        speed_keys = [k for k in _FLUID_SPEED_KEYS if k in item]
+        bulk_keys = [k for k in _FLUID_BULK_KEYS if k in item]
+        elastic_keys = [k for k in ("E", "nu") if k in item]
+        if len(speed_keys) > 1 or len(bulk_keys) > 1:
+            raise ValueError(f"Fluid '{name}': duplicate aliases {speed_keys + bulk_keys}")
+        if sum(bool(keys) for keys in (speed_keys, bulk_keys, elastic_keys)) != 1:
+            raise ValueError(
+                f"Fluid '{name}': specify exactly one of sound speed, bulk modulus, or E and nu"
+            )
+        if elastic_keys and len(elastic_keys) != 2:
+            raise ValueError(f"Fluid '{name}': E and nu must be supplied together")
         speed_key = next((k for k in _FLUID_SPEED_KEYS if item.get(k) is not None), None)
         bulk_key = next((k for k in _FLUID_BULK_KEYS if item.get(k) is not None), None)
         if speed_key is not None:
@@ -512,13 +519,147 @@ def structure_from_config(cfg: Mapping[str, Any], mode: str | None = None) -> di
 # ---------------------------------------------------------------------------
 # Mesh / time layout shared by the solver and the preflight estimator
 # ---------------------------------------------------------------------------
+@lru_cache(maxsize=256)
+def a0_wavenumber(frequency: float, thickness: float, c_L: float, c_T: float) -> float:
+    """Fundamental antisymmetric Rayleigh–Lamb root for a free isotropic plate.
+
+    Solve the real, sub-shear branch using half-thickness-scaled variables.
+    At very small/large frequency-thickness use its thin-plate/Rayleigh limit,
+    avoiding cancellation of the characteristic equation in those limits.
+    """
+    from scipy.optimize import brentq
+
+    if not all(np.isfinite(v) and v > 0 for v in (frequency, thickness, c_L, c_T)) or c_L <= c_T:
+        raise ValueError("A0 requires positive frequency/thickness and c_L > c_T > 0")
+    half = thickness / 2
+    omega = 2 * np.pi * frequency
+    s = omega * half / c_T
+    ratio = c_T / c_L
+    rayleigh = compute_rayleigh_speed(c_T, c_L=c_L)
+    if s > 30:
+        return omega / rayleigh
+    # omega = B k², B = h*c_T*sqrt((1-c_T²/c_L²)/3)
+    bending = thickness * c_T * np.sqrt((1 - ratio**2) / 3)
+    thin = np.sqrt(omega / bending)
+    if s < 1e-5:
+        return thin
+
+    def residual(x: float) -> float:
+        p = np.sqrt(x * x - (s * ratio) ** 2)
+        q = np.sqrt(x * x - s * s)
+        return np.tanh(q) / np.tanh(p) - (x * x + q * q) ** 2 / (4 * x * x * p * q)
+
+    lower = s * (1 + 1e-9)
+    upper = max(2 * thin * half, 2 * s * c_T / rayleigh)
+    return brentq(residual, lower, upper, xtol=1e-13, rtol=1e-12) / half
+
+
+def _free_isotropic_plate(summary: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    regions = summary["all_regions"]
+    if (
+        len(regions) == 1
+        and not regions[0]["is_halfspace"]
+        and regions[0]["material_model"] == "isotropic"
+    ):
+        return regions[0]
+    return None
+
+
+def sizing_wavelength(
+    cfg: Mapping[str, Any], summary: Mapping[str, Any], frequency: float
+) -> float:
+    """Shortest sizing wavelength, including A0 for a free isotropic plate.
+
+    ``min_wavelength`` is a user-supplied conservative bound across the entire
+    retained band, also used for sensor sampling and dispersion display.
+    """
+    wavelength = reference_wave_speed(summary) / frequency
+    plate = _free_isotropic_plate(summary)
+    if plate is not None:
+        wavelength = min(
+            wavelength,
+            2 * np.pi / a0_wavenumber(frequency, plate["thickness"], plate["c_L"], plate["c_T"]),
+        )
+    if cfg.get("min_wavelength") is not None:
+        wavelength = min(wavelength, float(cfg["min_wavelength"]))
+    return wavelength
+
+
+def sizing_group_velocity(cfg: Mapping[str, Any], summary: Mapping[str, Any]) -> float:
+    """A0/reference packet-speed estimate over the arrival-sizing band.
+
+    This is not an all-mode lower bound: higher Lamb modes can have arbitrarily
+    small group velocities near their cutoffs. ``min_group_velocity`` supplies
+    an independent lower bound for the particular modes/frequencies of interest.
+    """
+    speed = reference_wave_speed(summary)
+    plate = _free_isotropic_plate(summary)
+    if plate is not None:
+        low = float(cfg.get("min_frequency") or float(cfg["f_center"]) / 5)
+        high = float(cfg.get("max_frequency") or 3 * float(cfg["f_center"]))
+        for frequency in np.geomspace(low, high, 32):
+            delta = frequency * 1e-3
+            args = (plate["thickness"], plate["c_L"], plate["c_T"])
+            derivative = (
+                a0_wavenumber(frequency + delta, *args) - a0_wavenumber(frequency - delta, *args)
+            ) / (2 * delta)
+            speed = min(speed, 2 * np.pi / derivative)
+    if cfg.get("min_group_velocity") is not None:
+        speed = min(speed, float(cfg["min_group_velocity"]))
+    return speed
+
+
+def duration_sizing_notes(
+    cfg: Mapping[str, Any], summary: Mapping[str, Any]
+) -> tuple[str, list[str]]:
+    """Describe the arrival-window contract and identify unsupported guarantees.
+
+    A finite recording window cannot capture every packet at a mode cutoff.
+    User-provided duration or group velocity expresses the selected recording
+    target; an automatic A0 window is only an estimate for that branch.
+    """
+    if cfg.get("duration") is not None:
+        return "user-specified duration", []
+    if cfg.get("min_group_velocity") is not None:
+        return "user-supplied group-velocity bound with A0/reference estimate", []
+    plate = _free_isotropic_plate(summary)
+    if plate is not None:
+        # First nonzero thickness resonance: a shear half-wave across the full
+        # plate thickness (the A1 cutoff); c_L > c_T for a stable isotropic solid.
+        cutoff = plate["c_T"] / (2 * plate["thickness"])
+        high = float(cfg.get("max_frequency") or 3 * float(cfg["f_center"]))
+        warnings = []
+        if high >= cutoff:
+            warnings.append(
+                "Automatic duration estimates A0 arrivals only. The arrival-sizing band "
+                f"extends to {fmt_frequency(high)}, reaching higher Lamb modes "
+                f"(first cutoff {fmt_frequency(cutoff)}). Their group velocities can "
+                "approach zero near cutoffs, so this window may truncate their arrivals. "
+                "Set solver.duration or solver.min_group_velocity from the modes and "
+                "frequencies you intend to retain; no finite window covers every cutoff."
+            )
+        return "A0/reference estimate over the arrival-sizing band", warnings
+    if summary["structure_mode"] != "halfspace":
+        return "bulk/reference estimate", [
+            "Automatic duration uses a bulk/reference speed and does not bound guided-mode "
+            "arrivals for this structure. Set solver.duration or solver.min_group_velocity "
+            "from an independent dispersion calculation for the modes and frequencies "
+            "you intend to retain."
+        ]
+    return "halfspace reference-speed estimate", []
+
+
 @dataclass(frozen=True)
 class MeshLayout:
-    """Structured-mesh sizing derived from a configuration and structure."""
+    """Exact configured mesh counts and their resulting physical cell dimensions.
+
+    ``mesh_frequency`` is the analysis/time-sampling band retained for API
+    compatibility; it never determines the mesh counts.
+    """
 
     mesh_frequency: float
-    lambda_min: float
-    h_target: float
+    h_x: float
+    h_y_per_region: list[float]
     plate_length: float
     nx: int
     ny_per_region: list[int]
@@ -530,39 +671,64 @@ class MeshLayout:
         return sum(self.ny_per_region)
 
 
-def compute_mesh_layout(cfg: Mapping[str, Any], summary: Mapping[str, Any]) -> MeshLayout:
-    """Mesh resolution from the shortest physical wavelength at ``max_frequency``.
+def mesh_resolution(cfg: Mapping[str, Any], summary: Mapping[str, Any]) -> tuple[int, list[int]]:
+    """Validate explicit element counts without selecting or refining a mesh."""
 
-    ``elems_per_wavelength`` counts *elements*, independent of polynomial degree
-    (a Q2 element carries two node spacings).
-    """
+    def count(value: Any, name: str) -> int:
+        if (
+            isinstance(value, (bool, np.bool_))
+            or not isinstance(value, (int, float, np.integer, np.floating))
+            or not np.isfinite(value)
+            or value < 1
+            or int(value) != value
+        ):
+            raise ValueError(f"'{name}' must be a positive integer, got {value!r}")
+        return int(value)
+
+    if cfg.get("nx") is None or cfg.get("ny_per_region") is None:
+        raise ValueError(
+            "Specify mesh.nx and mesh.ny_per_region explicitly; automatic mesh sizing "
+            "is no longer supported."
+        )
+    nx = count(cfg["nx"], "mesh.nx")
+    values = cfg["ny_per_region"]
+    if not isinstance(values, list):
+        raise ValueError("'mesh.ny_per_region' must be a list of positive integers")
+    regions = summary["all_regions"]
+    if len(values) != len(regions):
+        names = ", ".join(region["name"] for region in regions)
+        raise ValueError(
+            f"'mesh.ny_per_region' must have {len(regions)} entries in bottom-to-top "
+            f"order ({names}); got {len(values)}"
+        )
+    return nx, [count(value, f"mesh.ny_per_region[{i}]") for i, value in enumerate(values)]
+
+
+def compute_mesh_layout(cfg: Mapping[str, Any], summary: Mapping[str, Any]) -> MeshLayout:
+    """Use the exact user-supplied mesh, preserving every material interface."""
     f_center = float(cfg["f_center"])
     mesh_frequency = float(cfg.get("max_frequency") or 3.0 * f_center)
-    lambda_min = summary["c_wave_min"] / mesh_frequency
-    h_target = lambda_min / int(cfg["elems_per_wavelength"])
     plate_length = 2.0 * float(cfg["absorb_length"]) + float(cfg["sensing_length"])
-    nx = max(int(np.ceil(plate_length / h_target)), int(cfg["min_elems_x"]))
+    nx, ny_per_region = mesh_resolution(cfg, summary)
     regions = summary["all_regions"]
-    ny_per_region = [
-        max(
-            int(np.ceil(r["thickness"] / h_target)), r.get("min_elems_y") or int(cfg["min_elems_y"])
+    h_x = plate_length / nx
+    h_y_per_region = [r["thickness"] / n for r, n in zip(regions, ny_per_region, strict=True)]
+    h_min = min(h_x, *h_y_per_region)
+    if cfg.get("duration") is not None:
+        duration = float(cfg["duration"])
+    else:
+        speed_for_T = sizing_group_velocity(cfg, summary)
+        first = float(cfg.get("sensor_offset") or 0)
+        last = first + (int(cfg.get("n_sensors") or 1) - 1) * float(cfg.get("sensor_pitch") or 0)
+        travel_distance = max(float(cfg["sensing_length"]), abs(first), abs(last))
+        pulse = source_duration(
+            str(cfg.get("source_type") or "ricker"), f_center, cfg.get("n_cycles")
         )
-        for r in regions
-    ]
-    h_min = min(
-        plate_length / nx,
-        min(r["thickness"] / n for r, n in zip(regions, ny_per_region, strict=True)),
-    )
-    speed_for_T = reference_wave_speed(summary)
-    pulse = source_duration(str(cfg.get("source_type") or "ricker"), f_center, cfg.get("n_cycles"))
-    duration = float(
-        cfg.get("duration")
-        or float(cfg["sensing_length"]) / speed_for_T * float(cfg["time_factor"]) + pulse
-    )
+        duration = travel_distance / speed_for_T * float(cfg["time_factor"]) + pulse
     return MeshLayout(
         mesh_frequency=mesh_frequency,
-        lambda_min=lambda_min,
-        h_target=h_target,
+        h_x=h_x,
+        h_y_per_region=h_y_per_region,
         plate_length=plate_length,
         nx=nx,
         ny_per_region=ny_per_region,
@@ -572,15 +738,16 @@ def compute_mesh_layout(cfg: Mapping[str, Any], summary: Mapping[str, Any]) -> M
 
 
 def reference_wave_speed(summary: Mapping[str, Any]) -> float:
-    """Slowest relevant wave speed: ``c_R`` for a halfspace, else the slowest physical speed.
+    """Bulk reference speed, using ``c_R`` for a halfspace when available.
 
-    Sets the default duration and the scale of the automatic source/sensor layout.
+    Sizing helpers tighten this reference with A0 dispersion and user-supplied
+    conservative bounds; the reference alone does not bound all guided modes.
     """
     return float(summary.get("c_R") or summary["c_wave_min"])
 
 
 def implicit_time_step(mesh_frequency: float, steps_per_period: float) -> float:
-    """Accuracy-driven Newmark step ``1 / (steps_per_period · f_mesh)`` (shared with preflight).
+    """Accuracy-driven Newmark step ``1 / (steps_per_period · max_frequency)``.
 
     Trapezoidal Newmark is unconditionally stable, so the step is set by temporal
     accuracy at the highest resolved frequency only. It is deliberately independent
@@ -689,51 +856,142 @@ def explicit_time_step_estimate(
     bounds), so the preflight step count is an upper estimate.
     """
     bound_k, bound_c = element_operator_bounds(cfg, summary, layout)
-    return float(cfg.get("CFL", 0.5)) * RK4_STABILITY_RADIUS / max(np.sqrt(bound_k), bound_c)
+    return float(cfg["CFL"]) * RK4_STABILITY_RADIUS / max(np.sqrt(bound_k), bound_c)
+
+
+def sampled_time_grid(
+    cfg: Mapping[str, Any], layout: MeshLayout, requested_dt: float
+) -> tuple[float, int, int]:
+    """Shared solver/preflight grid with uniform samples ending at the duration.
+
+    Round the step count up to a multiple of the recording stride. This can only
+    reduce the requested maximum step, preserving its stability/accuracy limit.
+    """
+    dt, n_steps = time_grid(layout.duration, requested_dt)
+    min_samples = 32 if cfg.get("run_postprocess", True) else 2
+    if cfg.get("run_postprocess", True) and n_steps + 1 < min_samples:
+        raise ValueError(
+            f"Postprocessing requires at least {min_samples} time samples "
+            f"(got {n_steps + 1}); reduce dt or disable postprocessing"
+        )
+    stride = sample_stride(
+        dt,
+        n_steps,
+        float(cfg.get("sensor_sample_rate") or 20 * layout.mesh_frequency),
+        f_max=max(float(cfg.get("disp_f_max") or 2 * cfg["f_center"]), 3 * cfg["f_center"]),
+        min_samples=min_samples,
+    )
+    if n_steps % stride:
+        n_steps = -(-n_steps // stride) * stride
+        dt = layout.duration / n_steps
+    return dt, n_steps, stride
 
 
 def preflight_estimate(cfg: dict[str, Any], rank: int = 0) -> dict[str, Any]:
-    """Lightweight estimates for mesh sizing, DOFs, time steps, and memory."""
+    """Report the configured mesh and estimate time steps, DOFs, and memory."""
     summary = structure_from_config(cfg)
     layout = compute_mesh_layout(cfg, summary)
     degree = int(cfg.get("degree", 2))
     dim = 2
     ndofs_est = dim * (degree * layout.nx + 1) * (degree * layout.ny + 1)
 
-    cfl = float(cfg.get("CFL", 0.5))
     stype = str(cfg.get("solver_type", "explicit")).lower()
-    if cfg.get("dt"):
-        dt_est, dt_note = float(cfg["dt"]), "user-requested maximum"
-    elif stype == "implicit":
+    requested_dt = float(cfg["dt"]) if cfg.get("dt") is not None else None
+    duration_basis, warnings = duration_sizing_notes(cfg, summary)
+    element_dt_limit = None
+    dt_status = "not_applicable"
+    if stype == "implicit":
         steps_per_period = float(cfg.get("steps_per_period") or DEFAULT_STEPS_PER_PERIOD)
-        dt_est = implicit_time_step(layout.mesh_frequency, steps_per_period)
-        dt_note = f"accuracy, {steps_per_period:g} steps/period"
+        if requested_dt is not None:
+            dt_est, dt_note = requested_dt, "user-requested maximum"
+        else:
+            dt_est = implicit_time_step(layout.mesh_frequency, steps_per_period)
+            dt_note = f"accuracy, {steps_per_period:g} steps/period"
     else:
-        dt_est = explicit_time_step_estimate(cfg, summary, layout)
-        dt_note = f"element bound, CFL={cfl}"
-    dt_val, nsteps_est = time_grid(layout.duration, dt_est)
+        cfl = float(cfg["CFL"])
+        conservative_dt = explicit_time_step_estimate(cfg, summary, layout)
+        element_dt_limit = conservative_dt / cfl
+        dt_status = "certified_by_element_bound"
+        if requested_dt is not None and requested_dt > element_dt_limit * (1 + 1e-12):
+            dt_status = "requires_assembled_check"
+            dt_est = conservative_dt
+            dt_note = f"conservative resource estimate, element bound, CFL={cfl}"
+            warnings.append(
+                f"Requested explicit dt={fmt_time(requested_dt)} exceeds the conservative "
+                f"element stability certificate ({fmt_time(element_dt_limit)}). Preflight "
+                "cannot certify this request; the assembled-operator check may reject it. "
+                f"Resource estimates use {fmt_time(conservative_dt)} before grid rounding. "
+                "Exceeding the conservative certificate alone does not prove instability."
+            )
+        elif requested_dt is not None:
+            dt_est, dt_note = requested_dt, "user maximum, certified by element bound"
+        else:
+            dt_est, dt_note = conservative_dt, f"element bound, CFL={cfl}"
+    dt_val, nsteps_est, stride = sampled_time_grid(cfg, layout, dt_est)
 
     vec_mem_mb = ndofs_est * 8 / 1024**2
     nnz_per_row = ((2 * degree + 1) ** 2) * dim
     mat_mem_mb = ndofs_est * nnz_per_row * (8 + 4) / 1024**2
     n_mats = 1 if stype == "implicit" else 2
     total_mem_est_mb = vec_mem_mb * 10 + mat_mem_mb * (n_mats + 1)
+    n_samples = nsteps_est // stride + 1
+    # Float64 is conservative for single precision and matches PETSc histories.
+    history_size_mb = 2 * int(cfg["n_sensors"]) * n_samples * 8 / 1024**2
+    timestamp_mem_mb = n_samples * 8 / 1024**2
+    history_storage = str(cfg.get("history_storage", "memory"))
+    history_disk_mb = 0.0
+    if history_storage == "disk":
+        history_mem_mb = 0.0  # measurement payload is mapped; OS page cache is separate
+        history_disk_mb = 2 * history_size_mb  # rank-local and root gathered scratch histories
+        chunk_mb = min(
+            history_size_mb, max(HISTORY_CHUNK_BYTES, 2 * int(cfg["n_sensors"]) * 8) / 1024**2
+        )
+        transfer_mem_mb = 2 * chunk_mb  # device ring and temporary host copy
+        collection_mem_mb = 2 * chunk_mb  # bounded send and receive buffers
+    else:
+        history_mem_mb = history_size_mb
+        transfer_mem_mb = min(history_mem_mb, 64.0)
+        collection_mem_mb = 2 * history_mem_mb  # component splitting and root gathering
+    solver_overhead_mb = 2 * mat_mem_mb  # workspace; LU/GAMG fill is problem-dependent
+    total_mem_est_mb += (
+        history_mem_mb
+        + transfer_mem_mb
+        + collection_mem_mb
+        + solver_overhead_mb
+        + 2 * timestamp_mem_mb
+    )
 
     estimates = {
         "mesh_frequency": layout.mesh_frequency,
-        "lambda_min": layout.lambda_min,
-        "h_target": layout.h_target,
+        "h_x": layout.h_x,
+        "h_y_per_region": layout.h_y_per_region,
         "h_min": layout.h_min,
         "nx": layout.nx,
         "ny_per_region": layout.ny_per_region,
         "total_elements": layout.nx * layout.ny,
         "ndofs_est": ndofs_est,
         "duration": layout.duration,
+        "duration_basis": duration_basis,
+        "warnings": warnings,
+        "dt_requested": requested_dt,
+        "dt_element_limit": element_dt_limit,
+        "dt_stability_status": dt_status,
         "dt_est": dt_val,
         "nsteps_est": nsteps_est,
+        "sample_stride_est": stride,
         "vec_mem_mb": vec_mem_mb,
         "mat_mem_mb": mat_mem_mb,
         "total_mem_est_mb": total_mem_est_mb,
+        "n_samples_est": n_samples,
+        "history_mem_mb": history_mem_mb,
+        "history_size_mb": history_size_mb,
+        "history_storage": history_storage,
+        "history_disk_mb": history_disk_mb,
+        "archive_payload_mb": history_size_mb + timestamp_mem_mb,
+        "timestamp_mem_mb": timestamp_mem_mb,
+        "transfer_mem_mb": transfer_mem_mb,
+        "collection_mem_mb": collection_mem_mb,
+        "solver_overhead_mb": solver_overhead_mb,
     }
 
     if rank == 0:
@@ -747,20 +1005,35 @@ def preflight_estimate(cfg: dict[str, Any], rank: int = 0) -> dict[str, Any]:
             f"PREFLIGHT NUMERICAL ESTIMATE ({stype.upper()})",
             f"Excitation:            {describe_source(source_type, cfg.get('n_cycles'))}, "
             f"f₀ = {fmt_frequency(float(cfg['f_center']))}",
-            f"Mesh frequency:        {fmt_frequency(layout.mesh_frequency)} "
-            f"(λ_min = {fmt_length(layout.lambda_min)})",
-            f"Target element size h: {fmt_length(layout.h_target)} "
-            f"(actual min h = {fmt_length(layout.h_min)})",
+            f"Analysis max frequency: {fmt_frequency(layout.mesh_frequency)}",
+            f"Element sizes:         dx = {fmt_length(layout.h_x)}, "
+            f"dy by region = {', '.join(fmt_length(h) for h in layout.h_y_per_region)}",
             f"Grid resolution:       {layout.nx} × {layout.ny} Q{degree} elements "
-            f"({layout.nx * layout.ny:,} total)",
+            f"({layout.nx * layout.ny:,} total; user-supplied)",
             f"Estimated global DOFs: {ndofs_est:,}",
             f"Simulation duration:   {fmt_time(layout.duration)}",
+            f"Duration basis:        {duration_basis}",
             f"Time step:             ~{fmt_time(dt_val)} ({dt_note})",
             f"Estimated step count:  ~{nsteps_est:,} steps",
             f"Estimated memory RAM:  ~{mem_str} (single state vector: {vec_mem_mb:.1f} MB)",
+            f"Recorded histories:   ~{history_size_mb:.1f} MB ({n_samples:,} samples, {history_storage})",
+            "RAM includes history buffers, timestamps and workspace; factorization fill may exceed it.",
         ]
+        if history_storage == "disk":
+            lines.extend(
+                [
+                    f"History scratch disk: ~{history_disk_mb:.1f} MB, plus the output archive.",
+                    "Disk histories bound measurement buffers; OS page cache and FFT RAM are excluded.",
+                ]
+            )
         if stype == "explicit":
             lines.append("Explicit Δt is finalized from the assembled operator bound.")
+        if _free_isotropic_plate(summary) is None and summary["structure_mode"] != "halfspace":
+            lines.append(
+                "Validate mesh convergence and arrival coverage for the guided modes of interest."
+            )
         lines.insert(1, "─" * max(len(line) for line in lines))
         log(format_banner_box(lines, min_width=64))
+        for message in warnings:
+            warn(message)
     return estimates

@@ -1,42 +1,42 @@
-# ==============================================================================
-# Example 04 - structure.mode: "plate_on_halfspace"
 # Soft soil layer over bedrock: seismic surface waves (MASW site characterisation)
-# ==============================================================================
-# Physics
-#   A 10 m soft soil layer (Vs = 200 m/s, Vp = 400 m/s) rests on a stiff bedrock
-#   halfspace (Vs = 1200 m/s, Vp = 2400 m/s). A vertical surface impact
-#   (sledgehammer / weight drop) generates dispersive Rayleigh waves: at low
-#   frequency the wavelength reaches into the bedrock and the phase velocity
-#   tends to the bedrock Rayleigh speed (~1.1 km/s); at high frequency it tends
-#   to the soil Rayleigh speed (~187 m/s). Higher Rayleigh modes appear above
-#   the layer resonance Vs / (4 h) = 5 Hz.
-#   Inverting this dispersion picture for the Vs profile is the basis of MASW,
-#   used for seismic site classification (Vs30) and geotechnical design.
+# A vertical impact generates dispersive Rayleigh waves, approaching bedrock
+# speed (~1.1 km/s) at low frequency and soil speed (~187 m/s) at high frequency.
+# Bedrock P-waves (wavelength ≈ 160 m at f0) exceed the bottom sponge depth,
+# so late bedrock arrivals are only partially absorbed.
 #
-# Scale awareness
-#   The same solver runs at seismic scale: figures and logs switch to s, m, Hz
-#   and rad/m automatically, and the sponge damping defaults scale with f_center.
-#
-# Truncation of the halfspace
-#   The bedrock is truncated at 75 m below the interface with a 50 m sponge.
-#   The impedance contrast (≈ 8) traps most energy in the soil layer; body waves
-#   leaking into the bedrock are long (λ_P ≈ 160 m at f0) and only partially
-#   absorbed, so treat late bedrock arrivals qualitatively.
+# Application
+#   Multichannel analysis of surface waves (MASW) for layered-site characterisation.
+# Model and numerical scope
+#   Linear elastic 2D plane strain with a perfectly bonded horizontal interface.
+#   Intrinsic attenuation, topography, and nonlinear soil response are excluded.
+#   The 5-30 Hz analysis band uses 1 m horizontal Q2 spacing. Bedrock rows are
+#   coarser because its shear speed is six times the soil speed. Establish mesh,
+#   time-step, and depth convergence before interpreting the low-frequency branch.
+# Usage
+#   sh tools/run_cpu4.sh -c configs/04_plate_on_halfspace_soil_bedrock.yaml
+#   Add --dry-run to inspect resource estimates. Run from the repository root.
+#   The launcher uses four MPI ranks with one library thread per rank.
+# Conventions
+#   Numeric inputs use SI units; null selects automatic sizing. Mesh region counts
+#   run bottom-to-top. See template.yaml and README.md for parameter guidance.
 #
 # References
 #   - C. B. Park, R. D. Miller, J. Xia (1999), "Multichannel analysis of surface
 #     waves", Geophysics 64, 800-808.
 #   - S. Foti et al. (2018), "Guidelines for the good practice of surface wave
 #     analysis", Bull. Earthquake Eng. 16, 2367-2420.
-# ==============================================================================
 
 solver:
   type: "explicit"
-  CFL: 0.5                      # Fraction (0, 1] of the rigorous RK4 stability limit
-  time_factor: 1.2              # T = 1.2 * sensing_length / slowest speed + pulse length
+  CFL: 0.8                     # Fraction of the assembled RK4 stability limit
+  device: cpu
+  precision: double
+  dt: null                     # [s] Use the assembled RK4 stability bound
+  duration: null               # Estimated travel window; check late dispersive packets
+  time_factor: 1.2             # Travel-time multiplier for automatic duration
 
 geometry:
-  sensing_length: 80.0          # [m] 80 m sensing region
+  sensing_length: 80.0          # [m]
   absorb_length: 50.0           # [m] ≈ 3.8 soil Rayleigh wavelengths at f0
 
 structure:
@@ -48,7 +48,6 @@ structure:
       rho: 1800.0               # [kg/m^3]
       E: 1.92e8                 # [Pa]  -> Vs = 200 m/s
       nu: 0.3333333             # [-]   -> Vp = 2 Vs = 400 m/s
-      min_elems_y: 8
 
   substrate:
     name: "Bedrock (weathered granite)"
@@ -58,44 +57,59 @@ structure:
     rho: 2400.0                 # [kg/m^3]
     E: 9.216e9                  # [Pa]  -> Vs = 1200 m/s
     nu: 0.3333333               # [-]   -> Vp = 2400 m/s
-    min_elems_y: 30
 
 absorbing_boundaries:
-  alpha: null                   # null = 1e7 * f0 / 1 MHz = 150 1/s at 15 Hz (does the absorbing)
-  # The bedrock is meshed at soil resolution (Vp,rock / Vs,soil = 12), so its
-  # highest mesh frequencies are very high; the scaled default beta (6.7e-5 s)
-  # would then set the explicit step. 1e-5 s keeps the step wave-speed limited.
+  alpha: null
+  # Limited stiffness damping moderates the explicit step restriction in fast
+  # bedrock, which shares the soil's fine horizontal spacing.
   beta: 1.0e-5                  # [s]
 
 excitation:
-  source_type: "ricker"         # Broadband impact
+  source_type: "ricker"
   f_center: 15.0                # [Hz]
-  traction_max: 1.0e4           # [Pa] 10 kPa over the impact plate
+  traction_max: 1.0e4           # [Pa]
   excitation_width: 3.0         # [m]
-  source_x: null                # [m] null = absorb_length + lambda_ref (<= sensing_length / 8)
-  source_fx: 0.0                # Vertical impact
+  source_x: null               # [m] Automatic source position inside the sensing region
+  source_fx: 0.0
   source_fy: 1.0
 
 mesh:
-  elems_per_wavelength: 6       # Q2 elements per soil shear wavelength at max_frequency
-  min_elems_x: 100              # (≈ 1.33 m elements; ≈ 10 per wavelength at f0)
-  min_elems_y: 4
+  nx: 180                      # Full 180 m domain, including both lateral sponges
+  ny_per_region: [30, 10]       # Bedrock dy = 2.5 m; soil dy = 1 m
   degree: 2
-  max_frequency: 25.0           # [Hz]
+  max_frequency: 30.0           # [Hz] Two times the Ricker peak; no spectral filtering
+  min_frequency: 5.0            # [Hz] Arrival-sizing lower edge
+  min_wavelength: 6.0           # [m] Near high-frequency soil Rayleigh wavelength
 
 sensors:
-  n_sensors: 201                # Dense geophone array on the free surface
-  sensor_offset: 10.0           # [m] Near offset
-  sensor_pitch: 0.30            # [m] 0.30 m pitch (60 m aperture -> Nyquist 10.5 rad/m)
+  n_sensors: 201
+  sensor_offset: 10.0           # [m]
+  sensor_pitch: 0.30            # [m]
+  sensor_y: null                # Soil free surface, y = 10 m
+  sample_rate: "300 Hz"        # 10 samples per band-edge period
 
+# Display limits do not filter the excitation or recorded histories.
 postprocess:
+  structure_analysis: true    # Structure-specific dispersion, wave references and transport panels
   run_postprocess: true
-  f_min: 0.0
-  f_max: "40 Hz"
+  # Receiver reports: inspect dispersive arrivals and exclude reflected packets.
+  wave_characterisation:
+    enabled: true
+    component: y
+    frequency_band: ["8 Hz", "25 Hz"]
+    time_window: null          # Full record; specify [start, end] in seconds to isolate a packet
+    min_relative_amplitude: 0.01 # Exclude peaks below 1% of the array maximum
+  f_min: "5 Hz"
+  f_max: "30 Hz"
   k_min: 0.0
   k_max: "1.2 rad/m"
 
+# Receiver histories and figures; full-field output is optional.
 output:
   output_dir: "results_04_plate_on_halfspace_soil_bedrock"
   write_vtx: false
-  target_snapshots: 200
+  quick_plot: true
+  compress_output: false
+  history_storage: memory
+  figure_formats: [png]
+  usetex: false                # true enables external LaTeX; default needs no TeX install

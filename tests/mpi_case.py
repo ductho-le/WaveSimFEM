@@ -9,6 +9,7 @@ from guidedwavefem import run_simulation
 run_simulation(
     cfg={
         "solver_type": sys.argv[2],
+        "history_storage": sys.argv[3] if len(sys.argv) > 3 else "memory",
         "output_dir": sys.argv[1],
         "sensing_length": 0.01,
         "absorb_length": 0.003,
@@ -19,9 +20,9 @@ run_simulation(
         "n_sensors": 4,
         "duration": 3e-6,
         "max_frequency": 5e5,
-        "min_elems_x": 10,
-        "min_elems_y": 2,
-        "elems_per_wavelength": 2,
+        "nx": 11,
+        "ny_per_region": [2, 2, 2],
+        "CFL": 0.8,
         "run_postprocess": False,
         "structure_mode": "plate_in_halfspaces",
         "single_layer": {

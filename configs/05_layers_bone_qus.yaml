@@ -1,39 +1,27 @@
-# ==============================================================================
-# Example 05 - structure.mode: "N_layers"
 # Multilayered solid-fluid plate: bone marrow / cortical bone / soft tissue
 # (Biomedical quantitative ultrasound, QUS axial transmission)
-# ==============================================================================
-# Physics
-#   Axial-transmission QUS probes cortical bone (e.g. radius or tibia) in vivo
-#   with ultrasonic transducer arrays placed on the skin. The anatomical
-#   waveguide is a stratified solid-fluid plate bounded by traction-free surfaces:
-#     - Inner layer (bottom): bone marrow (viscous/acoustic fluid) filling the
-#       medullary cavity
-#     - Intermediate layer (middle): cortical bone (anisotropic, viscoelastic
-#       solid shell)
-#     - Outer layer (top): soft tissue (skin/muscle acoustic fluid layer)
+# Dispersion and attenuation depend on cortical thickness and anisotropic loss.
+# The bone axis is x and the radial direction is y. Top and bottom surfaces
+# are traction-free; normal loading and sensing are on the skin surface.
+# Lateral sponges truncate the waveguide.
 #
-#   Guided waves (first-arriving signal FAS and flexural-like A0/leaky Lamb modes)
-#   propagate along the composite waveguide, guided by multiple internal reflections
-#   and solid-fluid boundary interactions. Their dispersion and attenuation are
-#   sensitive to cortical thickness, intracortical porosity, and soft-tissue
-#   layer thickness, providing non-invasive assessment of osteoporosis and fracture risk.
-#
-# Model
-#   - Layer 1 (Bottom, y in [0, 1] mm): Bone marrow, fluid,
-#     rho = 930 kg/m^3, c = 1480 m/s (bulk modulus K = 2.037 GPa)
-#   - Layer 2 (Middle, y in [1, 5] mm): Cortical bone, transversely isotropic,
-#     Kelvin-Voigt viscoelastic solid, rho = 1948 kg/m^3;
-#     bone axis along x (C11 = 31.7 GPa), radial along y (C22 = 20.2 GPa);
-#     Cv = [157.0, 121.0, 0.0, 109.0, 0.0, 18.0] Pa*s
-#   - Layer 3 (Top, y in [5, 6] mm): Soft tissue, fluid,
-#     rho = 1000 kg/m^3, c = 1500 m/s (bulk modulus K = 2.25 GPa)
-#
-# Boundary conditions
-#   Traction-free top (skin / air) and bottom (marrow / cavity) surfaces;
-#   normal traction excitation applied on the skin (top surface of soft tissue,
-#   y = 6.0 mm); sensors record along the skin surface (y = 6.0 mm);
-#   lateral absorbing sponge layers truncate the waveguide ends along x.
+# Application
+#   Cortical-property sensitivity in axial-transmission quantitative ultrasound.
+# Model and numerical scope
+#   Flat 2D plane-strain surrogate with anisotropic Kelvin-Voigt cortical bone.
+#   Fluid regions use small-shear displacement elements with tangential continuity.
+#   The sizing band is 0.1-1 MHz and the skin-surface receiver aperture is 60 mm.
+#   Q2 spacing gives approximately eight elements per band-edge acoustic wavelength;
+#   shorter guided modes require a dispersion-based resolution check. Establish
+#   mesh, time-step, and arrival-window convergence using the same material tensors
+#   in an independent stratified-plate dispersion solution.
+# Usage
+#   sh tools/run_cpu4.sh -c configs/05_layers_bone_qus.yaml
+#   Add --dry-run to inspect resource estimates. Run from the repository root.
+#   The launcher uses four MPI ranks with one library thread per rank.
+# Conventions
+#   Numeric inputs use SI units; C is in Pa and Cv in Pa*s. null selects automatic
+#   sizing. Layer and mesh lists run bottom-to-top. See template.yaml and README.md.
 #
 # References
 #   - Ductho Le et al. (2025), "Guided waves in anisotropic and viscoelastic
@@ -44,73 +32,93 @@
 #     J. Acoust. Soc. Am. 115, 2314-2324.
 #   - P. Moilanen (2008), "Ultrasonic guided waves in bone",
 #     IEEE Trans. Ultrason. Ferroelectr. Freq. Control 55, 1277-1286.
-# ==============================================================================
 
 solver:
   type: "explicit"
-  CFL: 0.5                      # Fraction (0, 1] of the rigorous RK4 stability limit
-  time_factor: 1.2              # T = 1.2 * sensing_length / slowest speed + pulse length
+  CFL: 0.8                     # Fraction of the assembled RK4 stability limit
+  device: cpu                  # Float64 baseline for comparing small attenuation changes
+  precision: double
+  dt: null                     # Includes both elastic and viscous stability restrictions
+  duration: null               # Bulk-speed heuristic; slow interface modes may arrive later
+  time_factor: 1.2             # Travel-time multiplier for automatic duration
 
 geometry:
-  sensing_length: 0.08          # [m] 80 mm along the bone axis
-  absorb_length: 0.03           # [m] 30 mm lateral sponges
+  sensing_length: 0.08          # [m]
+  absorb_length: 0.03           # [m]
 
 structure:
-  mode: "N_layers"              # Stratified solid-fluid plate (layers bottom -> top)
+  mode: "N_layers"
   layers:
     - name: "Bone marrow"
-      thickness: 1.0e-3         # [m] 1.0 mm marrow fluid layer
+      thickness: 1.0e-3         # [m]
       material_model: "fluid"
       rho: 930.0                # [kg/m^3]
       c: 1480.0                 # [m/s]
-      min_elems_y: 6
 
     - name: "Cortical bone"
-      thickness: 4.0e-3         # [m] 4.0 mm cortical shell
+      thickness: 4.0e-3         # [m]
       material_model: "viscoelastic"
       rho: 1948.0               # [kg/m^3]
       # Plane-strain Voigt order [C11, C12, C16, C22, C26, C66]
       C: [31.7e9, 13.4e9, 0.0, 20.2e9, 0.0, 6.38e9]   # [Pa]
       Cv: [157.0, 121.0, 0.0, 109.0, 0.0, 18.0]        # [Pa*s]
-      min_elems_y: 16
 
     - name: "Soft tissue"
-      thickness: 1.0e-3         # [m] 1.0 mm soft tissue fluid layer
+      thickness: 1.0e-3         # [m]
       material_model: "fluid"
       rho: 1000.0               # [kg/m^3]
       c: 1500.0                 # [m/s]
-      min_elems_y: 6
+
+absorbing_boundaries:
+  alpha: null                  # Frequency-scaled lateral sponge; separate from material Cv
+  beta: null
 
 excitation:
   source_type: "ricker"
-  f_center: 500.0e3             # [Hz] 500 kHz (typical axial-transmission band 0.2-1 MHz)
+  f_center: 500.0e3             # [Hz]
   traction_max: 1.0e6           # [Pa]
   excitation_width: 2.0e-3      # [m]
-  source_x: null                # [m] null = absorb_length + lambda_ref (<= sensing_length / 8)
-  source_fx: 0.0                # Normal compression from transducer on skin surface
+  source_x: null               # [m] Automatic source position inside the sensing region
+  source_fx: 0.0
   source_fy: 1.0
 
 mesh:
-  elems_per_wavelength: 8       # Per shortest wavelength in the stratified structure
-  min_elems_x: 100
-  min_elems_y: 4
+  nx: 757                      # Full 140 mm domain; dx = 0.185 mm
+  ny_per_region: [6, 22, 6]     # Bone marrow, cortical bone, soft tissue
   degree: 2
   max_frequency: 1.0e6          # [Hz]
+  min_frequency: 0.1e6          # [Hz] Arrival-sizing edge, not a high-pass filter
+  min_wavelength: null          # Supply a bound from the multilayer dispersion solution
 
 sensors:
-  n_sensors: 241                # Dense transducer array along skin surface (y = 6.0 mm)
-  sensor_offset: 0.01           # [m] 10 mm source-to-first-receiver
-  sensor_pitch: 0.25e-3         # [m] 0.25 mm pitch (60 mm aperture -> Nyquist 12.6 rad/mm)
-  sensor_y: null                # null = top surface of soft tissue (y = 6.0 mm)
+  n_sensors: 241
+  sensor_offset: 0.01           # [m]
+  sensor_pitch: 0.25e-3         # [m]
+  sensor_y: null                # Skin surface, y = 6 mm
+  sample_rate: "10 MHz"        # Requested storage rate: 10 samples per band-edge period
 
+# Display limits do not filter the excitation or recorded histories.
 postprocess:
+  structure_analysis: true    # Structure-specific dispersion, wave references and transport panels
   run_postprocess: true
+  # Receiver reports: guided and fluid-related arrivals may produce different peaks.
+  wave_characterisation:
+    enabled: true
+    component: y
+    frequency_band: ["0.3 MHz", "0.8 MHz"]
+    time_window: null          # Full record; specify [start, end] in seconds to isolate a mode
+    min_relative_amplitude: 0.01 # Exclude peaks below 1% of the array maximum
   f_min: 0.0
   f_max: "1 MHz"
   k_min: 0.0
   k_max: "4 rad/mm"
 
+# Receiver histories and figures; full-field output is optional.
 output:
   output_dir: "results_05_layers_bone_qus"
   write_vtx: false
-  target_snapshots: 200
+  quick_plot: true
+  compress_output: false
+  history_storage: memory
+  figure_formats: [png]
+  usetex: false                # true enables external LaTeX; default needs no TeX install

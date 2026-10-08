@@ -50,21 +50,65 @@ jobs:
           cache-environment: true
       - name: Install package
         run: python -m pip install --no-deps --no-build-isolation -e .
+      - name: Install LaTeX figure dependencies
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y texlive-latex-base texlive-latex-recommended texlive-latex-extra cm-super dvipng ghostscript
       - name: Serial test suite (with coverage)
         run: python -m pytest --cov --cov-report=term --cov-report=xml
       - name: Distributed tests (2 MPI ranks)
         run: mpiexec -n 2 python -m pytest -q -p no:cacheprovider tests/test_numerics.py -k "exact_point or gather"
+      - name: Test extracted source distribution
+        run: |
+          python -m build --sdist --outdir "$RUNNER_TEMP/release"
+          mkdir "$RUNNER_TEMP/release-test"
+          tar -xzf "$RUNNER_TEMP"/release/*.tar.gz -C "$RUNNER_TEMP/release-test" --strip-components=1
+          python -m pip install --no-deps --no-build-isolation --force-reinstall "$RUNNER_TEMP/release-test"
+          cd "$RUNNER_TEMP/release-test"
+          python -m pytest -q
       - name: CLI smoke test
         run: |
           guided-waves --version
           for example in configs/*.yaml; do guided-waves -c "$example" --dry-run -q; done
       - name: Example smoke runs (2 MPI ranks, shortened)
         run: |
-          mpiexec -n 2 guided-waves -c configs/03_halfspace_steel_rayleigh.yaml -q \
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          import yaml
+
+          destination = Path(os.environ["RUNNER_TEMP"])
+          for filename, nx, rows in (
+              ("03_halfspace_steel_rayleigh.yaml", 188, [25]),
+              ("02_layers_bonded_joint.yaml", 873, [6, 4, 6]),
+          ):
+              cfg = yaml.safe_load((Path("configs") / filename).read_text())
+              cfg["mesh"].update(nx=nx, ny_per_region=rows)
+              (destination / filename).write_text(yaml.safe_dump(cfg))
+          PY
+          mpiexec -n 2 guided-waves -c "$RUNNER_TEMP/03_halfspace_steel_rayleigh.yaml" -q \
             --duration 4e-6 --max-frequency 5e5 --no-postprocess --output "$RUNNER_TEMP/ex03"
-          mpiexec -n 2 guided-waves -c configs/02_layers_bonded_joint.yaml -q \
+          mpiexec -n 2 guided-waves -c "$RUNNER_TEMP/02_layers_bonded_joint.yaml" -q \
             --duration 10e-6 --max-frequency 3e5 --no-postprocess --output "$RUNNER_TEMP/ex02"
           test -s "$RUNNER_TEMP/ex03/sensor_data.npz" && test -s "$RUNNER_TEMP/ex02/sensor_data.npz"
+
+  array-backends:
+    name: SciPy and Torch CPU backend validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.11"
+      - run: python -m pip install -e . pytest
+      - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+      - name: Array backends against the exact matrix exponential
+        run: python -m pytest -q tests/test_backend_validation.py -m "not gpu"
 
   build:
     name: Build distribution

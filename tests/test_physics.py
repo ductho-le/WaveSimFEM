@@ -34,14 +34,14 @@ def test_s0_plate_velocity_low_frequency(tmp_path, solver):
     pitch, n_sensors = 2e-3, 31
     path, _ = run_simulation(
         cfg={
-            "solver": {"type": solver, "duration": 50e-6},
+            "solver": {"type": solver, "duration": 50e-6, "CFL": 0.8},
             "geometry": {"sensing_length": 0.12, "absorb_length": 0.05},
             "structure": {
                 "mode": "1_layer",
                 "single_layer": {"thickness": H, "rho": RHO, "E": E, "nu": NU},
             },
             "excitation": {"f_center": f0, "source_fx": 1.0, "source_fy": 0.0},
-            "mesh": {"elems_per_wavelength": 8, "min_elems_y": 2, "degree": 2},
+            "mesh": {"nx": 342, "ny_per_region": [2], "degree": 2},
             "sensors": {
                 "n_sensors": n_sensors,
                 "sensor_offset": 0.02,
@@ -66,14 +66,14 @@ def _rayleigh_run(tmp_path, **output):
     f0 = 500e3
     return run_simulation(
         cfg={
-            "solver": {"type": "explicit", "device": "cpu"},
+            "solver": {"type": "explicit", "device": "cpu", "CFL": 0.8},
             "geometry": {"sensing_length": 0.04, "absorb_length": 0.018},
             "structure": {
                 "mode": "halfspace",
                 "halfspace": {"thickness": 0.015, "absorb_depth": 0.009, **STEEL},
             },
             "excitation": {"f_center": f0},
-            "mesh": {"elems_per_wavelength": 6, "max_frequency": 1.5 * f0, "degree": 2},
+            "mesh": {"nx": 115, "ny_per_region": [23], "max_frequency": 1.5 * f0, "degree": 2},
             "sensors": {"n_sensors": 21, "sensor_offset": 0.012, "sensor_pitch": 1e-3},
             "postprocess": {"run_postprocess": False},
             "output": {"output_dir": str(tmp_path), **output},

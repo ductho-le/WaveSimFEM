@@ -1,100 +1,121 @@
-# ==============================================================================
-# Example 06 - structure.mode: "plate_in_halfspaces"
 # Aluminium plate immersed in water (bilateral fluid loading / immersion NDE)
-# ==============================================================================
-# Physics
-#   Guided wave propagation in an elastic plate immersed in an acoustic fluid
-#   (bilateral fluid loading), representative of ultrasonic immersion testing
-#   (UT), acoustic leak detection in submerged piping, and naval structures.
-#     - Central plate (y in [0, 1.5] mm): Aluminium plate (isotropic solid)
-#     - Bottom substrate (y in [-6, 0] mm): Water halfspace with absorbing sponge
-#     - Top superstrate (y in [1.5, 7.5] mm): Water halfspace with absorbing sponge
+# Loading and sensing are at the upper plate-water interface, y = 1.5 mm.
+# Lateral sponges absorb guided waves; top and bottom sponges absorb radiation.
+# Fluids use shear-regularised displacement elements with full displacement
+# continuity, so leaky and Scholte interface waves are approximate.
 #
-# Boundary & Acoustic Coupling
-#   - Conforming displacement-based fluid elements with shear regularisation
-#     (mu_f = 1e-8 * K_f) enforce normal kinematic continuity and fluid pressure
-#     across both solid-fluid interfaces.
-#   - 4-way absorbing sponges truncate the computational domain: lateral sponges
-#     absorb propagating guided waves along x, while top and bottom sponges absorb
-#     bulk acoustic waves radiating into the fluid halfspaces.
-#   - Excitation applied at the upper plate-fluid interface (y = H_plate = 1.5 mm)
-#     generates leaky Lamb modes radiating into both halfspaces, as well as
-#     Scholte interface waves localized at the solid-fluid interfaces.
+# Application
+#   Fluid-loading effects on plate dispersion in ultrasonic immersion inspection.
+# Model and numerical scope
+#   Linear 2D plane-strain plate between truncated water regions, with direct
+#   interface traction. The sizing band is 0.1-1 MHz. Q2 spacing gives approximately
+#   six elements per band-edge water wavelength and six rows through aluminium.
+#   Establish mesh and time-step convergence, then vary water depth and sponge
+#   thickness at fixed spacing. Low-frequency radiation and quantitative leakage
+#   require comparison with an independent fluid-loaded plate solution.
+# Usage
+#   sh tools/run_cpu4.sh -c configs/06_plate_in_halfspaces_immersed_water.yaml
+#   Add --dry-run to inspect resource estimates. Run from the repository root.
+#   The launcher uses four MPI ranks with one library thread per rank.
+# Conventions
+#   Numeric inputs use SI units; null selects automatic sizing. Mesh region counts
+#   run bottom-to-top. See template.yaml and README.md for parameter guidance.
 #
 # References
 #   - M. J. S. Lowe (1995), "Matrix techniques for modeling ultrasonic waves in
 #     multilayers", IEEE Trans. Ultrason. Ferroelectr. Freq. Control 42, 525-542.
 #   - I. A. Viktorov (1967), "Rayleigh and Lamb Waves: Physical Theory and Applications",
 #     Plenum Press, New York.
-# ==============================================================================
 
 solver:
   type: "explicit"
-  CFL: 0.5                      # Fraction (0, 1] of the rigorous RK4 stability limit
-  time_factor: 1.2              # T = 1.2 * sensing_length / slowest speed + pulse length
+  CFL: 0.8                     # Fraction of the assembled RK4 stability limit
+  device: cpu
+  precision: double
+  dt: null                     # [s] Use the assembled RK4 stability bound
+  duration: null               # Estimated window; verify slower interface-wave arrivals
+  time_factor: 1.2             # Travel-time multiplier for automatic duration
 
 geometry:
-  sensing_length: 0.08          # [m] 80 mm sensing region along upper plate-water interface
-  absorb_length: 0.03           # [m] 30 mm lateral sponge width
+  sensing_length: 0.08          # [m]
+  absorb_length: 0.03           # [m]
 
 structure:
   mode: "plate_in_halfspaces"
   layers:
     - name: "Aluminium plate"
-      thickness: 1.5e-3         # [m] 1.5 mm plate thickness
+      thickness: 1.5e-3         # [m]
       material_model: "isotropic"
       rho: 2700.0               # [kg/m^3]
-      E: 70.0e9                 # [Pa] Young's modulus
-      nu: 0.33                  # [-] Poisson's ratio
-      min_elems_y: 6
+      E: 70.0e9                 # [Pa]
+      nu: 0.33
 
   substrate:
     name: "Water (bottom halfspace)"
-    thickness: 6.0e-3           # [m] 6 mm truncation depth
-    absorb_depth: 4.0e-3        # [m] 4 mm bottom acoustic sponge
+    thickness: 6.0e-3           # [m] Truncation depth
+    absorb_depth: 4.0e-3        # [m] Sponge inside the truncation depth
     material_model: "fluid"
-    rho: 1000.0                 # [kg/m^3] Water density
-    c: 1480.0                   # [m/s] Sound speed in water
-    min_elems_y: 8
+    rho: 1000.0                 # [kg/m^3]
+    c: 1480.0                   # [m/s]
 
   superstrate:
     name: "Water (top halfspace)"
-    thickness: 6.0e-3           # [m] 6 mm truncation height
-    absorb_depth: 4.0e-3        # [m] 4 mm top acoustic sponge
+    thickness: 6.0e-3           # [m] Truncation height
+    absorb_depth: 4.0e-3        # [m]
     material_model: "fluid"
-    rho: 1000.0                 # [kg/m^3] Water density
-    c: 1480.0                   # [m/s] Sound speed in water
-    min_elems_y: 8
+    rho: 1000.0                 # [kg/m^3]
+    c: 1480.0                   # [m/s]
+
+absorbing_boundaries:
+  alpha: null                  # Frequency-scaled lateral and outer-water sponges
+  beta: null
 
 excitation:
   source_type: "ricker"
-  f_center: 500.0e3             # [Hz] 500 kHz center frequency
+  f_center: 500.0e3             # [Hz]
   traction_max: 1.0e6           # [Pa]
   excitation_width: 2.0e-3      # [m]
-  source_x: null                # [m] null = absorb_length + lambda_ref
-  source_fx: 0.0                # Normal load on upper plate-fluid interface
+  source_x: null               # [m] Automatic source position inside the sensing region
+  source_fx: 0.0
   source_fy: 1.0
 
 mesh:
-  elems_per_wavelength: 8       # Per shortest wavelength in water (1.48 mm at 1 MHz)
-  min_elems_x: 100
-  min_elems_y: 4
+  nx: 600                      # Full 140 mm domain; dx = 0.233 mm
+  ny_per_region: [25, 6, 25]    # Bottom water / Al / top water; dy = 0.24/0.25/0.24 mm
   degree: 2
   max_frequency: 1.0e6          # [Hz]
+  min_frequency: 0.1e6          # [Hz] Arrival-sizing lower edge, not a filter
+  min_wavelength: null          # Replace with a validated guided/interface-mode bound
 
 sensors:
-  n_sensors: 241                # Dense receiver array along upper plate-water interface (y = 1.5 mm)
-  sensor_offset: 0.01           # [m] 10 mm source-to-first-receiver
-  sensor_pitch: 0.25e-3         # [m] 0.25 mm pitch (60 mm aperture -> Nyquist 12.6 rad/mm)
+  n_sensors: 241
+  sensor_offset: 0.01           # [m]
+  sensor_pitch: 0.25e-3         # [m]
+  sensor_y: null                # Upper plate-water interface, y = 1.5 mm
+  sample_rate: "10 MHz"        # 10 samples per band-edge period
 
+# Display limits do not filter the excitation or recorded histories.
 postprocess:
+  structure_analysis: true    # Structure-specific dispersion, wave references and transport panels
   run_postprocess: true
+  # Receiver reports: apparent attenuation includes radiation leakage into water.
+  wave_characterisation:
+    enabled: true
+    component: y
+    frequency_band: ["0.3 MHz", "0.8 MHz"]
+    time_window: null          # Full record; specify [start, end] in seconds to isolate a mode
+    min_relative_amplitude: 0.01 # Exclude peaks below 1% of the array maximum
   f_min: 0.0
   f_max: "1 MHz"
   k_min: 0.0
   k_max: "4 rad/mm"
 
+# Receiver histories and figures; full-field output is optional.
 output:
   output_dir: "results_06_plate_in_halfspaces_immersed_water"
   write_vtx: false
-  target_snapshots: 200
+  quick_plot: true
+  compress_output: false
+  history_storage: memory
+  figure_formats: [png]
+  usetex: false                # true enables external LaTeX; default needs no TeX install

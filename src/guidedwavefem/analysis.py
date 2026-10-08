@@ -1,8 +1,7 @@
 """Signal processing, 2D FFT dispersion analysis, and publication figures.
 
-All labels are written so they render identically with Matplotlib's built-in
-mathtext and with a full LaTeX installation (``usetex``); plotting settings are
-scoped with :func:`matplotlib.pyplot.rc_context` and never leak to the caller.
+All exports use a 190 mm canvas and 10-point LaTeX typography. Plotting settings
+are scoped with :func:`matplotlib.pyplot.rc_context` and never leak to the caller.
 Axis units are chosen from the data (e.g. s/ms/μs, m/mm, Hz/kHz/MHz, rad/m or
 rad/mm), so seismic and ultrasonic records are both displayed naturally.
 """
@@ -11,14 +10,18 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 from collections.abc import Mapping, Sequence
+from pathlib import Path
+from threading import RLock
 from typing import Any
 
 import matplotlib
 import numpy as np
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure
+from matplotlib.text import Text
 from matplotlib.ticker import MaxNLocator
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from scipy.signal import butter, sosfiltfilt
@@ -27,6 +30,7 @@ from guidedwavefem.materials import compute_rayleigh_speed
 from guidedwavefem.numerics import dispersion_spectrum
 from guidedwavefem.reporting import log, warn
 from guidedwavefem.sources import describe_source, source_delay, source_duration, source_signal
+from guidedwavefem.storage import atomic_output
 from guidedwavefem.units import (
     Unit,
     displacement_unit,
@@ -39,21 +43,84 @@ from guidedwavefem.units import (
 )
 
 # Figures are built with the object-oriented API (``Figure`` + its own canvas),
-# so no pyplot state or global backend selection is involved; this is safe
-# headless, under MPI, in threads, and inside interactive sessions.
+# so no pyplot state or global backend selection is involved. Matplotlib's
+# rcParams and rendering internals are global: serialize both plotting paths.
+_PLOT_LOCK = RLock()
 
 FIGURE_FORMATS = ("png", "pdf", "svg", "eps")
+FIGURE_WIDTH_MM = 190.0
+FIGURE_WIDTH_IN = FIGURE_WIDTH_MM / 25.4
+FONT_SIZE_PT = 10.0
 
 _BASE_RC = {
     "font.family": "serif",
+    "font.serif": ["DejaVu Serif"],
+    "mathtext.fontset": "dejavuserif",
     "font.size": 10,
     "axes.labelsize": 10,
     "axes.titlesize": 10,
     "axes.titleweight": "bold",
-    "xtick.labelsize": 8.5,
-    "ytick.labelsize": 8.5,
-    "legend.fontsize": 8,
+    "axes.titlepad": 4,
+    "axes.labelpad": 3,
+    "axes.spines.top": True,
+    "axes.spines.right": True,
+    "axes.spines.bottom": True,
+    "axes.spines.left": True,
+    "axes.edgecolor": "#7C8794",
+    "axes.linewidth": 0.7,
+    "axes.labelcolor": "#233044",
+    "text.color": "#233044",
+    "xtick.color": "#536273",
+    "ytick.color": "#536273",
+    "xtick.labelsize": 10,
+    "ytick.labelsize": 10,
+    "xtick.major.size": 3,
+    "ytick.major.size": 3,
+    "xtick.major.pad": 2.5,
+    "ytick.major.pad": 2.5,
+    "legend.fontsize": 10,
+    "legend.title_fontsize": 10,
+    "legend.borderpad": 0.3,
+    "legend.labelspacing": 0.3,
+    "legend.handlelength": 1.5,
+    "legend.columnspacing": 0.8,
+    "legend.frameon": False,
+    "grid.color": "#E3E8ED",
+    "grid.linewidth": 0.6,
+    "axes.axisbelow": True,
+    "lines.linewidth": 1.4,
+    "image.interpolation": "nearest",
+    "figure.facecolor": "white",
+    "savefig.facecolor": "white",
+    "pdf.fonttype": 42,
+    "ps.fonttype": 42,
+    "svg.fonttype": "none",
+    "text.usetex": False,
+    "savefig.bbox": None,
+    "savefig.pad_inches": 0,
 }
+
+TRACE_COLORS = ("#167D9A", "#D97732", "#7356A6")
+
+
+def _figure(height_mm: float, **kwargs) -> Figure:
+    """Build a publication canvas at its final physical size, before layout."""
+    return Figure(figsize=(FIGURE_WIDTH_IN, height_mm / 25.4), **kwargs)
+
+
+def _line_axes(ax: Axes) -> None:
+    """Quiet reference grid for quantitative line charts (not heatmaps)."""
+    ax.grid(True)
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=6))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
+    ax.margins(x=0.02)
+
+
+def _robust_limit(values: np.ndarray) -> float:
+    """A shared signed colour limit, with an explicit nonzero empty-data fallback."""
+    peak = float(np.max(np.abs(values)))
+    return max(float(np.percentile(np.abs(values), 99)), 0.05 * peak) if peak else 1.0
+
 
 #: Archive keys of the SI dispersion limits and their legacy (MHz, rad/mm) fallbacks.
 _LIMIT_KEYS = {
@@ -75,29 +142,67 @@ def latex_available() -> bool:
     return all(shutil.which(tool) for tool in ("latex", "dvipng", "gs"))
 
 
-def resolve_usetex(usetex: bool | str = "auto") -> bool:
-    """Resolve ``'auto'``/bool into a concrete usetex decision."""
+def resolve_usetex(usetex: bool | str = False) -> bool:
+    """Resolve optional external LaTeX rendering, disabled by default."""
     if isinstance(usetex, str):
         if usetex.lower() != "auto":
             raise ValueError("usetex must be 'auto', True or False")
         return latex_available()
-    if usetex and not latex_available():
-        warn("usetex requested but latex/dvipng/ghostscript not found; using mathtext.")
-        return False
-    return bool(usetex)
-
-
-def _rc(usetex: bool) -> dict[str, object]:
-    rc: dict[str, object] = dict(_BASE_RC)
-    rc["text.usetex"] = usetex
+    elif not isinstance(usetex, (bool, np.bool_)):
+        raise ValueError("usetex must be 'auto', True or False")
     if not usetex:
-        rc["mathtext.fontset"] = "stix"
-    return rc
+        return False
+    if not latex_available():
+        raise RuntimeError(
+            "usetex=True requires LaTeX, dvipng and Ghostscript on PATH. "
+            "Install these plotting dependencies or set output.usetex to false."
+        )
+    return True
+
+
+def _rc(usetex: bool = False) -> dict[str, object]:
+    return {
+        **_BASE_RC,
+        "text.usetex": usetex,
+        "font.serif": ["Computer Modern Roman"] if usetex else ["DejaVu Serif"],
+    }
 
 
 def _title(text: str, usetex: bool) -> str:
     """Bold title text in both rendering modes."""
     return rf"\textbf{{{text}}}" if usetex else text
+
+
+def _latex_text(text: str) -> str:
+    """Escape literal labels while preserving intentional math and TeX commands."""
+    substitutions = {
+        "μ": r"\ensuremath{\mu}",
+        "µ": r"\ensuremath{\mu}",
+        "²": r"\ensuremath{^{2}}",
+        "³": r"\ensuremath{^{3}}",
+        "≥": r"\ensuremath{\geq}",
+        "≤": r"\ensuremath{\leq}",
+        "Δ": r"\ensuremath{\Delta}",
+        "λ": r"\ensuremath{\lambda}",
+        "α": r"\ensuremath{\alpha}",
+        "β": r"\ensuremath{\beta}",
+        "θ": r"\ensuremath{\theta}",
+        "π": r"\ensuremath{\pi}",
+        "−": "-",
+        "×": r"\ensuremath{\times}",
+        "°": r"\ensuremath{^{\circ}}",
+        "≈": r"\ensuremath{\approx}",
+        "→": r"\ensuremath{\rightarrow}",
+    }
+    for char, replacement in substitutions.items():
+        text = text.replace(char, replacement)
+    pieces = re.split(r"(?<!\\)\$", text)
+    for i, piece in enumerate(pieces):
+        piece = re.sub(r"(?<!\\)([%&#])", r"\\\1", piece)
+        if i % 2 == 0:
+            piece = re.sub(r"(?<!\\)_", r"\_", piece)
+        pieces[i] = piece
+    return "$".join(pieces)
 
 
 def bandpass_filter(
@@ -118,12 +223,34 @@ def bandpass_filter(
 
 
 def _save(fig: Figure, base: str, formats: Sequence[str], dpi: int) -> list[str]:
+    formats = tuple(ext.lower().lstrip(".") for ext in formats)
+    if not formats:
+        raise ValueError("At least one figure format is required")
+    for ext in formats:
+        if ext not in FIGURE_FORMATS:
+            raise ValueError(f"Unsupported figure format '{ext}'")
+    # Preserve the figure's rendering mode even outside its creation context.
+    text = next(iter(fig.findobj(match=Text)), None)
+    tex = resolve_usetex(text.get_usetex() if text is not None else False)
+    fig.set_size_inches(FIGURE_WIDTH_IN, fig.get_figheight(), forward=False)
+    # Tick labels can be created lazily. Set their defaults as well as all
+    # existing Text objects, including legends and colorbar offset numbers.
+    for ax in fig.axes:
+        ax.tick_params(axis="both", which="both", labelsize=FONT_SIZE_PT)
+        ax.get_xticklabels()
+        ax.get_yticklabels()
+        title = ax.get_title()
+        if tex and title and not title.startswith(r"\textbf{"):
+            ax.set_title(_title(title, True))
+    for artist in fig.findobj(match=Text):
+        artist.set_fontsize(FONT_SIZE_PT)
+        artist.set_fontfamily("serif")
+        artist.set_usetex(tex)
+        if tex:
+            artist.set_text(_latex_text(artist.get_text()))
     paths = []
     ps_logger = logging.getLogger("matplotlib.backends.backend_ps")
     for ext in formats:
-        ext = ext.lower().lstrip(".")
-        if ext not in FIGURE_FORMATS:
-            raise ValueError(f"Unsupported figure format '{ext}'")
         path = f"{base}.{ext}"
         # EPS has no alpha channel; translucent legend frames/grid lines are
         # flattened to opaque by design, so the backend's warning is suppressed.
@@ -131,7 +258,8 @@ def _save(fig: Figure, base: str, formats: Sequence[str], dpi: int) -> list[str]
         if ext == "eps":
             ps_logger.setLevel(logging.ERROR)
         try:
-            fig.savefig(path, dpi=dpi, bbox_inches="tight")
+            with matplotlib.rc_context(_rc(tex)), atomic_output(path, binary=True) as stream:
+                fig.savefig(stream, format=ext, dpi=dpi, bbox_inches=None)
         finally:
             ps_logger.setLevel(previous)
         log(f"  Saved: {path}")
@@ -159,72 +287,102 @@ def plot_quick_overview(
     output_path: str,
     source_type: str = "ricker",
     n_cycles: int | None = None,
+    *,
+    usetex: bool | str = False,
 ) -> str:
-    """Fast diagnostic figure: excitation, waterfall, and B-scan of ``u_2``."""
-    offsets = np.asarray(sensor_x, dtype=float) - source_x
-    times = np.asarray(times, dtype=float)
-    fs = 1.0 / (times[1] - times[0])
-    filtered, band = bandpass_filter(np.asarray(sensor_data_y, dtype=float), fs, f_center)
-    t_u = time_unit(times[-1])
-    x_u = length_unit(np.max(np.abs(offsets)))
-    t_disp, x_disp = t_u(times), x_u(offsets)
-
-    with matplotlib.rc_context(_rc(False)):
-        fig = Figure(figsize=(12, 10))
-        axes = fig.subplots(3, 1)
+    """Compact acquisition diagnostic with a shared physical amplitude scale."""
+    times, sensor_x, values = [np.asarray(v, dtype=float) for v in (times, sensor_x, sensor_data_y)]
+    if times.ndim != 1 or sensor_x.ndim != 1 or len(times) < 2 or not len(sensor_x):
+        raise ValueError("Overview requires at least two times and one sensor")
+    if values.shape != (len(times), len(sensor_x)) or not np.isfinite(values).all():
+        raise ValueError("Invalid displacement history shape or nonfinite values")
+    for axis in (times, sensor_x):
+        delta = np.diff(axis)
+        if not np.isfinite(axis).all() or (
+            len(delta)
+            and (np.any(delta <= 0) or not np.allclose(delta, delta[0], rtol=1e-7, atol=0))
+        ):
+            raise ValueError("Overview requires uniform increasing coordinates")
+    if not np.isfinite([f_center, source_x]).all() or f_center <= 0:
+        raise ValueError("Source frequency must be positive and source position finite")
+    offsets = sensor_x - source_x
+    fs = 1 / (times[1] - times[0])
+    filtered, band = bandpass_filter(values, fs, f_center)
+    tu, xu = time_unit(np.max(np.abs(times))), length_unit(np.max(np.abs(offsets)))
+    uu = displacement_unit(np.max(np.abs(filtered)))
+    td, xd, ud = tu(times), xu(offsets), uu(filtered)
+    with _PLOT_LOCK, matplotlib.rc_context(_rc(resolve_usetex(usetex))):
+        fig = _figure(135, layout="constrained")
+        fig.get_layout_engine().set(w_pad=0.035, h_pad=0.035, wspace=0.035, hspace=0.035)
+        gs = fig.add_gridspec(2, 2, height_ratios=[0.85, 1.4])
+        source_ax, trace_ax, scan_ax = (
+            fig.add_subplot(gs[0, 0]),
+            fig.add_subplot(gs[0, 1]),
+            fig.add_subplot(gs[1, :]),
+        )
         pulse = source_duration(source_type, f_center, n_cycles)
-        t_exc = np.linspace(0.0, 1.3 * pulse, 1000)
-        exc_u = time_unit(t_exc[-1])
-        axes[0].plot(exc_u(t_exc), source_signal(t_exc, source_type, f_center, n_cycles), lw=1.5)
-        axes[0].set(
-            xlabel=_label("Time", exc_u),
-            ylabel="Amplitude",
-            title=f"Excitation: {describe_source(source_type, n_cycles)}, "
-            f"$f_0$ = {fmt_frequency(f_center)}",
+        te = np.linspace(0, 1.3 * pulse, 1000)
+        eu = time_unit(te[-1])
+        source_ax.plot(
+            eu(te), source_signal(te, source_type, f_center, n_cycles), color=TRACE_COLORS[0]
         )
-        axes[0].grid(True, alpha=0.3)
-
-        n_sensors = len(x_disp)
-        step = max(n_sensors // 30, 1)
-        peak = float(np.max(np.abs(filtered))) or 1.0
-        scale = 0.8 * (x_disp[1] - x_disp[0]) * step / peak
-        for j in range(0, n_sensors, step):
-            axes[1].plot(t_disp, filtered[:, j] * scale + x_disp[j], "b-", lw=0.5)
-        axes[1].set(
-            xlabel=_label("Time", t_u),
-            ylabel=_label("Offset from source", x_u),
-            title=f"$u_2$ waterfall{_band_text(band)}",
+        source_ax.set(
+            xlabel=_label("Time", eu),
+            ylabel="Source amplitude",
+            title="(a) Excitation",
         )
-        axes[1].grid(True, alpha=0.3)
-
-        dt_d = t_disp[1] - t_disp[0]
-        dx_d = x_disp[1] - x_disp[0]
-        vmax = 0.5 * float(np.max(np.abs(filtered)))
-        if vmax > 0:
-            axes[2].imshow(
-                filtered.T,
-                aspect="auto",
-                origin="lower",
-                cmap="seismic",
-                vmin=-vmax,
-                vmax=vmax,
-                extent=[
-                    t_disp[0] - dt_d / 2,
-                    t_disp[-1] + dt_d / 2,
-                    x_disp[0] - dx_d / 2,
-                    x_disp[-1] + dx_d / 2,
-                ],
+        selected = sorted(set([0, len(offsets) // 2, len(offsets) - 1]))
+        for color, j in zip(TRACE_COLORS, selected, strict=False):
+            trace_ax.plot(td, ud[:, j], color=color, label=f"{xd[j]:.3g} {xu.tex}")
+        trace_ax.set(
+            xlabel=_label("Time", tu),
+            ylabel=_label("Displacement $u_2$", uu),
+            title="(b) Receiver signals",
+        )
+        trace_ax.legend(title="Source offset", title_fontsize=10, loc="upper right")
+        for ax in (source_ax, trace_ax):
+            _line_axes(ax)
+        dt = td[1] - td[0]
+        pitch = xd[1] - xd[0] if len(xd) > 1 else 1.0
+        limit = _robust_limit(ud)
+        image = scan_ax.imshow(
+            ud.T,
+            origin="lower",
+            aspect="auto",
+            cmap="RdBu_r",
+            vmin=-limit,
+            vmax=limit,
+            extent=[td[0] - dt / 2, td[-1] + dt / 2, xd[0] - pitch / 2, xd[-1] + pitch / 2],
+        )
+        scan_ax.set(
+            xlabel=_label("Time", tu),
+            ylabel=_label("Offset from source", xu),
+            title="(c) Recorded wavefield",
+            xlim=(td[0], td[-1]),
+        )
+        fig.colorbar(
+            image,
+            ax=scan_ax,
+            label=_label("Displacement $u_2$", uu),
+            extend="neither",
+            pad=0.02,
+        )
+        extension = os.path.splitext(output_path)[1].lower().lstrip(".") or "png"
+        _save(fig, os.path.splitext(output_path)[0], [extension], 300)
+        notes = Path(output_path).with_suffix("").with_name(Path(output_path).stem + "_README.md")
+        with atomic_output(notes) as stream:
+            stream.write(
+                "# Acquisition overview\n\n"
+                f"Source: {describe_source(source_type, n_cycles)}, {fmt_frequency(f_center)}; "
+                f"{len(offsets)} receivers.\n\n"
+                "(a) Normalized source waveform. (b) Selected receiver traces. "
+                "(c) Recorded vertical wavefield on one physical amplitude scale.\n\n"
+                f"Zero-phase{_band_text(band)}. Flat-ended colourbars saturate beyond "
+                f"the robust display limits of +/-{limit:.6g} {uu.label}; "
+                "recorded amplitudes are unchanged. "
+                "Empty fields indicate no recorded dynamic signal.\n\n"
+                "Export: 190 mm width, 10-point LaTeX text, 300 dpi raster.\n"
             )
-        axes[2].set_xlim(t_disp[0], t_disp[-1])
-        axes[2].set_ylim(x_disp[0], x_disp[-1])
-        axes[2].yaxis.set_major_locator(MaxNLocator(nbins=6))
-        axes[2].set(
-            xlabel=_label("Time", t_u),
-            ylabel=_label("Offset from source", x_u),
-            title="$u_2$ B-scan",
-        )
-        fig.tight_layout()
-        fig.savefig(output_path, dpi=150, bbox_inches="tight")
     log(f"  Quick visualisation saved: {output_path}")
     return output_path
 
@@ -250,7 +408,9 @@ def _resolve_limits(
     limits.setdefault("f_min", 0.0)
     limits.setdefault("f_max", 2.0 * f_center)
     limits.setdefault("k_min", 0.0)
-    limits.setdefault("k_max", min(2.0 * np.pi * limits["f_max"] / c_ref, np.pi / pitch))
+    # A bulk shear speed is not a lower bound on guided-wave phase velocity.
+    # Retain the available spatial band instead of silently cropping slow modes.
+    limits.setdefault("k_max", np.pi / pitch)
     for lo, hi in (("f_min", "f_max"), ("k_min", "k_max")):
         if not np.isfinite([limits[lo], limits[hi]]).all() or not 0 <= limits[lo] < limits[hi]:
             raise ValueError("Dispersion limits must be finite with 0 <= min < max")
@@ -265,7 +425,7 @@ def plot_full_analysis(
     k_min: float | str | None = None,
     k_max: float | str | None = None,
     formats: Sequence[str] = FIGURE_FORMATS,
-    usetex: bool | str = "auto",
+    usetex: bool | str = False,
     dpi: int = 300,
 ) -> str:
     """Generate the 2×2 publication figure from a ``sensor_data.npz`` archive.
@@ -287,7 +447,9 @@ def plot_full_analysis(
     formats
         Figure formats to write (subset of ``png, pdf, svg, eps``).
     usetex
-        ``'auto'`` (LaTeX if available), ``True`` or ``False``.
+        False (default) uses built-in fonts/mathtext; True requires external
+        LaTeX. ``'auto'`` uses LaTeX only when its tools are available.
+        Both modes use the same 190 mm, 10-point publication style.
     dpi
         Raster resolution.
 
@@ -327,7 +489,7 @@ def plot_full_analysis(
     n_cycles = int(data["n_cycles"]) if "n_cycles" in data and int(data["n_cycles"]) > 0 else None
 
     # Validate before indexing/filtering. Coordinates carry physical units.
-    if len(times) < 32 or len(sensor_x) < 3:
+    if times.ndim != 1 or sensor_x.ndim != 1 or len(times) < 32 or len(sensor_x) < 3:
         raise ValueError("Postprocessing requires >=32 time samples and >=3 sensors")
     for axis in (times, sensor_x):
         delta = np.diff(axis)
@@ -345,7 +507,15 @@ def plot_full_analysis(
     if not np.isfinite(f_center) or f_center <= 0:
         raise ValueError("f_center must be finite and positive")
 
-    s_pitch = float(data["sensor_pitch"]) if "sensor_pitch" in data else sensor_x[1] - sensor_x[0]
+    s_pitch = float(sensor_x[1] - sensor_x[0])
+    if "source_x" in data:
+        probe_x = sensor_x - float(data["source_x"])
+    else:
+        probe_x = sensor_x - sensor_x[0] + float(data.get("sensor_offset", sensor_x[0]))
+    if not np.isfinite(probe_x).all():
+        raise ValueError("Source position and receiver offsets must be finite")
+    if not np.isfinite([c_L, c_T]).all() or c_L <= 0 or c_T < 0:
+        raise ValueError("Wave speeds must be finite with c_L > 0 and c_T >= 0")
     c_ref = (c_fluid or c_L) if is_fluid_top else c_T
     limits = _resolve_limits(
         data,
@@ -356,16 +526,29 @@ def plot_full_analysis(
     )
 
     fs = 1.0 / (times[1] - times[0])
+    for key, ceiling in (("f_max", fs / 2), ("k_max", np.pi / s_pitch)):
+        if limits[key] > ceiling:
+            warn(f"{key} exceeds the sampled Nyquist limit; displaying up to {ceiling:g} SI.")
+            limits[key] = ceiling
+        if limits[key.replace("max", "min")] >= limits[key]:
+            raise ValueError("Requested dispersion range is outside the sampled Nyquist limits")
     if f_center / 5.0 >= min(f_center * 3.0, 0.45 * fs):
         raise ValueError("Sampling frequency is too low for the requested bandpass")
-    dy, _ = bandpass_filter(sensor_data_y, fs, f_center)
+    dy, filter_band = bandpass_filter(sensor_data_y, fs, f_center)
     dx_filt = bandpass_filter(sensor_data_x, fs, f_center)[0] if sensor_data_x is not None else None
 
     log(f"\n{'=' * 58}")
     log(">> Generating publication 2x2 analysis figure...")
     log(f"{'=' * 58}")
     log("  Computing forward-propagating 2D FFT dispersion (u1 and u2 separated)...")
-    freqs, wavenumbers, power_u2 = dispersion_spectrum(dy, times, sensor_x)
+    leftward = bool(np.all(probe_x <= 0) and np.any(probe_x < 0))
+    direction = "-x" if leftward else "+x"
+    fft_positions = -sensor_x[::-1] if leftward else sensor_x
+
+    def spectrum(values):
+        return dispersion_spectrum(values[:, ::-1] if leftward else values, times, fft_positions)
+
+    freqs, wavenumbers, power_u2 = spectrum(dy)
     # Keep every bin whose cell overlaps the plot range so the image fills the axes.
     half_df, half_dk = 0.5 * (freqs[1] - freqs[0]), 0.5 * (wavenumbers[1] - wavenumbers[0])
     f_mask = (freqs >= limits["f_min"] - half_df) & (freqs <= limits["f_max"] + half_df)
@@ -386,59 +569,69 @@ def plot_full_analysis(
 
     def _db(power: np.ndarray) -> np.ndarray:
         p = power[np.ix_(f_mask, k_mask)]
-        return 10 * np.log10(p / (np.max(p) + 1e-30) + 1e-30)
+        peak = float(np.max(p))
+        relative = p / peak if peak > 0 else np.zeros_like(p)
+        return 10 * np.log10(np.maximum(relative, 1e-30))
 
     fk_db_u2 = _db(power_u2)
-    fk_db_u1 = (
-        _db(dispersion_spectrum(dx_filt, times, sensor_x)[2]) if dx_filt is not None else None
-    )
+    fk_db_u1 = _db(spectrum(dx_filt)[2]) if dx_filt is not None else None
 
-    s_offset = (
-        float(data["sensor_offset"])
-        if "sensor_offset" in data
-        else sensor_x[0] - float(data.get("source_x", 0.0))
-    )
     n_sensors = dy.shape[1]
-    probe_x = s_offset + np.arange(n_sensors) * s_pitch
     x_u = length_unit(float(np.max(np.abs(probe_x))))
     probe_d = x_u(probe_x)
     t_d = t_u(times)
     dy_d = u_u(dy)
 
     tex = resolve_usetex(usetex)
-    with matplotlib.rc_context(_rc(tex)):
-        fig = Figure(figsize=(190.0 / 25.4, 165.0 / 25.4))
-        gs = fig.add_gridspec(2, 2, height_ratios=[1.0, 1.0], hspace=0.32, wspace=0.15)
-
+    with _PLOT_LOCK, matplotlib.rc_context(_rc(tex)):
+        # Physical geometry: equal square plotting areas, including the width
+        # reserved by each axes divider for a colourbar (or its blank spacer).
+        left_mm, right_mm, column_gap_mm = 16.0, 18.0, 18.0
+        bottom_mm, top_mm, row_gap_mm = 14.0, 8.0, 18.0
+        slot_mm = (FIGURE_WIDTH_MM - left_mm - right_mm - column_gap_mm) / 2
+        panel_mm = (slot_mm - 0.04 * 25.4) / 1.035
+        height_mm = bottom_mm + top_mm + row_gap_mm + 2 * panel_mm
+        fig = _figure(height_mm)
+        gs = fig.add_gridspec(
+            2,
+            2,
+            left=left_mm / FIGURE_WIDTH_MM,
+            right=1 - right_mm / FIGURE_WIDTH_MM,
+            bottom=bottom_mm / height_mm,
+            top=1 - top_mm / height_mm,
+            hspace=row_gap_mm / panel_mm,
+            wspace=column_gap_mm / slot_mm,
+        )
         # (a) Selected u2 waveforms
         ax1 = fig.add_subplot(gs[0, 0])
         indices = [0, (n_sensors - 1) // 2, n_sensors - 1]
-        colors = matplotlib.colormaps["viridis"](np.linspace(0.2, 0.9, 3))
+        colors = TRACE_COLORS
         for color, idx in zip(colors, indices, strict=True):
             ax1.plot(
                 t_d,
                 dy_d[:, idx],
-                lw=0.85,
+                lw=1.25,
                 color=color,
                 label=rf"$x = {probe_d[idx]:.4g}$ {x_u.tex}",
             )
         ax1.set_xlabel(_label("Time", t_u))
         ax1.set_ylabel(_label("Displacement $u_2$", u_u))
-        ax1.set_title(_title("(a) Selected $u_2$ signals", tex))
-        ax1.legend(loc="upper right", framealpha=0.85)
-        ax1.grid(True, alpha=0.3, linestyle=":")
-        make_axes_locatable(ax1).append_axes("right", size="3.5%", pad=0.06).axis("off")
+        ax1.set_title(_title("(a) Receiver signals", tex))
+        ax1.legend(loc="upper right")
+        _line_axes(ax1)
+        ax1.set_xlim(t_d[0], t_d[-1])
+        make_axes_locatable(ax1).append_axes("right", size="3.5%", pad=0.04).axis("off")
 
         # (b) B-scan with arrival-time guides
         ax2 = fig.add_subplot(gs[0, 1])
         dt_d = t_d[1] - t_d[0]
         dxp = x_u(s_pitch)
-        vmax = float(np.max(np.abs(dy_d))) * 0.3 or 1.0
+        vmax = _robust_limit(dy_d)
         im2 = ax2.imshow(
             dy_d.T,
             aspect="auto",
             origin="lower",
-            cmap="seismic",
+            cmap="RdBu_r",
             vmin=-vmax,
             vmax=vmax,
             extent=[
@@ -461,18 +654,18 @@ def plot_full_analysis(
         )
         top_note = "top layer" if layered else ""
         if is_fluid_top:
-            speed_lines.append((c_L, "--", "cyan", _speed("c_f", c_L, "fluid")))
+            speed_lines.append((c_L, "--", "#167D9A", _speed("c_f", c_L, "fluid")))
         else:
-            speed_lines.append((c_L, "--", "cyan", _speed("c_L", c_L, top_note)))
-            speed_lines.append((c_T, ":", "lime", _speed("c_T", c_T, top_note)))
+            speed_lines.append((c_L, "--", "#167D9A", _speed("c_L", c_L, top_note)))
+            speed_lines.append((c_T, ":", "#D97732", _speed("c_T", c_T, top_note)))
         if c_R is not None and not is_fluid_top:
-            speed_lines.append((c_R, "-.", "gold", _speed("c_R", c_R, "Rayleigh")))
+            speed_lines.append((c_R, "-.", "#7356A6", _speed("c_R", c_R, "Rayleigh")))
         elif has_fluid and not is_fluid_top and c_fluid is not None:
-            speed_lines.append((c_fluid, "-.", "magenta", _speed("c_f", c_fluid, "fluid")))
+            speed_lines.append((c_fluid, "-.", "#7356A6", _speed("c_f", c_fluid, "fluid")))
 
         t0_pulse = source_delay(source_type, f_center, n_cycles)
         for spd, sty, clr, name in speed_lines:
-            t_arr = t_u(t0_pulse + probe_x / spd)
+            t_arr = t_u(t0_pulse + np.abs(probe_x) / spd)
             valid = (t_arr >= t_d[0]) & (t_arr <= t_d[-1])
             if np.any(valid):
                 ax2.plot(t_arr[valid], probe_d[valid], color=clr, linestyle=sty, lw=1.1, label=name)
@@ -483,17 +676,26 @@ def plot_full_analysis(
         ax2.set_ylabel(_label("Offset from source", x_u))
         ax2.set_title(_title("(b) B-scan ($u_2$)", tex))
         if ax2.get_legend_handles_labels()[0]:
-            ax2.legend(loc="lower right", framealpha=0.85)
+            ax2.legend(
+                loc="lower right",
+                frameon=True,
+                framealpha=0.95,
+                facecolor="white",
+                edgecolor="none",
+                fontsize=10,
+            )
         cb2 = fig.colorbar(
-            im2, cax=make_axes_locatable(ax2).append_axes("right", size="3.5%", pad=0.06)
+            im2,
+            cax=make_axes_locatable(ax2).append_axes("right", size="3.5%", pad=0.04),
+            extend="neither",
         )
         cb2.set_label(_label("$u_2$", u_u))
 
         disp_lines = []
         if is_fluid_top:
-            disp_lines.append((c_L, "--", "cyan", _speed("c_f", c_L)))
+            disp_lines.append((c_L, "--", "#167D9A", _speed("c_f", c_L)))
         elif c_R is not None:
-            disp_lines.append((c_R, "--", "cyan", _speed("c_R", c_R)))
+            disp_lines.append((c_R, "--", "#167D9A", _speed("c_R", c_R)))
         if has_fluid and not is_fluid_top and c_fluid is not None:
             disp_lines.append((c_fluid, ":", "magenta", _speed("c_f", c_fluid)))
 
@@ -512,6 +714,8 @@ def plot_full_analysis(
                     vmin=-40,
                     vmax=0,
                 )
+            else:
+                ax.set_facecolor("#F3F6F8")
             k_line = np.linspace(limits["k_min"], limits["k_max"], 200)
             for spd, sty, clr, lbl in disp_lines:
                 f_line = f_u(spd * k_line / (2.0 * np.pi))
@@ -521,7 +725,7 @@ def plot_full_analysis(
                         k_u(k_line[ok]), f_line[ok], sty, color=clr, lw=1.1, alpha=0.9, label=lbl
                     )
             if ax.get_legend_handles_labels()[0]:
-                ax.legend(loc="upper left", framealpha=0.8)
+                ax.legend(loc="upper left", frameon=True, facecolor="white", framealpha=0.95)
             ax.set_xlim(k_lo, k_hi)
             ax.set_ylim(f_lo, f_hi)
             ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
@@ -532,14 +736,35 @@ def plot_full_analysis(
         ax3 = fig.add_subplot(gs[1, 0])
         _dispersion_axes(ax3, fk_db_u1, "(c) Dispersion ($u_1$)")
         ax3.set_ylabel(_label("Frequency", f_u))
-        make_axes_locatable(ax3).append_axes("right", size="3.5%", pad=0.06).axis("off")
+        make_axes_locatable(ax3).append_axes("right", size="3.5%", pad=0.04).axis("off")
 
         ax4 = fig.add_subplot(gs[1, 1], sharey=ax3)
         im4 = _dispersion_axes(ax4, fk_db_u2, "(d) Dispersion ($u_2$)")
         cb4 = fig.colorbar(
-            im4, cax=make_axes_locatable(ax4).append_axes("right", size="3.5%", pad=0.06)
+            im4, cax=make_axes_locatable(ax4).append_axes("right", size="3.5%", pad=0.04)
         )
-        cb4.set_label("Relative power [dB, per component]")
+        cb4.set_label("Relative power [dB]")
+        ax4.set_ylabel(_label("Frequency", f_u))
 
         paths = _save(fig, os.path.join(output_dir, "full_analysis"), formats, dpi)
+        with atomic_output(Path(output_dir) / "full_analysis_README.md") as stream:
+            stream.write(
+                "# Wave propagation and dispersion\n\n"
+                f"Archive: `{Path(sensor_data_filepath).resolve()}`.\n\n"
+                f"{n_sensors} receivers; {len(times)} samples; source {fmt_frequency(f_center)}. "
+                f"Propagation: {direction}.\n\n"
+                "(a) Selected vertical receiver signals. (b) Vertical B-scan with reference "
+                "arrival-time guides. (c,d) Horizontal and vertical displacement dispersion.\n\n"
+                f"Zero-phase{_band_text(filter_band)}. Hann taper; 2x zero-padding interpolates "
+                f"only. Unpadded DFT spacing: {fs / len(times):.6g} Hz and "
+                f"{2 * np.pi / (n_sensors * s_pitch):.6g} rad/m.\n\n"
+                "Bulk-speed guides refer to the archived top layer where layered; they are "
+                "not a layered-system dispersion solution. Each dispersion component has its "
+                "own peak power reference. Flat-ended displacement colourbars saturate beyond "
+                f"the robust display limits of +/-{vmax:.6g} {u_u.label}; "
+                "recorded amplitudes are unchanged. "
+                "Absent components are blank; zero signals remain at the spectral floor.\n\n"
+                f"Archive provenance: {data.get('provenance', 'Recorded simulation archive')}.\n\n"
+                "Export: 190 mm width and 10-point LaTeX text.\n"
+            )
     return paths[0]

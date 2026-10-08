@@ -62,3 +62,4 @@ htmlcov/
 
 # Development materials & local scratch
 /.dev/
+/manuscript/

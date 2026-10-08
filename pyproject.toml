@@ -62,7 +62,7 @@ testpaths = ["tests"]
 addopts = ["-ra", "--strict-markers", "--strict-config"]
 markers = [
     "slow: end-to-end physics verification runs (deselect with -m 'not slow')",
-    "gpu: requires a CUDA device and CuPy",
+    "gpu: requires a CUDA device and the selected CuPy or Torch backend",
 ]
 filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
 

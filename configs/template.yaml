@@ -1,0 +1,348 @@
+# GuidedWaveFEM parameter reference and runnable starting configuration
+#
+# Application
+#   Reference configuration for A0/S0 dispersion in a free 1 mm aluminium plate.
+# Model and numerical scope
+#   A 500 kHz normal pulse, 0.1-1 MHz sizing band, and 60 mm receiver aperture.
+#   Q2 element spacing is 0.219 mm by 0.167 mm. Establish mesh, time-step,
+#   recording-window, and sponge convergence for the selected observables.
+# Usage
+#   sh tools/run_cpu4.sh -c configs/template.yaml
+#   Add --dry-run to inspect resource estimates. Run from the repository root.
+#   The launcher uses four MPI ranks with one library thread per rank.
+#   Copy this file and select the structure, material, source, and receiver array.
+#   Commented material/structure examples replace the corresponding active blocks.
+# Conventions
+#   Numeric inputs use SI units (m, s, Hz, Pa, kg/m^3), except counts and factors.
+#   Unit strings are supported by sensors.sample_rate and postprocess limits.
+#   null selects the documented default or automatic rule, not zero or disabled.
+#   Required inputs include geometry, material properties, source frequency,
+#   mesh counts, and explicit-solver CFL. CLI overrides take precedence.
+#   Unknown keys are rejected. See README.md for the configuration workflow.
+
+solver:
+  # explicit (default): lumped-mass RK4, suited to wave propagation on large grids.
+  # implicit: Newmark; useful when viscosity severely restricts explicit steps.
+  # Implicit stability does not ensure accurate phase or arrival times.
+  type: explicit
+
+  # Required for explicit, even when dt is supplied; no framework default.
+  # Fraction of the assembled stiffness/damping RK4 stability certificate, (0, 1].
+  # Start at 0.5-0.8; reduce and compare waveforms to test time convergence.
+  # This is not simply c*dt/dx: degree, anisotropy and damping affect the limit.
+  CFL: 0.8
+
+  # Implicit only; default 40, minimum 4. With dt=null, dt is based on
+  # 1/(steps_per_period * max_frequency). Start at 40 and compare with 80.
+  # The minimum is a validation bound, not a recommended accuracy setting.
+  steps_per_period: 40
+
+  # Positive travel-time multiplier, default 1.2; the source pulse is added.
+  # Increase for late packets. Used only when duration is automatic.
+  time_factor: 1.2
+
+  # Optional positive packet-speed bound [m/s] for automatic recording duration.
+  # Choose the slowest group velocity among modes/frequencies you want to retain,
+  # from a dispersion solution or measurement, not their phase velocity.
+  # null uses the framework estimate (A0-aware for a free isotropic plate).
+  # Layered/fluid-loaded systems and higher modes near cutoffs may be slower.
+  min_group_velocity: null
+
+  # Newmark parameters (implicit only), defaults 0.25 and 0.5.
+  # Keep these for average-acceleration integration without numerical damping.
+  # gamma >= 0.5 and beta >= (gamma + 0.5)^2 / 4 are required.
+  # gamma > 0.5 adds numerical damping and changes temporal accuracy.
+  beta: 0.25
+  gamma: 0.5
+
+  # Optional positive maximum step [s], replacing the automatic step request.
+  # Explicit requests are checked against the assembled stability certificate;
+  # an unstable request is rejected. Actual dt may shrink to align the time grid.
+  # Use to hold a known time resolution fixed during a mesh-convergence study.
+  dt: null
+
+  # Optional positive recording time [s]; overrides automatic travel-time sizing.
+  # Choose at least pulse duration + farthest-receiver distance / slowest packet
+  # speed, with a margin. Longer windows improve FFT frequency spacing (~1/T)
+  # but cost more steps/storage and can admit unwanted boundary reflections.
+  duration: null
+
+  # auto (default), cpu, cuda, cuda:N (e.g. cuda:1), or mps.
+  # Accelerators apply to single-process explicit integration. MPI and implicit
+  # runs use CPU/PETSc. Choose cpu for reproducible backend comparisons;
+  # explicit accelerator requests require a working supported backend.
+  device: cpu                  # CPU execution for the reference configuration
+
+  # double (default) or single for the single-process explicit engine.
+  # Start with double; compare single against it before saving memory/runtime.
+  # Apple MPS uses float32; implicit and MPI/PETSc use float64.
+  precision: double
+
+geometry:
+  # Required positive observation-region length [m], excluding lateral sponges.
+  # Make room for the source clearance, receiver offset and full array aperture.
+  sensing_length: 0.08
+
+  # Required positive sponge width [m] on EACH side; total Lx = sensing_length
+  # + 2*absorb_length. Start with several relevant wavelengths and increase until
+  # reflected arrivals no longer affect the measurement window.
+  absorb_length: 0.03
+
+structure:
+  # Canonical choices and required blocks:
+  #   1_layer: single_layer
+  #   N_layers: layers (bottom-to-top list)
+  #   halfspace: halfspace (surface y=0, material extends downward)
+  #   plate_on_halfspace: layers + substrate
+  #   plate_in_halfspaces: layers + substrate + superstrate
+  # The framework default mode is N_layers; this template explicitly chooses 1_layer.
+  # Plates start at y=0; their loaded surface is y=sum(layer thicknesses).
+  # With a superstrate, the load remains at the upper plate/halfspace interface.
+  mode: 1_layer
+  single_layer:
+    # Optional descriptive name; omission generates a region label.
+    name: Aluminium plate
+    # Required positive physical thickness [m]. Halfspace thickness means finite
+    # truncation depth/height, including its sponge, rather than an infinite mesh.
+    thickness: 1.0e-3
+    # isotropic | anisotropic | viscoelastic | fluid.
+    # Optional: inferred from Cv, C, fluid c/K, or E+nu, in that priority order.
+    # Set it explicitly for clarity; fields from other models are rejected.
+    material_model: isotropic
+    rho: 2700.0                 # Required positive density [kg/m^3] for every model
+    E: 70.0e9                   # Isotropic: required Young's modulus [Pa], > 0
+    nu: 0.33                    # Isotropic: required Poisson ratio, -1 < nu < 0.5
+
+  # Alternative structure blocks: replace single_layer and update mode and
+  # mesh.ny_per_region. Each layer/halfspace supports the same material fields.
+  # layers:
+  #   - name: Bottom layer
+  #     thickness: 1.0e-3
+  #     material_model: isotropic
+  #     rho: 2700.0
+  #     E: 70.0e9
+  #     nu: 0.33
+  #   - name: Top layer
+  #     thickness: 1.0e-3
+  #     material_model: isotropic
+  #     rho: 2700.0
+  #     E: 70.0e9
+  #     nu: 0.33
+  # halfspace:
+  #   name: Steel halfspace
+  #   thickness: 18.0e-3
+  #   absorb_depth: 10.0e-3
+  #   material_model: isotropic
+  #   rho: 7850.0
+  #   E: 210.0e9
+  #   nu: 0.29
+  # substrate:
+  #   name: Bottom water
+  #   thickness: 6.0e-3
+  #   absorb_depth: 4.0e-3
+  #   material_model: fluid
+  #   rho: 1000.0
+  #   c: 1480.0
+  # superstrate:
+  #   name: Top water
+  #   thickness: 6.0e-3
+  #   absorb_depth: 4.0e-3
+  #   material_model: fluid
+  #   rho: 1000.0
+  #   c: 1480.0
+  # absorb_depth is optional ONLY for halfspaces: 0 < depth <= thickness.
+  # Omitted: 60% of thickness in halfspace mode, 75% for substrate/superstrate.
+  # Leave an undamped zone deep enough for the surface/interface wave decay;
+  # choose the sponge depth against the longest relevant radiating wavelength.
+  # substrate/superstrate aliases: bottom_halfspace/top_halfspace. Use one name
+  # per block, never an alias and its canonical counterpart together.
+
+  # Alternative material fields within ANY region (retain thickness and rho):
+  # Anisotropic: replace E/nu with C, the 2D plane-strain stiffness in global x/y.
+  #   material_model: anisotropic
+  #   C: [31.7e9, 13.4e9, 0.0, 20.2e9, 0.0, 6.38e9]  # [Pa]
+  # Order: [C11, C12, C16, C22, C26, C66]; the symmetric 3x3 tensor must be
+  # positive definite. Rotate/reduce experimental tensors before supplying them;
+  # there is no material-orientation input.
+  # Viscoelastic: supply BOTH C and Cv in that same order (omit E/nu).
+  #   material_model: viscoelastic
+  #   C: [8.112e9, 5.208e9, 0.0, 8.112e9, 0.0, 1.452e9]  # [Pa]
+  #   Cv: [215.2, 138.2, 0.0, 215.2, 0.0, 38.5]           # [Pa*s]
+  # Cv must be positive semidefinite. Kelvin-Voigt loss grows with frequency:
+  # for proportional loss, Cv = C * tan(delta)/(2*pi*f_reference).
+  # Choose measured attenuation at a stated reference frequency; strong Cv can
+  # make explicit integration much more expensive than implicit integration.
+  # Fluid: use exactly ONE of c, K, or the pair E+nu to specify bulk response.
+  #   material_model: fluid
+  #   c: 1480.0                 # Sound speed [m/s], > 0; K = rho*c^2
+  #   K: 2.1904e9               # Alternative bulk modulus [Pa], > 0; omit c
+  #   E: 6.5712e6               # Alternative E+nu: K = E/(3*(1-2*nu)); omit c/K
+  #   nu: 0.499
+  #   fluid_shear_reg: 1.0e-8    # Optional mu/K ratio; default 1e-8, (0, 0.01]
+  # Keep the small default regularisation unless studying sensitivity. This is
+  # a displacement-based, small-shear fluid with tangential continuity, not a
+  # mixed inviscid acoustic formulation. Interface-wave predictions are approximate.
+  # Sound-speed aliases: c_sound, c_fluid, speed. K aliases: bulk_modulus, bulk_mod.
+  # Supply only one spelling and one bulk-response representation.
+
+absorbing_boundaries:
+  # Nonnegative peak Rayleigh sponge coefficients; null scales with f_center.
+  # alpha [1/s]: default 1e7 * f_center/1e6. beta [s]: default 1e-9 * 1e6/f_center.
+  # Start with these defaults; compare reflected amplitudes after changing sponge
+  # width and damping. Excessive damping can reflect waves at sponge entry.
+  # Stiffness damping beta disproportionately damps high frequencies and can cap
+  # explicit dt. Reduce it if preflight identifies a damping-limited step.
+  # Zero disables the corresponding term, not material viscosity Cv.
+  alpha: null
+  beta: null
+
+excitation:
+  # ricker (default): broadband dispersion maps; tone_burst: Hann-windowed sine
+  # for selective excitation and individual packet tracking.
+  source_type: ricker
+  f_center: 500.0e3             # Required positive centre frequency [Hz]
+  # tone_burst only: integer >= 1, default 5; leave null for ricker.
+  # More cycles narrow the band but lengthen/overlap packets; fewer broaden it.
+  n_cycles: null
+  # Traction scale [Pa], default 1e6. Choose the experimental load for absolute
+  # amplitude comparisons; the linear model scales with this amplitude.
+  traction_max: 1.0e6
+  # Positive Gaussian load width [m], sigma = width/3. null chooses
+  # min(lambda_ref/2, sensing_length/10). Use transducer contact width when known;
+  # a wide source suppresses short spatial wavelengths.
+  excitation_width: 2.0e-3      # Active case: 2 mm load footprint
+  # Load centre x [m] in [0, Lx]. Keep its footprint outside the lateral sponge.
+  # null: absorb_length + max(min(max(lambda_ref,width), sensing_length/8), width/2).
+  source_x: null
+  # Traction components in global x/y (defaults 0/1); both cannot be zero.
+  # Normal loading favours flexural motion; tangential loading favours extensional
+  # motion. The solver normalises this vector, so only its direction matters;
+  # traction_max controls the resultant amplitude scale.
+  source_fx: 0.0
+  source_fy: 1.0
+
+mesh:
+  # Required exact positive integer element counts, NOT node counts.
+  # nx covers Lx INCLUDING both lateral sponges. ny_per_region has one entry per
+  # physical region bottom-to-top: substrate, layers, superstrate when present.
+  # Halfspace sponges do not add regions. Nothing automatically refines these counts.
+  # Starting heuristic for Q2: 6-10 elements per shortest retained physical
+  # wavelength in both directions, plus enough rows to resolve each thin layer.
+  # Use guided-mode wavelengths, not only bulk shear wavelengths for thin plates.
+  # nx = ceil(Lx/dx_target); ny_i = ceil(thickness_i/dy_target_i).
+  # Confirm by increasing ALL relevant counts and comparing phase/dispersion;
+  # the heuristic is not an accuracy guarantee for every mode or material.
+  nx: 640                      # Active case: 140 mm total length / 640
+  ny_per_region: [6]            # Six Q2 rows across the 1 mm plate
+  # Lagrange degree, integer >= 1, default 2 (Q2 quadrilaterals).
+  # Start at 2. Higher degree adds DOFs and tightens explicit stability limits;
+  # changing degree does not change element counts.
+  degree: 2
+  # Positive analysis/accuracy band edge [Hz], null = 3*f_center.
+  # Choose the highest meaningful source/mode frequency, not just the source peak.
+  # Controls implicit dt, automatic sampling and sizing estimates, NOT mesh counts
+  # or a signal filter. A Ricker source is broadband; inspect its retained spectrum.
+  max_frequency: 1.0e6         # Active case: twice the source peak
+  # Positive lower edge [Hz] for arrival estimates, null = f_center/5.
+  # Must be below max_frequency. Lower values can reveal slower flexural arrivals
+  # and lengthen automatic duration; this does not high-pass filter the data.
+  min_frequency: 0.1e6
+  # Optional positive shortest-wavelength bound [m] across the retained band.
+  # Supply from a dispersion calculation for complex guided structures; it tightens
+  # automatic source/sensor geometry and display limits, but never refines the mesh.
+  min_wavelength: null
+
+sensors:
+  # lambda_ref below is the centre-frequency sizing wavelength; lambda_band is
+  # its counterpart at max_frequency. Both include min_wavelength when supplied;
+  # the free isotropic plate estimate also accounts for A0.
+  # Integer >= 2, or null to fill the sensing region (automatic maximum 1001).
+  # Dispersion postprocessing needs >= 3; choose many more for useful wavenumber
+  # resolution. Aperture = (n_sensors-1)*pitch, giving delta_k ~ 2*pi/aperture.
+  n_sensors: 241               # Active case: 60 mm aperture
+  # First receiver x = source_x + sensor_offset. null chooses
+  # min(2*lambda_ref, sensing_length/4). Increase to avoid source near-field effects.
+  # Signed offsets are allowed; ensure the entire array lies inside the domain.
+  sensor_offset: 0.01
+  # Positive receiver spacing [m]; null = min(lambda_ref/8, lambda_band/4,
+  # sensing_length/100). For shortest wavelength lambda_min, pitch < lambda_min/2
+  # avoids spatial aliasing; lambda_min/4 gives margin. Nyquist k = pi/pitch.
+  # More samples at fixed pitch increase aperture; finer pitch alone does not.
+  sensor_pitch: 0.25e-3
+  # y [m] inside the domain; null follows the loaded surface/interface.
+  # Select an internal line to study through-thickness mode shapes or another layer.
+  sensor_y: null
+  # Positive stored sampling rate [Hz] or a unit string (e.g. "20 MHz").
+  # null = 20*max_frequency. Keep above twice the highest frequency in the traces;
+  # 10-20 samples per retained period is a useful starting point for waveform work.
+  # Recording stride is quantised to solver steps; inspect the actual stored times.
+  # This controls output sampling, not the integration accuracy.
+  sample_rate: "10 MHz"       # Active case: 10 samples per band-edge period
+
+postprocess:
+  # Multi-panel physics and propagation reports; references follow archived materials/boundaries.
+  structure_analysis: true
+  # A0/S0 theory-guided separation; only for a free, single isotropic plate.
+  # Requires archived model metadata. Ambiguous branches remain in the residual.
+  lamb_modes: true
+  # Receiver report: arrival/velocity, pulse evolution, particle motion,
+  # spectrograms, and CSV/JSON metrics. Set enabled=false to omit this report.
+  # Inspect A0/S0 peak selection and use a window isolating the target packet.
+  # Receiver fits exclude weak, truncated and multiple packets. Velocity needs
+  # >=3 accepted receivers, R²>=0.9 and a transit span >=2 stored samples.
+  # CSV exclusion reasons and JSON fit status explain unavailable measurements.
+  # Apparent attenuation includes spreading/interference, not just material loss.
+  # Frequency bounds accept Hz or unit strings; time bounds are seconds.
+  # A zero lower frequency selects low-pass filtering; null disables filtering.
+  wave_characterisation:
+    enabled: true
+    component: y
+    frequency_band: ["0.3 MHz", "0.8 MHz"] # Active plate case; null leaves data unfiltered
+    time_window: null          # null: entire record; e.g. [10.0e-6, 50.0e-6]
+    min_relative_amplitude: 0.01 # Exclude peaks below 1% of the array maximum
+  # Default true: dispersion FFT/figures. Set false for solver-only or batch runs.
+  run_postprocess: true
+  # Display bounds, NOT simulation filters. Nonnegative SI numbers or unit strings;
+  # each lower limit must be below its upper limit. Frequency [Hz], k [rad/m].
+  # Match the plot to the retained signal band and spatial/temporal Nyquist limits.
+  f_min: null                   # Default 0
+  f_max: "1 MHz"               # null: max(2*f_center, 1.5*f_min)
+  k_min: null                   # Default 0
+  k_max: null                   # Auto sizing wavenumber at f_max, capped by spatial
+                                # Nyquist then raised to at least 1.5*k_min
+  # Accepted legacy aliases (use only instead of the matching canonical key):
+  # f_min_disp_MHz / f_max_disp_MHz: numeric MHz; k_min_disp / k_max_disp: rad/mm.
+  # New files should use f_min/f_max/k_min/k_max with explicit unit strings instead.
+
+output:
+  # Directory path; null = results_guided_waves_{solver}. Choose a unique path
+  # per case/resolution so runs do not replace one another's outputs.
+  output_dir: results_template
+  # Default false. Enable full-field ADIOS2 VTX (.bp) snapshots for ParaView;
+  # they can be much larger than the receiver histories.
+  write_vtx: false
+  # Positive integer, default 200; target snapshot count when write_vtx=true.
+  # Increase for smooth wavefield animations; decrease to reduce output volume.
+  target_snapshots: 200
+  # Default true: overview figure. --no-postprocess also disables this figure.
+  quick_plot: true
+  # Default false. true compresses sensor_data.npz using zlib: smaller disk files
+  # at the cost of compression/decompression time.
+  compress_output: false
+  # memory (default) or disk. Choose disk for long histories: temporary mapped
+  # storage and bounded collection buffers reduce measurement-buffer RAM usage.
+  # Reserve scratch disk and final archive space; FFT processing still needs RAM.
+  history_storage: memory
+  # Nonempty selection from png, pdf, svg, eps (default all four).
+  # Use [png] for fast previews, [png, pdf] for raster previews and vector figures.
+  figure_formats: [png]        # One preview avoids generating four copies of each plot
+  # false (default): built-in serif fonts and mathtext; no LaTeX installation.
+  # true: external LaTeX rendering, requiring latex, dvipng and Ghostscript.
+  # auto: use LaTeX when the toolchain is available, otherwise built-in rendering.
+  usetex: false                # Both modes retain 190 mm figures and 10-point text
+
+# Saved simulation files also contain runtime and load_y provenance. These are
+# accepted on reload but are solver-generated metadata, not independent controls.
+# Flat-key layouts are supported as alternatives to these sections; do not define
+# the same parameter twice. Removed elems_per_wavelength/min_elems_x/min_elems_y
+# are not accepted. See configs/README.md for runnable application examples.

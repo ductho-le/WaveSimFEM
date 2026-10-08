@@ -128,7 +128,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-frequency",
         type=float,
         default=None,
-        help="Mesh sizing frequency override [Hz] (defaults to 3*f_center)",
+        help="Analysis/sampling band and implicit accuracy frequency [Hz] "
+        "(defaults to 3*f_center; does not change the mesh)",
     )
     parser.add_argument(
         "--duration", type=float, default=None, help="Total simulation duration override [s]"
@@ -181,8 +182,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 print(_MISSING_CONFIG_MESSAGE, file=sys.stderr)
         sys.exit(2 if args.dry_run else 1)
 
-    # Resolve active configuration across Defaults -> File -> CLI overrides. Resolution is
-    # deterministic, so every MPI rank reaches the same outcome and exits consistently.
+    # Resolve Defaults -> File -> CLI overrides on each rank. Filesystem errors
+    # may differ by rank; mpi_fail_fast handles unsuccessful CLI exits as well.
     try:
         if args.config:
             cfg = parse_and_resolve_config(
@@ -228,6 +229,36 @@ def main(argv: Sequence[str] | None = None) -> None:
                 formats=cfg["figure_formats"],
                 usetex=cfg["usetex"],
             )
+            if cfg["structure_analysis"]:
+                from guidedwavefem.wave_reports import write_structure_report
+
+                write_structure_report(
+                    sensor_data_file,
+                    output_dir=out_dir,
+                    **limits,
+                    formats=cfg["figure_formats"],
+                    usetex=cfg["usetex"],
+                )
+            characterisation = cfg.get("wave_characterisation")
+            if cfg.get("lamb_modes"):
+                from guidedwavefem.lamb import write_lamb_report
+
+                write_lamb_report(
+                    sensor_data_file,
+                    output_dir=out_dir,
+                    formats=cfg["figure_formats"],
+                    usetex=cfg["usetex"],
+                )
+            if characterisation and characterisation["enabled"]:
+                from guidedwavefem.characterisation import write_characterisation
+
+                write_characterisation(
+                    sensor_data_file,
+                    output_dir=out_dir,
+                    options=characterisation,
+                    formats=cfg["figure_formats"],
+                    usetex=cfg["usetex"],
+                )
 
         log(f"\n{'═' * 58}")
         log("  All tasks completed successfully!")

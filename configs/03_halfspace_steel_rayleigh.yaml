@@ -1,78 +1,107 @@
-# ==============================================================================
-# Example 03 - structure.mode: "halfspace"
 # Rayleigh surface waves on steel (rail / weld / surface-crack NDE)
-# ==============================================================================
-# Physics
-#   A normal surface load on a semi-infinite steel body (Lamb's problem)
-#   radiates P and S body waves into the depth and a non-dispersive Rayleigh
-#   surface wave that carries most of the energy along the surface:
-#     c_L ≈ 5.92 km/s, c_T ≈ 3.22 km/s, c_R ≈ 2.98 km/s (nu = 0.29).
-#   The Rayleigh wave is confined to about one wavelength (≈ 3 mm at 1 MHz)
-#   below the surface, so it is sensitive to near-surface defects such as rolling
-#   contact fatigue cracks in rail heads. The 2D-FFT shows a sharp straight line
-#   f = c_R k / (2 pi) through the origin, along with bulk wave radiation cones.
+# A normal surface load radiates bulk waves and a non-dispersive Rayleigh wave
+# (c_R ≈ 2.98 km/s), giving a straight dispersion branch f = c_R k / (2 pi).
+# A five-cycle Hann-windowed traction pulse excites the surface at 1 MHz.
+# The 5 mm undamped depth is approximately 1.7 Rayleigh wavelengths at that
+# frequency; penetration and bottom-boundary effects require a depth study.
 #
-# Truncation of the halfspace
-#   The depth is truncated at 18 mm: 8 mm physical zone (> 2.5 lambda_R at f0)
-#   above a 10 mm absorbing sponge (≈ 1.7 P-wavelengths at f0). Low-frequency
-#   bulk waves are only partially absorbed; this does not affect the surface wave.
+# Application
+#   Rayleigh-wave velocity measurement for steel surface inspection.
+# Model and numerical scope
+#   Flat, homogeneous 2D plane-strain halfspace approximation. The sizing band
+#   extends from 0.5 to 2 MHz; figures display 0.5-1.5 MHz around the pulse peak.
+#   Q2 elements discretise the truncated depth and lateral absorbing regions.
+#   Compare the measured speed with c_R ~ 2.98 km/s and establish mesh, time-step,
+#   and truncation-depth convergence over the 120-180 mm source-receiver offsets.
+# Usage
+#   sh tools/run_cpu4.sh -c configs/03_halfspace_steel_rayleigh.yaml
+#   Add --dry-run to inspect resource estimates. Run from the repository root.
+#   The launcher uses four MPI ranks with one library thread per rank.
+# Conventions
+#   Numeric inputs use SI units; null selects automatic sizing. Mesh counts are
+#   elements. See template.yaml for parameter definitions and README.md for setup.
 #
 # References
 #   - I. A. Viktorov (1967), "Rayleigh and Lamb Waves: Physical Theory and Applications",
 #     Plenum Press, New York.
 #   - D. Hesse, P. Cawley (2006), "Surface wave modes in rails",
 #     J. Acoust. Soc. Am. 120, 733-740.
-# ==============================================================================
 
 solver:
   type: "explicit"
-  CFL: 0.5                      # Fraction (0, 1] of the rigorous RK4 stability limit
-  time_factor: 1.2              # T = 1.2 * sensing_length / c_R + pulse length
+  CFL: 0.8                     # Fraction of the assembled RK4 stability limit
+  device: cpu
+  precision: double
+  dt: null                     # Automatic assembled stability certificate
+  duration: null               # Automatic Rayleigh travel time plus source duration
+  time_factor: 1.2             # Travel-time multiplier for automatic duration
 
 geometry:
-  sensing_length: 0.08          # [m] 80 mm along the surface
+  sensing_length: 0.2           # [m] Observation region, excluding lateral sponges
   absorb_length: 0.03           # [m] 30 mm lateral sponges (10 Rayleigh wavelengths)
 
 structure:
   mode: "halfspace"
   halfspace:
     name: "Rail steel"
-    thickness: 18.0e-3          # [m] Truncation depth (8 mm physical + 10 mm sponge)
+    thickness: 15.0e-3          # [m] Total truncation depth
     absorb_depth: 10.0e-3       # [m] Bottom sponge inside the truncation depth
     material_model: "isotropic"
     rho: 7850.0                 # [kg/m^3]
     E: 210.0e9                  # [Pa]
-    nu: 0.29                    # [-]
+    nu: 0.29
+
+absorbing_boundaries:
+  alpha: null                  # Frequency-scaled damping, only inside sponges
+  beta: null
 
 excitation:
-  source_type: "ricker"
-  f_center: 1.0e6               # [Hz] 1 MHz (typical angle-beam/wedge frequency)
+  source_type: "tone_burst"     # Hann-windowed sinusoidal traction
+  n_cycles: 5                  # Five cycles; pulse duration = 5 us at 1 MHz
+  f_center: 1.0e6               # [Hz]
   traction_max: 1.0e6           # [Pa]
   excitation_width: 2.0e-3      # [m]
-  source_x: null                # [m] null = absorb_length + lambda_ref (<= sensing_length / 8)
-  source_fx: 0.0                # Normal point-like load (Lamb's problem)
+  source_x: null               # [m] Automatic source position inside the sensing region
+  source_fx: 0.0
   source_fy: 1.0
 
 mesh:
-  elems_per_wavelength: 8       # Per shear wavelength at max_frequency
-  min_elems_x: 100
-  min_elems_y: 4
+  nx: 920                      # Full 260 mm domain; dx = 0.283 mm
+  ny_per_region: [60]           # Steel halfspace, including bottom sponge
   degree: 2
-  max_frequency: 1.5e6          # [Hz]
+  max_frequency: 1.5e6          # [Hz] Accuracy/sampling band edge; not a source filter
+  min_frequency: 0.5e6          # [Hz] Longest target Rayleigh wavelength ~6 mm
+  min_wavelength: null          # Homogeneous Rayleigh estimate is available
 
 sensors:
-  n_sensors: 241                # Dense receiver array along the free surface (y = 0)
-  sensor_offset: 0.01           # [m] 10 mm source-to-first-receiver
-  sensor_pitch: 0.25e-3         # [m] 0.25 mm pitch (60 mm aperture -> Nyquist 12.6 rad/mm)
+  n_sensors: 241                # Free surface, y = 0
+  sensor_offset: 0.12           # [m]
+  sensor_pitch: 0.25e-3         # [m]
+  sensor_y: null                # Free surface y = 0
+  sample_rate: "20 MHz"         # 10 samples/period at 2 MHz
 
+# Display limits do not filter the excitation or recorded histories.
 postprocess:
+  structure_analysis: true    # Structure-specific dispersion, wave references and transport panels
   run_postprocess: true
-  f_min: 0.0
-  f_max: "2 MHz"
+  # Receiver reports: distinguish Rayleigh peaks from bulk-wave arrivals.
+  wave_characterisation:
+    enabled: true
+    component: y
+    frequency_band: ["0.7 MHz", "1.3 MHz"]
+    time_window: null          # Full record; specify [start, end] in seconds to isolate a packet
+    min_relative_amplitude: 0.01 # Exclude peaks below 1% of the array maximum
+  f_min: "0.5 MHz"
+  f_max: "1.5 MHz"
   k_min: 0.0
   k_max: "4.5 rad/mm"           # k_R(2 MHz) ≈ 4.2 rad/mm
 
+# Receiver histories and figures; full-field output is optional.
 output:
   output_dir: "results_03_halfspace_steel_rayleigh"
   write_vtx: false
-  target_snapshots: 200
+  quick_plot: true
+  compress_output: false
+  history_storage: memory
+  figure_formats: [png]
+  usetex: false                # true enables external LaTeX; default needs no TeX install

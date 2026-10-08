@@ -183,11 +183,11 @@ def _small_plate_cfg(**overrides):
     from guidedwavefem.config import parse_and_resolve_config
 
     cfg = {
-        "solver": {"type": "explicit"},
+        "solver": {"type": "explicit", "CFL": 0.8},
         "geometry": {"sensing_length": 0.01, "absorb_length": 0.003},
         "excitation": {"f_center": 5e5, "source_x": 0.004},
         "sensors": {"sensor_offset": 0.001, "sensor_pitch": 0.001, "n_sensors": 4},
-        "mesh": {"max_frequency": 5e5, "min_elems_x": 12, "min_elems_y": 2, "degree": 2},
+        "mesh": {"max_frequency": 5e5, "nx": 26, "ny_per_region": [2], "degree": 2},
         "structure": {"mode": "1_layer", "single_layer": dict(ALUMINUM)},
         "postprocess": {"run_postprocess": False},
     }
@@ -206,13 +206,13 @@ def _assembled(form):
     return matrix
 
 
-@pytest.mark.parametrize("degree", [1, 2])
-def test_element_bounds_dominate_assembled_bounds(degree):
+@pytest.mark.parametrize("degree,nx,rows", [(1, 43, 3), (2, 26, 2)])
+def test_element_bounds_dominate_assembled_bounds(degree, nx, rows):
     """The pre-mesh element bounds never underestimate the solver's Gershgorin bounds."""
     from guidedwavefem.materials import element_operator_bounds
     from guidedwavefem.solvers import build_problem
 
-    cfg = _small_plate_cfg(mesh__degree=degree)
+    cfg = _small_plate_cfg(mesh__degree=degree, mesh__nx=nx, mesh__ny_per_region=[rows])
     problem = build_problem(cfg)
     u, v = problem.trial_fn, problem.test_fn
     K, M, C = (
@@ -298,7 +298,9 @@ def test_rk4_is_stable_just_below_the_rigorous_limit(beta):
     from guidedwavefem.solvers import build_problem
 
     overrides = {} if beta is None else {"absorbing_boundaries__beta": beta}
-    problem = build_problem(_small_plate_cfg(mesh__degree=1, **overrides))
+    problem = build_problem(
+        _small_plate_cfg(mesh__degree=1, mesh__nx=43, mesh__ny_per_region=[3], **overrides)
+    )
     u, v = problem.trial_fn, problem.test_fn
     mats = [
         _assembled(f) for f in (problem.stiffness(u, v), problem.mass(u, v), problem.damping(u, v))

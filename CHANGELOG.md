@@ -5,6 +5,54 @@ All notable changes are documented here. Versions follow
 
 ## [Unreleased]
 
+### Breaking changes
+
+- Mesh resolution is supplied explicitly as `mesh.nx` and
+  `mesh.ny_per_region`, with one vertical count per region in bottom-to-top
+  order. Material properties and frequency settings no longer refine the mesh.
+  Removed `elems_per_wavelength`, `min_elems_x`, and `min_elems_y`, including
+  regional overrides; legacy inputs raise migration guidance.
+- Explicit simulations require a user-supplied `solver.CFL` in `(0, 1]`.
+  The time step is calculated from the assembled stability bound, then rounded
+  down to fit the recording grid. The validated `solver.dt` override remains
+  available. Implicit Newmark retains its accuracy-based time-step control.
+- Preflight reports actual cell dimensions (`h_x`, `h_y_per_region`) in place
+  of automatically selected `h_target` and `lambda_min`. `mesh.max_frequency`
+  continues to control the analysis/sampling band and implicit accuracy.
+
+### Changed
+
+- Standardize all figure exports at 190 mm width with 10-point text,
+  including ticks, legends and colourbars. Compact panel layouts replace figure
+  headers and explanatory annotations; accompanying README files retain the
+  interpretation and provenance. `output.usetex` defaults to `false`, using
+  Matplotlib's bundled serif fonts and mathtext without an external TeX install.
+  Set it to `true` to require LaTeX/dvipng/Ghostscript, or `auto` to use LaTeX
+  when the toolchain is available and built-in rendering otherwise.
+- Add default structure-aware multi-panel reports in `wave_physics/`, selected
+  from archived geometry and material provenance. Free plates, halfspaces,
+  viscoelastic stacks, layered ground and solid–fluid systems receive applicable
+  references and distinct diagnostics, with JSON/CSV/NPZ measurement exports.
+- Phase-velocity imaging screens weak, aliased and ambiguous peaks; polarization
+  requires coherent components. Spatial decay uses untapered Fourier amplitudes
+  to avoid arrival-dependent window bias. Six explicitly synthetic structure
+  previews are available through `tools/preview_structure_reports.py`.
+- Post-processing figures share consistent typography, physical units and
+  annotated amplitude scales. Dispersion handles arrays left of the source,
+  honours recorded geometry, caps display bounds at sampling limits and retains
+  slow modes when choosing automatic wavenumber bounds.
+- Packet reports screen incomplete or ambiguous arrivals, resolve peak times
+  below sample spacing, qualify velocity/decay fits and export fit residuals,
+  preprocessing and per-receiver exclusion reasons (JSON schema v2).
+- Lamb reports show both propagation directions, sampling/resolution margins,
+  usable bands, shared-scale input/mode/residual maps and reconstruction
+  diagnostics. Report exports are atomic; analytical previews can be generated
+  with `tools/preview_postprocessing.py`.
+- Examples and numerical tests use explicit counts preserving their previous
+  resolved meshes. The resolution comparison tool now refines counts with
+  `--refinement-factor` and time controls with `--step-factor`; resumed runs
+  must match the requested model inputs.
+
 ## [0.3.0] — 2026-10-03 — production hardening
 
 ### Breaking changes

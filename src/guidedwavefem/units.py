@@ -116,7 +116,7 @@ def fmt_frequency(hertz: float, digits: int = 4) -> str:
 QuantityKind = Literal["frequency", "wavenumber"]
 
 _PARSE_UNITS: dict[str, dict[str, float]] = {
-    "frequency": {"hz": 1.0, "khz": 1e3, "mhz": 1e6, "ghz": 1e9},
+    "frequency": {"Hz": 1.0, "mHz": 1e-3, "kHz": 1e3, "MHz": 1e6, "GHz": 1e9},
     "wavenumber": {"rad/m": 1.0, "rad/cm": 1e2, "rad/mm": 1e3, "rad/km": 1e-3},
 }
 _QUANTITY = re.compile(r"^\s*([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*([A-Za-z/]*)\s*$")
@@ -140,7 +140,8 @@ def parse_quantity(value: object, kind: QuantityKind) -> float:
         if not match:
             raise ValueError(f"cannot parse {kind} {value!r}; e.g. '{_example(kind)}'")
         number, unit = match.groups()
-        unit_key = unit.lower()
+        # Accept case variants of the unit name, but never fold SI prefixes.
+        unit_key = unit[:-2] + "Hz" if kind == "frequency" and unit[-2:].lower() == "hz" else unit
         if unit_key and unit_key not in units:
             choices = ", ".join(_display_units(kind))
             raise ValueError(f"unknown {kind} unit {unit!r} in {value!r}; use one of: {choices}")
@@ -153,7 +154,7 @@ def parse_quantity(value: object, kind: QuantityKind) -> float:
 
 
 def _display_units(kind: QuantityKind) -> list[str]:
-    return ["Hz", "kHz", "MHz", "GHz"] if kind == "frequency" else list(_PARSE_UNITS[kind])
+    return list(_PARSE_UNITS[kind])
 
 
 def _example(kind: QuantityKind) -> str:

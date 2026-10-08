@@ -37,6 +37,7 @@ _LOCAL_SIZE_VARS: tuple[str, ...] = (
     "MPI_LOCALNRANKS",  # MPICH / Hydra, Intel MPI
     "MV2_COMM_WORLD_LOCAL_SIZE",  # MVAPICH2
     "SLURM_STEP_TASKS_PER_NODE",  # srun step, e.g. "4(x2)" or "4,3"
+    "SLURM_TASKS_PER_NODE",
 )
 # Total ranks; used only when no per-node count is available (assumes one node).
 _WORLD_SIZE_VARS: tuple[str, ...] = (
@@ -83,10 +84,32 @@ def ranks_per_node(environ: Mapping[str, str] | None = None) -> int:
     """
     env = os.environ if environ is None else environ
     for name in (*_LOCAL_SIZE_VARS, *_WORLD_SIZE_VARS):
-        count = _leading_int(env.get(name))
+        if name in ("SLURM_STEP_TASKS_PER_NODE", "SLURM_TASKS_PER_NODE"):
+            count = _slurm_local_tasks(env.get(name), env.get("SLURM_NODEID", "0"))
+        else:
+            count = _leading_int(env.get(name))
         if count is not None and count > 0:
             return count
     return 1
+
+
+def _slurm_local_tasks(value: str | None, node_id: str) -> int | None:
+    """Select a node without materializing potentially large repetition lists."""
+    if not value or not node_id.isdecimal():
+        return None
+    node = int(node_id)
+    selected = None
+    for entry in value.split(","):
+        match = re.fullmatch(r"\s*(\d+)(?:\(x(\d+)\))?\s*", entry)
+        if match is None:
+            return None
+        count, repeat = int(match[1]), int(match[2] or 1)
+        if count < 1 or repeat < 1:
+            return None
+        if 0 <= node < repeat:
+            selected = count
+        node -= repeat
+    return selected
 
 
 def available_cpus() -> int:

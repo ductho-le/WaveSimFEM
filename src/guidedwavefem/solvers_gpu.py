@@ -8,8 +8,8 @@ Design
   only in their array library.
 * **Stacked operator.** The state ``z = [u; v]`` is advanced with a single
   sparse product ``[K | C] @ z`` per stage instead of two.
-* **Allocation-free stages.** All stage vectors are preallocated; updates use
-  ``out=``/in-place operations.
+* **Preallocated stage vectors.** Updates use ``out=``/in-place operations;
+  sparse products may allocate temporary vectors in the array library.
 * **Device-resident telemetry.** Sensor samples (decimated to the configured
   sample rate) are written into a bounded on-device ring buffer and flushed to
   host memory in large chunks, so there is no host synchronization per time step.
@@ -297,8 +297,27 @@ def make_backend(
 def _as_csr(matrix: CsrLike, n: int) -> sp.csr_matrix:
     if isinstance(matrix, tuple):
         indptr, indices, data = matrix
-        return sp.csr_matrix((data, indices, indptr), shape=(n, n))
-    return sp.csr_matrix(matrix)
+        for name, values in (("indptr", indptr), ("indices", indices)):
+            values = np.asarray(values)
+            if values.ndim != 1 or values.dtype.kind not in "iu":
+                raise ValueError(f"CSR {name} must be a one-dimensional integer array")
+        matrix = sp.csr_matrix((data, indices, indptr), shape=(n, n))
+    else:
+        matrix = sp.csr_matrix(matrix, copy=True)
+    matrix.check_format(full_check=True)
+    if np.iscomplexobj(matrix.data) or not np.isfinite(matrix.data).all():
+        raise ValueError("CSR coefficients must be real and finite")
+    return matrix
+
+
+def _integer_parameter(value: int, name: str, minimum: int) -> int:
+    if (
+        isinstance(value, (bool, np.bool_))
+        or not isinstance(value, (int, np.integer))
+        or value < minimum
+    ):
+        raise ValueError(f"{name} must be an integer >= {minimum}")
+    return int(value)
 
 
 @dataclass(frozen=True)
@@ -327,6 +346,8 @@ def integrate_explicit_rk4(
     log_func: Callable[[str], None] | None = None,
     history_chunk_bytes: int = DEFAULT_HISTORY_CHUNK_BYTES,
     sample_every: int = 1,
+    history_callback: Callable[[np.ndarray, np.ndarray], None] | None = None,
+    retain_history: bool = True,
 ) -> ExplicitRK4Result:
     """Integrate ``M_L ü + C u̇ + K u = s(t) f`` from rest with classical RK4.
 
@@ -345,35 +366,62 @@ def integrate_explicit_rk4(
     report_interval
         Progress/finite-check cadence in steps (``0`` → every ``n_steps//20``).
     history_chunk_bytes
-        Upper bound of the on-device sensor ring buffer.
+        Sensor ring-buffer budget (at least one sample is buffered). With no
+        sensors, bounds the timestamps per streamed chunk instead.
     sample_every
         Sensor sampling cadence in steps (samples at ``t = 0, sample_every·dt, ...``).
+    history_callback
+        Receive chronological chunks ``(times, interleaved_sensor_values)`` on
+        the host, including the initial sample. Callback exceptions propagate.
+    retain_history
+        Set False with a history_callback to stream without retaining measurement
+        histories. Returned histories have zero rows; the full ``times`` array
+        still describes all samples and uses memory proportional to their count.
 
     Raises
     ------
     FloatingPointError
         If the state becomes non-finite (instability or bad input).
     """
-    if n_steps < 1 or not (np.isfinite(dt) and dt > 0):
-        raise ValueError("n_steps must be >= 1 and dt finite and positive")
-    if int(sample_every) != sample_every or sample_every < 1:
-        raise ValueError("sample_every must be a positive integer")
-    sample_every = int(sample_every)
+    n_steps = _integer_parameter(n_steps, "n_steps", 1)
+    if not isinstance(retain_history, bool) or (not retain_history and history_callback is None):
+        raise ValueError("retain_history=False requires a history_callback")
+    sample_every = _integer_parameter(sample_every, "sample_every", 1)
+    save_every = _integer_parameter(save_every, "save_every", 1)
+    report_interval = _integer_parameter(report_interval, "report_interval", 0)
+    history_chunk_bytes = _integer_parameter(history_chunk_bytes, "history_chunk_bytes", 1)
+    if isinstance(dt, (bool, np.bool_)) or not np.isscalar(dt) or not (np.isfinite(dt) and dt > 0):
+        raise ValueError("dt must be finite and positive")
+    inv_mass, load_shape = np.asarray(inv_mass), np.asarray(load_shape)
+    for name, vector in (("inv_mass", inv_mass), ("load_shape", load_shape)):
+        if (
+            vector.ndim != 1
+            or vector.size == 0
+            or np.iscomplexobj(vector)
+            or not np.isfinite(vector).all()
+        ):
+            raise ValueError(f"{name} must be a nonempty, finite real vector")
+    if np.any(inv_mass <= 0):
+        raise ValueError("inv_mass must be strictly positive")
     log = log_func or (lambda _msg: None)
     n = len(inv_mass)
     K = _as_csr(stiffness, n)
     C = _as_csr(damping, n)
-    S = sp.csr_matrix(sensor_matrix)
+    S = _as_csr(sensor_matrix, n)
     if K.shape != (n, n) or C.shape != (n, n) or len(load_shape) != n or S.shape[1] != n:
         raise ValueError("Inconsistent operator dimensions")
     n_rows = S.shape[0]
+    if n_rows % 2:
+        raise ValueError("sensor_matrix must have paired x/y rows")
     n_sensors = n_rows // 2
     stacked = sp.hstack([K, C], format="csr")
     stacked.eliminate_zeros()  # sponge damping vanishes outside the absorbing layers
 
     n_samples = n_steps // sample_every + 1
     times = np.arange(n_samples, dtype=np.float64) * (sample_every * dt)
-    host_hist = np.zeros((n_samples, n_rows), dtype=backend.dtype)
+    host_hist = np.zeros((n_samples if retain_history else 0, n_rows), dtype=backend.dtype)
+    if history_callback is not None:
+        history_callback(times[:1].copy(), np.zeros((1, n_rows), dtype=backend.dtype))
     check_every = report_interval if report_interval > 0 else max(n_steps // 20, 1)
     h2 = 0.5 * dt
 
@@ -394,10 +442,8 @@ def integrate_explicit_rk4(
         du, dv = acc[:n], acc[n:]
         a_scr = scratch[n:]
 
-        itemsize = backend.dtype.itemsize
-        chunk_rows = int(
-            min(n_samples - 1 or 1, max(1, history_chunk_bytes // max(1, n_rows * itemsize)))
-        )
+        sample_bytes = n_rows * backend.dtype.itemsize if n_rows else times.dtype.itemsize
+        chunk_rows = int(min(n_samples - 1 or 1, max(1, history_chunk_bytes // sample_bytes)))
         ring = backend.zeros((chunk_rows, n_rows)) if n_rows else None
         backend.synchronize()
         log(
@@ -411,9 +457,17 @@ def integrate_explicit_rk4(
             backend.force_balance(a, float(source(t)), load, r, inv_m)
 
         def flush(last_row: int, count: int) -> None:
-            if ring is not None and count:
+            if count:
                 first = last_row - count + 1
-                host_hist[first : last_row + 1] = backend.to_host(ring[:count])
+                values = (
+                    backend.to_host(ring[:count])
+                    if ring is not None
+                    else np.empty((count, 0), dtype=backend.dtype)
+                )
+                if retain_history:
+                    host_hist[first : last_row + 1] = values
+                if history_callback is not None:
+                    history_callback(times[first : last_row + 1].copy(), values)
 
         t_loop = pytime.perf_counter()
         pending = 0
@@ -445,8 +499,9 @@ def integrate_explicit_rk4(
             # z += dt/6 * acc
             backend.add_scaled(z, dt / 6.0, acc, scratch)
 
-            if ring is not None and (step + 1) % sample_every == 0:
-                ring[pending] = backend.spmv(S_dev, u)
+            if (step + 1) % sample_every == 0:
+                if ring is not None:
+                    ring[pending] = backend.spmv(S_dev, u)
                 pending += 1
                 row += 1
                 if pending == chunk_rows:

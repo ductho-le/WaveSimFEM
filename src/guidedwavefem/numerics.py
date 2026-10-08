@@ -271,33 +271,70 @@ class PointSensors:
             return np.empty((0, 2))
         return field.eval(self.points, self.cells).reshape(-1, 2)
 
-    def gather(self, local: np.ndarray) -> np.ndarray | None:
-        """Assemble ``(n_times, n_points)`` histories on rank 0 via ``Gatherv``.
+    def gather(
+        self, local: np.ndarray, *, out: np.ndarray | None = None, chunk_bytes: int = 8 * 1024**2
+    ) -> np.ndarray | None:
+        """Assemble histories on rank 0 using bounded ``Gatherv`` chunks.
 
-        Each rank sends only its owned columns as one contiguous buffer, which
-        avoids pickling and the 2 GiB limit of object-based collectives.
-        Returns ``None`` on non-root ranks.
+        ``out`` may be a disk-backed array on rank 0. Transfer buffers contain
+        at most ``chunk_bytes`` each, or one complete sample row if larger.
+        Returns ``None`` on other ranks. All ranks must supply the same number
+        of times, dtype and chunk budget.
         """
         from mpi4py.util.dtlib import from_numpy_dtype
 
         local = np.asarray(local)
+        error = None
+        if local.ndim != 2 or local.shape[1] != len(self.indices):
+            error = "History columns must match the locally owned sensors"
+        if not isinstance(chunk_bytes, int) or isinstance(chunk_bytes, bool) or chunk_bytes < 1:
+            error = "chunk_bytes must be a positive integer"
+        # Validate collectively so a bad rank-local argument cannot strand peers
+        # in a later Gatherv when this helper is used outside run_simulation.
+        metadata = self.comm.allgather((error, local.shape, local.dtype.str, chunk_bytes))
+        errors = [entry[0] for entry in metadata if entry[0] is not None]
+        if errors:
+            raise ValueError(errors[0])
+        if any(
+            shape[0] != local.shape[0] or dtype != local.dtype.str or budget != chunk_bytes
+            for _, shape, dtype, budget in metadata
+        ):
+            raise ValueError("History times, dtype and chunk budget must agree across ranks")
         n_times = local.shape[0]
-        send = np.ascontiguousarray(local.T)  # (n_owned, n_times)
-        counts = np.asarray(self.comm.gather(send.size, root=0) or [], dtype=np.int64)
+        owners = np.asarray(self.comm.gather(len(self.indices), root=0) or [], dtype=np.int64)
         all_indices = self.comm.gather(self.indices, root=0)
+        rows = max(1, chunk_bytes // max(1, self.count * local.dtype.itemsize))
+        mpi_dtype = from_numpy_dtype(local.dtype)
+        if (
+            self.comm.rank == 0
+            and out is not None
+            and (
+                out.shape != (n_times, self.count)
+                or out.dtype != local.dtype
+                or not out.flags.writeable
+            )
+        ):
+            error = "Gather output must be writable with the global history shape and dtype"
+        error = self.comm.bcast(error, root=0)
+        if error is not None:
+            raise ValueError(error)
         if self.comm.rank == 0:
-            recv = np.empty(int(counts.sum()), dtype=local.dtype)
-            displs = np.concatenate([[0], np.cumsum(counts)[:-1]])
-            recv_spec = [recv, counts, displs, from_numpy_dtype(local.dtype)]
-        else:
+            result = np.empty((n_times, self.count), dtype=local.dtype) if out is None else out
+            indices = np.concatenate(all_indices).astype(np.intp)
+            recv = np.empty(min(n_times, rows) * self.count, dtype=local.dtype)
+        for first in range(0, n_times, rows):
+            last = min(first + rows, n_times)
+            size = last - first
+            send = np.ascontiguousarray(local[first:last].T)
             recv_spec = None
-        self.comm.Gatherv([send, from_numpy_dtype(local.dtype)], recv_spec, root=0)
-        if self.comm.rank:
-            return None
-        result = np.empty((n_times, self.count), dtype=local.dtype)
-        columns = recv.reshape(-1, n_times)
-        result[:, np.concatenate(all_indices).astype(np.intp)] = columns.T
-        return result
+            if self.comm.rank == 0:
+                counts = owners * size
+                displs = np.concatenate([[0], np.cumsum(counts)[:-1]])
+                recv_spec = [recv[: size * self.count], counts, displs, mpi_dtype]
+            self.comm.Gatherv([send, mpi_dtype], recv_spec, root=0)
+            if self.comm.rank == 0:
+                result[first:last, indices] = recv[: size * self.count].reshape(-1, size).T
+        return result if self.comm.rank == 0 else None
 
 
 def validate_tensor(

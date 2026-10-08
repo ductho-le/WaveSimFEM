@@ -47,6 +47,22 @@ def test_cli_version(capsys):
     assert __version__ in capsys.readouterr().out
 
 
+def test_cli_characterisation_existing_archive(tmp_path):
+    import json
+
+    archive = _write_archive(tmp_path / "sensor_data.npz")
+    config = tmp_path / "analysis.yaml"
+    config.write_text(
+        "postprocess:\n  wave_characterisation:\n    enabled: true\n"
+        "output:\n  figure_formats: [png]\n  usetex: false\n",
+        encoding="utf-8",
+    )
+    main(["-c", str(config), "--postprocess", str(archive), "--output", str(tmp_path)])
+    report = json.loads((tmp_path / "characterisation/metrics.json").read_text())
+    assert report["options"]["enabled"] is True
+    assert len(report["figures"]) == 4
+
+
 def test_cli_generate_config(tmp_path):
     out_yaml = tmp_path / "custom_template.yaml"
     main(["--generate-config", str(out_yaml)])
@@ -93,7 +109,9 @@ def test_cli_dry_run_every_example(example, capsys):
 
 
 def test_cli_quiet_suppresses_info(capsys):
-    main(["-c", str(CONFIG_01), "--dry-run", "--quiet"])
+    # Supply the recording window so this checks informational output alone;
+    # warnings about automatic higher-mode arrivals must survive quiet mode.
+    main(["-c", str(CONFIG_01), "--duration", "1e-4", "--dry-run", "--quiet"])
     assert capsys.readouterr().out == ""
 
 
@@ -124,10 +142,16 @@ def test_cli_missing_config_file_is_clean_error(tmp_path, capsys):
 
 
 def test_cli_postprocess(tmp_path):
+    import json
+
     archive = _write_archive(tmp_path / "sensor_data.npz")
     out_dir = tmp_path / "postprocessed"
     main(["--postprocess", str(archive), "--output", str(out_dir)])
     assert (out_dir / "full_analysis.png").exists()
+    report = json.loads((out_dir / "wave_physics/report.json").read_text())
+    assert report["profile"]["provenance"] == "legacy"
+    assert not report["profile"]["lamb_applicable"]
+    assert (out_dir / "wave_physics/dispersion_and_modes.png").exists()
 
 
 def test_cli_postprocess_unit_string_limits(tmp_path):
@@ -164,6 +188,21 @@ def test_cli_postprocess_respects_config_formats(tmp_path):
     out_dir = tmp_path / "out"
     main(["-c", str(cfg_path), "--postprocess", str(archive), "--output", str(out_dir)])
     assert sorted(p.suffix for p in out_dir.glob("full_analysis.*")) == [".png"]
+    assert sorted(p.suffix for p in out_dir.glob("wave_physics/dispersion_and_modes.*")) == [".png"]
+
+
+def test_cli_structure_report_can_be_disabled(tmp_path):
+    archive = _write_archive(tmp_path / "sensor_data.npz")
+    config = tmp_path / "post.yaml"
+    config.write_text(
+        "postprocess:\n  structure_analysis: false\n"
+        "output:\n  figure_formats: [png]\n  usetex: false\n",
+        encoding="utf-8",
+    )
+    destination = tmp_path / "out"
+    main(["-c", str(config), "--postprocess", str(archive), "--output", str(destination)])
+    assert (destination / "full_analysis.png").exists()
+    assert not (destination / "wave_physics").exists()
 
 
 def test_cli_postprocess_missing_file(tmp_path, capsys):

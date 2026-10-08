@@ -88,7 +88,7 @@ GuidedWaveFEM/
 | [`guidedwavefem.sources`](src/guidedwavefem/sources.py) | Excitation time functions: broadband Ricker wavelet and Hann-windowed $N$-cycle tone burst, with pulse delay/duration helpers. |
 | [`guidedwavefem.units`](src/guidedwavefem/units.py) | Scale-aware display units (s/ms/μs, m/mm, Hz/kHz/MHz, rad/m or rad/mm) for logs and figures, and parsing of quantities such as `"2 MHz"` or `"3 rad/mm"`. |
 | [`guidedwavefem.solvers`](src/guidedwavefem/solvers.py) | Quadrilateral mesh creation, interface-conforming layering, 5th-order ALID sponges, assembly, implicit Newmark-$\beta$ and explicit lumped-mass RK4 drivers, provenance, and output files. |
-| [`guidedwavefem.solvers_gpu`](src/guidedwavefem/solvers_gpu.py) | Backend-agnostic, allocation-free RK4 engine for single-process runs on CPU (SciPy) or CUDA (CuPy/PyTorch); exact sparse sensor operator; device-resident sensor buffering; non-finite detection. |
+| [`guidedwavefem.solvers_gpu`](src/guidedwavefem/solvers_gpu.py) | Backend-agnostic RK4 engine with preallocated stage vectors for single-process runs on CPU (SciPy) or CUDA (CuPy/PyTorch); exact sparse sensor operator; device-resident sensor buffering; non-finite detection. |
 | [`guidedwavefem.device`](src/guidedwavefem/device.py) | Discovery of usable accelerators and strict validation of device requests (`auto`, `cpu`, `cuda`, `cuda:N`, `mps`). |
 | [`guidedwavefem.analysis`](src/guidedwavefem/analysis.py) | Zero-phase Butterworth filtering, separable 2D Hann windowing, forward-wave 2D FFT, B-scan with half-pixel alignment, and figure export (`.png`, `.pdf`, `.svg`, `.eps`) via the object-oriented Matplotlib API with scoped style settings. |
 | [`guidedwavefem.reporting`](src/guidedwavefem/reporting.py) | Package logger (`guidedwavefem`), verbosity control, banner and structure tables. |
@@ -181,7 +181,7 @@ $$
 \mathbf{v}^T \mathbf{C} \mathbf{v} > 0 \quad \forall \mathbf{v} \neq \mathbf{0} \iff \lambda_i(\mathbf{C}) > 0
 $$
 
-Wave speed bounds for mesh sizing are derived from the eigenvalues of the orthonormal Kelvin-scaled tensor $\mathbf{S} \mathbf{C} \mathbf{S}$, where $\mathbf{S} = \mathrm{diag}(1, 1, \sqrt{2})$.
+Bulk wave speed bounds are derived from the eigenvalues of the orthonormal Kelvin-scaled tensor $\mathbf{S} \mathbf{C} \mathbf{S}$, where $\mathbf{S} = \mathrm{diag}(1, 1, \sqrt{2})$. Guided modes can have shorter wavelengths and slower packet speeds. Choose and validate explicit mesh counts for anisotropic structures; `mesh.min_wavelength` constrains automatic source, sensor and display defaults, while `solver.min_group_velocity` constrains the arrival-time estimate.
 
 #### (c) Viscoelastic Solid (Kelvin–Voigt)
 Viscoelastic materials incorporate rate-dependent dissipation proportional to the strain rate:
@@ -339,7 +339,7 @@ The integer step count is fitted exactly: $N_{\mathrm{steps}} = \lceil T_{\mathr
 
 **Why $R = 2.6$.** For a mode with frequency $\omega$ and damping rate $\zeta$ (both nonnegative, $\zeta \le B_C$, $\omega^2 \le B_K$), the eigenvalues of the first-order system satisfy $|\lambda| \le \max(\omega, \zeta) \le \max(\sqrt{B_K}, B_C)$ and $\mathrm{Re}\,\lambda \le 0$. Every $\lambda\,\Delta t$ therefore lies in the closed left half-disk of radius $\Delta t \max(\sqrt{B_K}, B_C)$. The largest such half-disk inside the RK4 stability region $|1 + z + z^2/2 + z^3/6 + z^4/24| \le 1$ has radius $2.6156$ (computed by [`rk4_half_disk_radius`](src/guidedwavefem/numerics.py) and checked in the tests); the constant [`RK4_STABILITY_RADIUS`](src/guidedwavefem/numerics.py) $= 2.6$ keeps a small margin.
 
-Gershgorin row sums can only *over*-estimate the spectral radius, so the step is guaranteed stable. The bound includes the assembled sponge and viscous damping, so strongly damped sponges or Kelvin–Voigt layers can reduce $\Delta t$ (a warning is printed when damping is the limiting term). The `--dry-run` preflight evaluates the same bound element-by-element before meshing; that value is never larger than the solver's.
+Gershgorin row sums can only *over*-estimate the spectral radius, so the step is guaranteed stable. Supply `solver.CFL` explicitly in `(0, 1]`; there is no implicit CFL default. The mesh uses the exact element counts in the configuration. The bound includes the assembled sponge and viscous damping, so strongly damped sponges or Kelvin–Voigt layers can reduce $\Delta t$ (a warning is printed when damping is the limiting term). The `--dry-run` preflight evaluates the same bound element-by-element before meshing; that value is never larger than the solver's.
 
 ##### (e) Execution Engines
 - **Single process** (`mpiexec -n 1` or no MPI): the array engine in [`solvers_gpu.py`](src/guidedwavefem/solvers_gpu.py) advances the stacked state $[\mathbf{u};\mathbf{v}]$ with one sparse product $[\mathbf{K}\,|\,\mathbf{C}]\,[\mathbf{u};\mathbf{v}]$ per stage, preallocated buffers, and a bounded on-device sensor buffer flushed to the host in chunks. Backends: SciPy (CPU), CuPy or PyTorch (CUDA).
@@ -381,13 +381,13 @@ $$
 The effective matrix and $\mathbf{M}$, $\mathbf{C}$ are assembled once; each step forms $\mathbf{F}_{\mathrm{eff}}$ with two sparse matrix-vector products and solves one linear system.
 
 ##### (c) Time Step (Accuracy-Driven)
-Trapezoidal Newmark ($\beta = 1/4$, $\gamma = 1/2$) is unconditionally stable and non-dissipative; its only time error is a period elongation $\Delta T / T \approx (\omega \Delta t)^2 / 12$. The step is therefore set by accuracy at the mesh frequency $f_{\mathrm{mesh}}$ (`max_frequency`), not by the smallest element:
+Trapezoidal Newmark ($\beta = 1/4$, $\gamma = 1/2$) is unconditionally stable and non-dissipative; its only time error is a period elongation $\Delta T / T \approx (\omega \Delta t)^2 / 12$. The step is therefore set by accuracy at the selected analysis frequency $f_{\max}$ (`max_frequency`), not by the smallest element:
 
 $$
-\Delta t = \frac{1}{N_{\mathrm{ppp}} \, f_{\mathrm{mesh}}}, \qquad \frac{\Delta T}{T} \approx \frac{\pi^2}{3 N_{\mathrm{ppp}}^2}
+\Delta t = \frac{1}{N_{\mathrm{ppp}} \, f_{\max}}, \qquad \frac{\Delta T}{T} \approx \frac{\pi^2}{3 N_{\mathrm{ppp}}^2}
 $$
 
-with $N_{\mathrm{ppp}}$ = `solver.steps_per_period` (default 40, i.e. a 0.2 % phase error per period at $f_{\mathrm{mesh}}$; minimum 4). Thin adhesive or coating layers no longer shrink the implicit step.
+with $N_{\mathrm{ppp}}$ = `solver.steps_per_period` (default 40, i.e. a 0.2 % phase error per period at $f_{\max}$; minimum 4). Thin adhesive or coating layers no longer shrink the implicit step.
 
 ##### (d) PETSc Solvers
 Parallel MUMPS direct LU for moderate sizes; above the iterative threshold, Conjugate Gradients with algebraic multigrid (GAMG). GAMG receives the three rigid-body modes (two translations and the in-plane rotation) as its near-nullspace, which it needs to build effective coarse spaces for elasticity.
@@ -428,21 +428,21 @@ The surface (or interface) traction is $\mathbf{t}(x, t) = T_{\max} \, g(x) \, s
 | `ricker` (default) | $(1 - 2a)\,e^{-a}$, $a = [\pi f_0 (t - 1.5/f_0)]^2$ | Broadband pulse; best for extracting dispersion curves with the 2D FFT |
 | `tone_burst` | $\tfrac12\left[1 - \cos(2\pi f_0 t / N)\right] \sin(2\pi f_0 t)$ on $[0, N/f_0]$ | Narrowband, mode-selective NDE/SHM excitation; `n_cycles` $= N$ (default 5, $-6$ dB bandwidth $\approx 2f_0/N$) |
 
-Unless `solver.duration` is given, the simulated time is `time_factor` $\times$ `sensing_length` / $c_{\mathrm{slow}}$ plus the pulse length ($3/f_0$ for the Ricker wavelet, $N/f_0$ for the tone burst).
+Unless `solver.duration` is given, the simulated time is `time_factor` $\times D/c_{\mathrm{packet}}$ plus the pulse length ($3/f_0$ for the Ricker wavelet, $N/f_0$ for the tone burst). Here $D$ is the larger of `sensing_length` and the absolute source-to-receiver distances at either end of the array. The packet-speed estimate starts from the bulk/Rayleigh reference. For a free homogeneous isotropic plate, it also includes A0 group velocity sampled over the arrival-sizing band (`mesh.min_frequency`, default $f_0/5$, through `mesh.max_frequency`, default $3f_0$). These settings do not filter the traces. Higher Lamb modes can travel more slowly near their cutoffs; preflight warns when the band reaches their first cutoff and no arrival target is supplied. Set `solver.min_group_velocity` for the slowest packets of interest, or specify `solver.duration` directly.
 
 All inputs are SI, and nothing in the solver assumes ultrasonic scales: logs, the preflight box and figures choose units from the data (μs/mm/MHz for an aluminium plate, ms/m/Hz for a soil profile). Dispersion plot limits accept SI numbers or unit strings (`"2 MHz"`, `"40 Hz"`, `"3 rad/mm"`, `"1.2 rad/m"`).
 
-Source and sensor geometry left as `null` scales with the reference wavelength $\lambda_{\mathrm{ref}} = c_{\mathrm{slow}} / f_0$ ($c_R$ for a halfspace, otherwise the slowest physical wave speed), so the defaults are equally valid for a 1 MHz plate and a 10 Hz soil profile. With $L$ = `sensing_length`:
+Source and sensor geometry left as `null` scales with the sizing wavelength $\lambda_{\mathrm{ref}} = \lambda_{\mathrm{size}}(f_0)$. At frequency $f$, $\lambda_{\mathrm{size}}(f)$ is the smaller of the reference-speed wavelength ($c_R/f$ for a halfspace, otherwise the slowest physical bulk speed divided by $f$), the A0 wavelength for a free homogeneous isotropic plate, and `mesh.min_wavelength` when supplied. Other guided structures need independently validated bounds. With $L$ = `sensing_length`, $w$ = `excitation_width`, and $\lambda_{\mathrm{band}} = \lambda_{\mathrm{size}}(\texttt{max_frequency})$:
 
 | Key | Default |
 | :--- | :--- |
 | `excitation_width` | $\min(\lambda_{\mathrm{ref}}/2, \, L/10)$ |
-| `source_x` | `absorb_length` $+ \min(\max(\lambda_{\mathrm{ref}}, \text{width}), \, L/8)$ |
+| `source_x` | `absorb_length` $+ \max\left[\min(\max(\lambda_{\mathrm{ref}}, w), \, L/8), \, w/2\right]$ |
 | `sensor_offset` | $\min(2\lambda_{\mathrm{ref}}, \, L/4)$ |
-| `sensor_pitch` | $\min(\lambda_{\mathrm{ref}}/8, \, L/100)$ |
+| `sensor_pitch` | $\min(\lambda_{\mathrm{ref}}/8, \, \lambda_{\mathrm{band}}/4, \, L/100)$ |
 | `n_sensors` | fill the rest of the sensing region (at most 1001) |
 
-The caps keep the automatic layout inside the sensing region even when $\lambda_{\mathrm{ref}}$ is comparable to the domain. The resolved values are written to `simulation_config.yaml`.
+The domain-fraction caps keep fully automatic layouts inside the sensing region even when $\lambda_{\mathrm{ref}}$ is comparable to the domain. An explicit load width also enforces a half-width source clearance; incompatible layouts are rejected. The resolved values are written to `simulation_config.yaml`.
 
 ---
 
@@ -489,7 +489,7 @@ conda list --explicit > environment-explicit.txt
 
 ## Usage Guide & Command-Line Interface
 
-All simulations require an explicit configuration file via `-c` / `--config`. Simulations can be launched using either the installed CLI `guided-waves` or module invocation `python -m guidedwavefem`.
+All simulations require an explicit configuration file via `-c` / `--config`, including exact mesh counts (`mesh.nx`, `mesh.ny_per_region`). Explicit runs also require a user-selected `solver.CFL`; the solver then calculates the time step from the assembled operators. Simulations can be launched using either the installed CLI `guided-waves` or module invocation `python -m guidedwavefem`.
 
 ### 1. Running a Simulation
 
@@ -513,34 +513,16 @@ mpiexec -n 4 python -m guidedwavefem -c configs/05_layers_bone_qus.yaml
 
 ### 3. Preflight Resource Estimation (`--dry-run`)
 
-Preview mesh sizing, DOF counts, time step limits, and memory requirements upfront without allocating FEM structures:
+Preview the supplied mesh counts, actual element sizes, DOF counts, time step limits, and memory requirements without allocating FEM structures:
 
 ```bash
 guided-waves -c configs/01_plate_aluminum_lamb.yaml --dry-run
 ```
 
-Output preview:
-```text
-╔══════════════════════════════════════════════════════════════════╗
-║  PREFLIGHT NUMERICAL ESTIMATE (EXPLICIT)                         ║
-║  ──────────────────────────────────────────────────────────────  ║
-║  Excitation:            Ricker wavelet, f₀ = 1 MHz               ║
-║  Mesh frequency:        1.5 MHz (λ_min = 2.081 mm)               ║
-║  Target element size h: 260.2 μm (actual min h = 166.7 μm)       ║
-║  Grid resolution:       2307 × 6 Q2 elements (13,842 total)      ║
-║  Estimated global DOFs: 119,990                                  ║
-║  Simulation duration:   147.1 μs                                 ║
-║  Time step:             ~4.317 ns (element bound, CFL=0.5)       ║
-║  Estimated step count:  ~34,082 steps                            ║
-║  Estimated memory RAM:  ~215.1 MB (single state vector: 0.9 MB)  ║
-║  Explicit Δt is finalized from the assembled operator bound.     ║
-╚══════════════════════════════════════════════════════════════════╝
-```
-
-Units follow the problem scale (the seismic example reports metres, milliseconds and hertz). The preflight uses the same mesh-layout code as the solver, so mesh sizes and DOF counts match the actual run. The implicit step is exact. The explicit step comes from the same Gershgorin bound evaluated per element before meshing; it is never larger than the solver's final value (example 01: 34,082 steps estimated, 34,083 run after rounding to the sensor stride).
+Units follow the problem scale (the seismic example reports metres, milliseconds and hertz). The preflight uses the same mesh-layout and sampled-time-grid code as the solver. The implicit step follows the same accuracy rule as the solver. The automatic explicit step uses a conservative element bound. A requested explicit `dt` beyond that certificate produces a warning and conservative resource estimates; only the assembled-operator check can accept or reject that request. Final step counts reflect rounding to the sensor stride.
 
 > [!NOTE]
-> `elems_per_wavelength` counts **elements** per shortest physical wavelength, independent of the polynomial degree; a Q2 element already carries two node spacings, so Q2 meshes are effectively twice as fine in nodes per wavelength as Q1 meshes with the same setting.
+> Supply `mesh.nx` and `mesh.ny_per_region` as exact positive element counts. A Q2 element carries two node spacings. Changing material properties, frequency, or polynomial degree never changes these counts; validate spatial convergence by explicitly refining them.
 
 ### 4. Runtime CLI Overrides
 
@@ -562,7 +544,7 @@ guided-waves -c configs/01_plate_aluminum_lamb.yaml --device auto --precision si
 # Specify custom output directory
 guided-waves -c configs/03_halfspace_steel_rayleigh.yaml --output results_rayleigh
 
-# Throttle numerical controls (duration, mesh frequency, CFL, dt)
+# Override duration, analysis frequency, and the user-supplied CFL factor
 guided-waves -c configs/01_plate_aluminum_lamb.yaml --duration 5.0e-5 --max-frequency 1.0e6 --cfl 0.4
 
 # Set dispersion display limits: SI numbers (Hz, rad/m) or strings with units
@@ -612,6 +594,160 @@ guided-waves -c my_plot_settings.yaml --postprocess results_01_plate_aluminum_la
 
 Without `-c`, the plot limits stored in the archive are used unless overridden with `--f-min/--f-max/--k-min/--k-max` (SI numbers or unit strings such as `--f-max 40Hz`). Archives written by earlier versions (limits in MHz and rad/mm) are still understood.
 
+The overview reports the applied filter, propagation direction and unpadded FFT
+spacing. Display limits stop at the stored sampling Nyquist limits. When no
+wavenumber limit is archived or supplied, the entire spatial band is shown so
+slow guided waves are not cropped by a bulk-wave speed assumption. Arrays wholly
+left of the source use the `-x` spectrum; other arrays use `+x`. The opposite
+direction is omitted from this overview. Receiver coordinates take precedence
+over legacy pitch/offset metadata. Displacement colours saturate at the robust
+display limits shown on flat-ended colourbars; each dispersion component has its
+own power reference. Display saturation does not change the recorded measurements.
+
+Structure-aware reports are enabled by default (`postprocess.structure_analysis:
+true`). Their model and material references come from the **saved archive**, so
+reprocessing with a plotting-only config cannot change the interpreted structure.
+Each run has an organized `wave_physics/` directory with two four-panel figures:
+
+- `dispersion_and_modes`: signed frequency–wavenumber spectrum,
+  phase-velocity coherence image, qualified
+  measured peaks, and a diagnostic selected for the structure.
+- `propagation_and_components`: horizontal/vertical wavefields on one physical
+  amplitude scale, component bandwidth and balance on one spectral reference,
+  and counter-propagating spectral content.
+
+| Structure | Physical references and selected diagnostic |
+|---|---|
+| Free isotropic plate | A0/S0 Rayleigh–Lamb curves and coherent vertical/horizontal displacement ratio. |
+| Bonded or viscoelastic layers | Constituent bulk references and frequency-dependent apparent spatial decay, with exponential-fit screening. |
+| Solid isotropic halfspace | Rayleigh/P/SV speeds and surface Rayleigh V/H comparison when receivers are on the free surface. |
+| Soil or other layers on a solid halfspace | Constituent speed comparisons and measured wavelength relative to finite-layer thickness. |
+| Bone/tissue or other solid–fluid layers | Coupled guided-wave context, axial elastic quasi-bulk references where applicable, and fluid sound-line comparison. |
+| Fluid-loaded/immersed plate | Fluid sound lines and measured phase-speed/sound-speed ratio, with subsonic/evanescent and propagating-field context. |
+
+Only proven free isotropic plates receive A0/S0 theory overlays. Constituent
+speeds in other structures are comparison lines, not solutions of the complete
+layered dispersion problem. Plane-strain reports do not introduce SH/Love modes,
+and artificial fluid shear stiffness is never displayed as a physical wave speed.
+
+The phase image uses amplitude-weighted phase alignment, related to
+[Park, Miller and Xia's phase-shift imaging method](https://www.parkseismic.com/wp-content/uploads/2021/06/ParkEtAl1998.pdf).
+Its absolute 0–1 coherence scale does not brighten each frequency independently.
+Support requires sufficient relative power, at least four effective receivers,
+and wavelengths between the spatial alias limit and array aperture. Measured
+peaks additionally require an isolated interior maximum, adequate coherence and
+two wavelengths across the amplitude-weighted aperture. These are diagnostic
+screening rules, not confidence intervals or automatic mode identification.
+Phase velocity is distinct from packet/group velocity. For arrays straddling
+the source, phase analysis selects the larger one-sided aperture and records
+the receiver indices; the propagation panels retain the whole array.
+
+`report.json` records structure provenance, references, methods and exclusions;
+four CSV tables retain phase-velocity, polarization, decay and directionality
+measurements and their acceptance status. `spectral_arrays.npz` preserves the
+coherence image, support mask and selected receivers. Missing or unsupported
+measurements remain unavailable. Spatial-decay fits use untapered full-record
+Fourier amplitudes to avoid arrival-dependent taper bias; modal interference,
+spreading and record truncation still prevent interpreting them as intrinsic
+material loss. Directional power is squared displacement, not energy flux or a
+reflection coefficient. Wavelength/thickness is not an inferred probing depth.
+
+For quantitative receiver measurements, enable the packet report in a small
+post-processing config:
+
+```yaml
+postprocess:
+  wave_characterisation:
+    enabled: true
+    component: y
+    frequency_band: ["0.3 MHz", "0.8 MHz"]
+    time_window: null # seconds; select an interval containing one complete packet
+    min_relative_amplitude: 0.01
+output:
+  figure_formats: [png, pdf]
+  usetex: false
+```
+
+Choose the frequency band for your record; the values above are an ultrasonic
+example. This writes four figures and `characterisation/metrics.json` plus
+`receivers.csv`:
+
+| Output | Interpretation |
+|---|---|
+| `arrival_velocity` | Envelope peaks, accepted/excluded receivers, fitted travel time and residuals against one stored sample. |
+| `pulse_evolution` | Normalised packet shapes, amplitude decay relative to the array peak, and envelope-energy RMS widths. |
+| `particle_motion` | Time-coloured displacement trajectories with equal physical axes and common limits. |
+| `time_frequency` | Hann-window spectrograms with one shared power reference and explicit window length/frequency spacing. |
+
+Packet measurements remove the complete-record mean before optional filtering.
+Three-point interpolation refines envelope-peak times. Screening excludes weak
+signals, packets with a gate-edge envelope above 10% of the peak, and a second
+resolved peak at least 50% as high. Velocity requires at least three accepted
+receivers, arrival-fit R² ≥ 0.9 and a fitted travel-time span of at least two
+stored samples. An amplitude-fit R² below 0.8 suppresses apparent attenuation,
+except for effectively constant amplitude (log-amplitude range ≤ 0.01).
+The JSON records these criteria, preprocessing, fit status and residuals; the
+CSV gives each receiver's exclusion reason, peak, centroid, RMS width and FWHM.
+These checks are diagnostic heuristics, not statistical confidence intervals.
+Ungated multimode records can remain ambiguous: choose a complete isolated
+packet before interpreting speed or spreading. Apparent attenuation includes
+interference, spreading and numerical effects, and is not intrinsic material loss.
+
+For a free, single isotropic plate with archived model provenance,
+`postprocess.lamb_modes: true` additionally writes `lamb_modes/modal_resolution`,
+`modal_separation` and `modal_waveforms`. The report shows both propagation
+directions, theory branches, usable frequency intervals and sampling margins.
+Input, A0, S0 and residual maps share one displacement scale. Its schema-v2
+`diagnostics.json` and `modal_signals.npz` include reconstruction evidence for
+both displacement components. Unresolved content stays in the residual; RMS
+ratios are not additive modal energy fractions. Packet and Lamb JSON reports
+use schema version 2; existing measurement keys remain available.
+
+Every exported figure has a **190 mm canvas width** and **10-point text**,
+including panel titles, axis labels, tick numbers, legends and colourbars.
+Every panel has a complete four-sided box. Colourbars have flat ends, with
+saturation behaviour documented in the accompanying README. Panels with the same
+colour scale share a single colourbar; distinct quantities such as spectral power
+and coherence retain separate bars. Compact panel gaps,
+label padding and margins keep the plotting area prominent at the final size.
+Heights follow the panel arrangement. Figures contain the panels, short panel
+titles and essential axis/legend labels; figure-level titles, schematics and
+explanatory prose are kept in accompanying README files. Each report directory
+has its own README with provenance, processing, panel descriptions and limits.
+The standard/quick figures write `full_analysis_README.md` and
+`quick_overview_README.md` beside their outputs.
+
+`output.usetex: false` is the default: text uses Matplotlib's bundled serif fonts
+and mathtext, with no external LaTeX installation needed. Set `output.usetex: true`
+to render text with LaTeX; a missing toolchain then raises an actionable error.
+The legacy `output.usetex: auto` option uses LaTeX when the required tools are
+available and built-in rendering otherwise. Both modes retain the same 190 mm
+width, 10-point base font size and panel styling.
+
+For external LaTeX rendering, `latex`, `dvipng` and Ghostscript must be on `PATH`.
+On Debian/Ubuntu, install `texlive-latex-base texlive-latex-recommended
+texlive-latex-extra cm-super dvipng ghostscript`; on macOS, a TeX distribution
+such as MacTeX plus Ghostscript supplies the tools.
+
+Rasters use 300 dpi by default; PDF/SVG/EPS retain vector text and lines while
+large heatmaps are rasterised to keep files practical. Fixed-canvas export avoids
+`tight` cropping, which would change the physical width. Raster dimensions round
+to whole pixels (2244 pixels at 300 dpi); vector canvas width is exactly 190 mm.
+Place the figure at its native width to preserve the 10-point text size.
+Each export replaces its destination atomically after rendering.
+To inspect reproducible analytical examples without a FEM solve:
+
+```bash
+python tools/preview_postprocessing.py --output results_postprocess_preview
+python tools/preview_structure_reports.py --output results_structure_preview
+```
+
+The preview contains a packet with known speed/decay and a Rayleigh–Lamb A0/S0
+superposition. These are synthetic verification signals, not simulation results.
+The structure preview renders all six shipped structures with PNG/PDF reports
+and a provenance manifest. Its layered/fluid-loaded packets have explicitly
+prescribed illustrative dispersion, not independently solved physical modes.
+
 ### 6. Generating Configuration Templates
 
 Generate a fully annotated template YAML file:
@@ -627,9 +763,10 @@ solver:
   type: explicit           # "explicit" (lumped RK4) or "implicit" (Newmark-beta)
   device: auto             # auto | cpu | cuda | cuda:N | mps (explicit solver only)
   precision: double        # double | single (single-process explicit engine only)
-  CFL: 0.5                 # Explicit only: fraction (0, 1] of the rigorous RK4 stability limit
+  CFL: 0.5                 # Required for explicit: fraction (0, 1] of assembled RK4 stability limit
   steps_per_period: 40     # Implicit only: Newmark steps per period at max_frequency
-  time_factor: 1.2         # T = time_factor * sensing_length / c_slow + pulse length
+  time_factor: 1.2         # T = time_factor * travel_distance / packet_speed + pulse length
+  min_group_velocity: null # [m/s] Conservative guided-packet speed bound
   dt: null                 # Maximum requested time step [s] (null = auto)
   duration: null           # Physical duration [s] (overrides time_factor)
   beta: 0.25               # Newmark-beta parameter (implicit only)
@@ -648,22 +785,23 @@ excitation:
   f_center: 1.0e6          # [Hz] Centre frequency
   n_cycles: null           # tone_burst only (null = 5)
   traction_max: 1.0e6      # [Pa] Peak traction
-  excitation_width: null   # [m] Gaussian strip width, sigma = width / 3 (null = lambda_ref / 2)
-  source_x: null           # [m] null = absorb_length + lambda_ref (see Physical Scales)
+  excitation_width: null   # [m] sigma = width / 3; auto wavelength and domain caps above
+  source_x: null           # [m] Automatic load clearance from sponge (see Physical Scales)
   source_fx: 0.0           # Tangential traction component
   source_fy: 1.0           # Normal traction component (default: normal load)
 
 mesh:
-  elems_per_wavelength: 10 # Elements (not nodes) per shortest wavelength
-  min_elems_x: 100         # Longitudinal element floor
-  min_elems_y: 4           # Transverse element floor through thickness
+  nx: 1200                 # Required: exact elements along the full domain, including sponges
+  ny_per_region: [12]       # Required: exact elements per region, bottom to top (one plate here)
   degree: 2                # Polynomial order (Q2 quadrilateral elements)
-  max_frequency: null      # [Hz] Mesh sizing frequency (defaults to 3 * f_center)
+  max_frequency: null      # [Hz] Analysis/time-accuracy/sampling band (default 3 * f_center)
+  min_frequency: null      # [Hz] Arrival-sizing band edge (defaults to f_center / 5)
+  min_wavelength: null     # [m] Source/sensor/display default bound; never changes mesh counts
 
 sensors:
   n_sensors: null          # null = fill the sensing region (at most 1001)
   sensor_offset: null      # [m] Source to first sensor (null = min(2 lambda_ref, L / 4))
-  sensor_pitch: null       # [m] Sensor spacing (null = lambda_ref / 8)
+  sensor_pitch: null       # [m] min(lambda_ref/8, lambda_band/4, L/100)
   sensor_y: null           # [m] Sensor line height (null = loaded surface/interface)
   sample_rate: null        # [Hz] Stored sampling rate (null = 20 * max_frequency)
 
@@ -672,7 +810,7 @@ postprocess:
   f_min: null              # Plot limits: SI numbers or unit strings ("2 MHz", "3 rad/mm")
   f_max: null              # null = 2 * f_center
   k_min: null              # null = 0
-  k_max: null              # null = 2*pi*f_max / slowest speed (capped at pi / pitch)
+  k_max: null              # Auto sizing wavelength at f_max, limited by spatial Nyquist
 
 output:
   output_dir: null         # Result directory (null = auto: results_guided_waves_{solver})
@@ -680,9 +818,27 @@ output:
   target_snapshots: 200    # Target snapshot count
   quick_plot: true         # Generate fast overview waterfall/B-scan plot
   compress_output: false   # Write sensor_data.npz with zlib compression
+  history_storage: memory  # memory | disk (temporary maps; FFT postprocessing still needs RAM)
   figure_formats: [png, pdf, svg, eps]  # Any subset
-  usetex: auto             # auto (LaTeX if installed) | true | false
+  usetex: false            # true enables external LaTeX; default uses built-in fonts
 ```
+
+`ny_per_region` follows every normalized region from bottom to top: a single plate
+or halfspace has one entry; `N_layers` follows the layer list;
+`plate_on_halfspace` starts with the substrate and then the layers;
+`plate_in_halfspaces` starts with the substrate, then the layers, then the
+superstrate. Sponge depths belong to their existing halfspace regions and do not
+add entries. Counts remain fixed when material properties, frequencies or
+polynomial degree change.
+
+**Migrating existing configurations:** replace `mesh.elems_per_wavelength`,
+`mesh.min_elems_x`, and `mesh.min_elems_y` with explicit `mesh.nx` and
+`mesh.ny_per_region`, and remove every region's `min_elems_y`. The old fields now
+raise a migration error instead of silently influencing resolution. To preserve
+an old run's mesh, copy its actual `nx` and `ny_per_region` counts from the prior
+preflight or runtime metadata. Explicit configurations must also supply
+`solver.CFL`; `solver.dt` remains an optional checked override. The bundled
+examples retain their previous resolved element counts and configured CFLs.
 
 The schema is **strict**: unknown keys, misspelled section fields, unknown material fields, constitutive fields the chosen `material_model` would ignore (e.g. `Cv` on an `isotropic` layer), parameters defined twice, and non-boolean values for boolean switches are all rejected with a descriptive error (including a "did you mean" suggestion where possible). Run `guided-waves --generate-config template.yaml` for the full, commented schema.
 
@@ -694,8 +850,8 @@ The schema is **strict**: unknown keys, misspelled section fields, unknown mater
 
 | Config file | Mode | Physical system | Application | Excitation |
 | :--- | :--- | :--- | :--- | :--- |
-| [`01_plate_aluminum_lamb.yaml`](configs/01_plate_aluminum_lamb.yaml) | `1_layer` | 1 mm aluminium plate in vacuum | Lamb-wave NDE / SHM ($S_0$, $A_0$, $A_1$) | Ricker, 1 MHz |
-| [`02_layers_bonded_joint.yaml`](configs/02_layers_bonded_joint.yaml) | `N_layers` | Al / 0.2 mm viscoelastic epoxy / Al | Adhesive bond inspection (aerospace) | 5-cycle tone burst, 300 kHz; implicit solver |
+| [`01_plate_aluminum_lamb.yaml`](configs/01_plate_aluminum_lamb.yaml) | `1_layer` | 3 mm aluminium plate in vacuum | Lamb-wave NDE / SHM ($S_0$, $A_0$, $A_1$) | Ricker, 1 MHz |
+| [`02_layers_bonded_joint.yaml`](configs/02_layers_bonded_joint.yaml) | `N_layers` | Al / 0.2 mm viscoelastic epoxy / Al | Adhesive bond inspection (aerospace) | 5-cycle tone burst, 1 MHz; implicit solver |
 | [`03_halfspace_steel_rayleigh.yaml`](configs/03_halfspace_steel_rayleigh.yaml) | `halfspace` | Rail steel, truncated halfspace | Rayleigh-wave surface-crack NDE ($c_R \approx 2.98$ km/s) | Ricker, 1 MHz |
 | [`04_plate_on_halfspace_soil_bedrock.yaml`](configs/04_plate_on_halfspace_soil_bedrock.yaml) | `plate_on_halfspace` | 10 m soft soil on bedrock | Seismic MASW / site characterisation | Ricker, 15 Hz |
 | [`05_layers_bone_qus.yaml`](configs/05_layers_bone_qus.yaml) | `N_layers` | Stratified solid-fluid plate: bone marrow / cortical bone / soft tissue | Axial-transmission bone QUS (Le et al., 2025) | Ricker, 500 kHz |
@@ -781,18 +937,23 @@ Hooks run in the order listed:
 | :--- | :--- | :--- |
 | **Physics** | Low-frequency $S_0$ speed equals the plate velocity $\sqrt{E/(\rho(1-\nu^2))}$ | End-to-end explicit and implicit runs, cross-correlation arrival time (agreement ≈ 0.1 %) |
 | **Physics** | Rayleigh speed on a truncated halfspace; sponge residual | End-to-end run vs. closed-form $c_R$ (within 1 %); late-window residual after the direct pulse < 5 % |
+| **Dispersive Physics** | A0 phase convergence with mesh and time refinement | Explicit and implicit FEM vs. an independent Rayleigh–Lamb determinant; finest phase error < 0.3 % |
+| **Anisotropic / Viscous Physics** | Orthotropic extensional speed and Kelvin–Voigt attenuation | Long-wave analytical complex wavenumber; phase error < 0.2 %, nonzero attenuation error < 2 % |
 | **Examples** | Every shipped configuration (all five structure modes) runs end to end | Shortened CLI runs (`tests/test_examples.py`, slow) and 2-rank CI smoke runs |
 | **Damped Time Integration** | 4th-order temporal convergence | Analytical matrix-exponential oscillator solution $\exp(\mathbf{A}t)$ |
 | **RK4 Step Limit** | Half-disk radius $R$ and stability at the rigorous limit | Numerical radius 2.6156 ≥ $R$ = 2.6; bounded energy at $0.999\,R/\max(\sqrt{B_K}, B_C)$ for wave- and damping-limited FE systems (detects instability at 3×) |
 | **PETSc RK4** | Agreement with the functional reference step | `PetscRK4` vs. `rk4_step` on a damped system (rtol $10^{-12}$) |
 | **Array RK4 Engine** | Bit-level agreement with the reference RK4 step | Random damped system, incl. tiny sensor ring buffers, decimated sampling, instability detection, optional Torch/CuPy backends |
+| **Backend Accuracy** | Both precisions against an independent matrix exponential | SciPy and Torch CPU in CI; explicitly required CuPy/Torch CUDA on provisioned hardware; streaming, partial flushes and sink failures |
 | **FE Sensor Evaluation** | Exact off-node evaluation | Distributed bounding-box search; sparse sensor operator vs. DOLFINx `eval` (shared/adjacent cells) |
 | **Spectral Analysis** | Exact frequency and wavenumber peaks | Monochromatic traveling wave with exact $f_0$ and $k_0$ |
 | **Stability Limits** | Assembled operator bounds $B_K$ and $B_C$; pre-mesh element bounds | SciPy generalized eigensolution $\mathbf{K}\mathbf{v} = \lambda \mathbf{M}_L \mathbf{v}$; element bounds ≥ assembled bounds (Q1, Q2) |
 | **Implicit Solver Helpers** | GAMG near-nullspace; zero-filtered damping | Rigid-body modes orthonormal with $\mathbf{K}\mathbf{r} \approx 0$; filtered matrix reproduces the mat-vec |
 | **Thread Policy** | Per-rank BLAS/OpenMP cap | Launcher variables of Open MPI, MPICH, MVAPICH2, Slurm; user settings respected; no heavy imports |
 | **Material Energy** | Positive definiteness enforcement | Voigt tensor and viscosity eigenvalue validation |
-| **Distributed Solver Agreement** | Single-process array engine vs. 2-rank PETSc engine | Coupled fluid–solid waveguide regression with relative error $< 10^{-8}$ |
+| **Distributed Solver Agreement** | Serial vs. 2- and 4-rank PETSc runs, explicit and implicit | Coupled fluid–solid waveguide regression with relative error $< 10^{-8}$; memory and disk histories |
+| **MPI Failure Handling** | Rank-local errors terminate peers | Subprocess timeouts for configuration errors, unsuccessful exits and interrupts; help/version remain successful |
+| **Output Integrity** | Failed writes preserve the previous archive | Injected serialization/write/replace failures; committed archive embeds matching configuration; scratch cleanup |
 | **Configuration Schema** | Strict, typed validation; one valid shipped example per structure mode | Dedicated schema tests (`tests/test_config.py`), example coverage test |
 | **Excitation & Units** | Tone-burst window, spectrum and timing; unit picking and parsing | `tests/test_units_sources.py` |
 | **Figures** | Portable labels, no global-state leakage, selectable formats, seismic-scale units | `tests/test_analysis.py` |
@@ -804,12 +965,12 @@ Hooks run in the order listed:
 
 ### Version 0.3 Highlights
 - **Time stepping:** Explicit RK4 uses the rigorous half-disk radius $R = 2.6$ (2.6× larger steps, still provably stable); implicit Newmark is accuracy-driven (`steps_per_period`), so thin layers no longer force tiny steps; the preflight explicit estimate uses the same bound per element and never overestimates the step.
-- **Performance:** Implicit right-hand side from two SpMVs (no per-step assembly), allocation-free `PetscRK4`, zero-filtered damping matrices, decimated sensor sampling (`sensors.sample_rate`), GAMG rigid-body near-nullspace, and per-rank BLAS/OpenMP thread capping under MPI. On 4 MPI ranks, example 03 now completes in 101 s instead of 296 s, and example 02 in 41 s instead of an estimated 11.5 min.
-- **Explicit engine:** One backend-agnostic, allocation-free RK4 engine (SciPy/CuPy/PyTorch) with a stacked $[\mathbf{K}|\mathbf{C}]$ operator, device-resident sensor buffering, and non-finite detection; verified against the distributed PETSc engine.
+- **Performance:** Implicit right-hand side from two SpMVs (no per-step assembly), allocation-free `PetscRK4`, zero-filtered damping matrices, decimated sensor sampling (`sensors.sample_rate`), GAMG rigid-body near-nullspace, and per-rank BLAS/OpenMP thread capping under MPI. Historical benchmarks on four MPI ranks with earlier example meshes reduced example 03 from 296 s to 101 s and completed example 02 in 41 s instead of an estimated 11.5 min. Runtime depends on the configuration and hardware.
+- **Explicit engine:** One backend-agnostic RK4 engine (SciPy/CuPy/PyTorch) with preallocated stage vectors, a stacked $[\mathbf{K}|\mathbf{C}]$ operator, device-resident sensor buffering, and non-finite detection; verified against the distributed PETSc engine. Sparse products allocate temporary results.
 - **Device handling:** Strict device requests (explicit GPU requests fail instead of silently falling back), MPI-aware selection, and provenance in `simulation_config.yaml`.
 - **Configuration:** Strict schema with suggestions, typed validation, a single table of defaults, `solver.device`/`solver.precision` sections, and new output options (`compress_output`, `figure_formats`, `usetex`).
 - **Materials:** Fields ignored by the chosen material model are rejected (e.g. `Cv` on a non-`viscoelastic` layer is an error instead of being silently dropped).
-- **Figures:** Labels render identically with and without LaTeX; no global Matplotlib/PATH side effects.
+- **Figures:** All exports use 190 mm width and 10-point text, with external LaTeX optional and off by default; no global Matplotlib/PATH side effects.
 - **Excitation:** Hann-windowed $N$-cycle tone burst (`source_type: tone_burst`) next to the Ricker wavelet.
 - **Scale awareness:** Units in logs, preflight and figures follow the problem scale (seismic to ultrasonic); dispersion limits are SI or unit strings; sponge damping and source/sensor geometry defaults scale with $f_0$ and the reference wavelength.
 - **Examples:** One documented example per structure mode (NDE, aerospace, rail, seismic, biomedical).
@@ -842,3 +1003,95 @@ If you use `GuidedWaveFEM` in academic research or industrial publications, plea
   url          = {https://github.com/ductho-le/GuidedWaveFEM}
 }
 ```
+
+## Dispersive defaults and conservative controls
+
+Mesh resolution is always supplied explicitly through `mesh.nx` and
+`mesh.ny_per_region`. For a free, homogeneous isotropic plate, automatic source,
+sensor and display defaults include the fundamental A0 Rayleigh–Lamb branch. Recording duration uses A0
+group velocity sampled over the arrival-sizing band (by default `f_center / 5` through
+`max_frequency`, which defaults to `3 * f_center`) and the farthest receiver.
+The lower band edge is finite: no finite duration captures arbitrarily slow
+zero-frequency flexural waves or every higher-mode packet near a cutoff. A0
+sizing does not bound those higher-mode arrival times. Preflight reports its
+duration basis and warns when additional arrival targets are needed. Validate
+convergence for the observable, frequency band and modes of interest.
+
+Layered, anisotropic, viscoelastic, and fluid-loaded structures require explicit
+mesh-convergence studies and arrival bounds from an independent dispersion
+calculation or convergence study. Their bulk
+speeds alone do not bound guided-mode wavelengths or arrival times. Conservative
+controls, in SI units, are available for every structure:
+
+```yaml
+mesh:
+  min_frequency: 20000       # arrival-sizing lower edge [Hz]; does not filter traces
+  min_wavelength: 0.0005     # source/sensor/display default bound [m]; no mesh refinement
+solver:
+  min_group_velocity: 80    # slowest relevant packet speed [m/s]
+```
+
+These controls tighten automatic geometry, display and duration estimates;
+they never alter mesh counts. Explicitly specified sensor pitch,
+duration, or plot limits remain user choices. `min_wavelength` also constrains
+automatic sensor pitch and expands the automatic wavenumber range, subject to
+spatial Nyquist. Arrival guides use absolute source–receiver distances; dispersion
+maps deliberately select right-going waves, including for arrays left of the source.
+
+Preflight RAM includes recorded histories, collection copies, transfer buffers,
+and estimated solver workspace. Sparse factorization fill and MPI imbalance can
+exceed this estimate. Set `output.history_storage: disk` to record both solvers'
+histories in temporary memory-mapped files and gather MPI measurements in bounded
+chunks. Reserve scratch disk for roughly twice the measurement payload, plus the
+staged archive and any previous output. Scratch files are removed on normal return
+or a caught exception; a killed process or MPI abort can leave scratch directories.
+OS page cache, timestamps, solver workspace and FFT postprocessing still consume
+RAM, so disk mode does not guarantee lower peak RSS. For long runs, consider
+`--no-postprocess` and analyze the saved archive separately with sufficient memory.
+
+The completed sensor archive is atomically replaced and embeds its matching
+configuration as `simulation_config_yaml`, with a shared `run_id`. A failure before
+archive replacement preserves the previous archive and configuration. The YAML
+sidecar is a convenience copy: an interruption after archive replacement can leave
+it stale, while the embedded configuration remains authoritative. Read the
+`simulation_config_yaml` scalar from `sensor_data.npz` to recover that exact
+configuration. `tools/benchmark.py` records reproducible time and memory
+measurements; actual CUDA and multi-node validation requires suitable hardware.
+
+For custom array-engine workflows,
+`integrate_explicit_rk4(history_callback=..., retain_history=False)` streams
+chronological chunks without retaining full histories in RAM. Zero-sensor operators
+still emit every sampled timestamp with a zero-column measurement array. The array
+RK4 engine reuses stage buffers, but sparse products allocate temporary results.
+
+Configuration files reject duplicate YAML/JSON keys, including nested material
+keys and YAML merge-source mappings. YAML inheritance allows explicit overrides
+and reused anchors; each mapping permits one merge directive. Fluid definitions
+must use exactly one representation: a sound-speed alias,
+a bulk-modulus alias, or the pair `E` and `nu`. SI prefix case is significant:
+`mHz` means millihertz and `MHz` means megahertz.
+
+## Resolution and computational cost
+
+Choose `mesh.nx`, `mesh.ny_per_region`, and (for the explicit solver)
+`solver.CFL` in the configuration. The solver calculates the explicit time step
+from the assembled stiffness, damping and lumped mass, multiplied by that CFL;
+the final step is rounded down to fit the duration and sensor sampling grid.
+Stability does not certify spatial or temporal accuracy. Increase the supplied
+mesh counts and reduce CFL (or implicit `dt`) until the observable of interest
+converges.
+
+`tools/compare_resolution.py` compares the configured counts with a specified
+refinement factor while holding geometry, source and receiver pitch fixed. Its
+three variants separate mesh refinement from time-step refinement. For example:
+
+```bash
+python tools/compare_resolution.py \
+    --config configs/01_plate_aluminum_lamb.yaml \
+    --output resolution_check --duration 40e-6 \
+    --refinement-factor 1.5 --step-factor 0.5
+```
+
+The shorter recording and first nine receivers make this an early-arrival
+sensitivity check. Validate the complete recording window and modes separately
+before treating a configuration as converged.

@@ -25,10 +25,12 @@ from guidedwavefem.device import DEVICE_CHOICES_HELP, normalize_device_request
 from guidedwavefem.materials import (
     DEFAULT_STEPS_PER_PERIOD,
     canonicalize_mode,
-    reference_wave_speed,
+    mesh_resolution,
+    sizing_wavelength,
     structure_from_config,
 )
 from guidedwavefem.sources import DEFAULT_N_CYCLES, SOURCE_TYPES
+from guidedwavefem.storage import atomic_output
 from guidedwavefem.units import parse_quantity
 
 # ---------------------------------------------------------------------------
@@ -47,6 +49,7 @@ SECTION_KEYS: dict[str, dict[str, str]] = {
         "duration": "duration",
         "device": "device",
         "precision": "precision",
+        "min_group_velocity": "min_group_velocity",
     },
     "geometry": {"sensing_length": "sensing_length", "absorb_length": "absorb_length"},
     "structure": {
@@ -75,13 +78,23 @@ SECTION_KEYS: dict[str, dict[str, str]] = {
     },
     "mesh": {
         k: k
-        for k in ("elems_per_wavelength", "min_elems_x", "min_elems_y", "degree", "max_frequency")
+        for k in (
+            "nx",
+            "ny_per_region",
+            "degree",
+            "max_frequency",
+            "min_frequency",
+            "min_wavelength",
+        )
     },
     "sensors": {
         **{k: k for k in ("n_sensors", "sensor_offset", "sensor_pitch", "sensor_y")},
         "sample_rate": "sensor_sample_rate",
     },
     "postprocess": {
+        "wave_characterisation": "wave_characterisation",
+        "structure_analysis": "structure_analysis",
+        "lamb_modes": "lamb_modes",
         "run_postprocess": "run_postprocess",
         # SI numbers (Hz, rad/m) or unit strings ("2 MHz", "3 rad/mm"); null = automatic
         "f_min": "disp_f_min",
@@ -102,6 +115,7 @@ SECTION_KEYS: dict[str, dict[str, str]] = {
             "write_vtx",
             "quick_plot",
             "compress_output",
+            "history_storage",
             "figure_formats",
             "usetex",
         )
@@ -122,7 +136,7 @@ DEFAULTS: dict[str, Any] = {
     "solver_type": "explicit",
     "device": "auto",
     "precision": "double",
-    "CFL": 0.5,  # explicit: fraction of the RK4 stability limit
+    "CFL": None,  # required for explicit: user-selected fraction of the stability certificate
     "steps_per_period": DEFAULT_STEPS_PER_PERIOD,  # implicit: steps per max_frequency period
     "time_factor": 1.2,
     "beta_val": 0.25,
@@ -135,34 +149,40 @@ DEFAULTS: dict[str, Any] = {
     "source_type": "ricker",
     "n_cycles": None,  # tone_burst only (default DEFAULT_N_CYCLES)
     "traction_max": 1.0e6,
-    # Geometry defaults scale with the reference wavelength λ_ref = c_slow / f_center
-    # (see _resolve_layout_defaults), so they are valid from seismic to ultrasonic scales.
+    # λ_ref is the center-frequency sizing wavelength, including A0 for free isotropic
+    # plates and any supplied min_wavelength bound (see _resolve_layout_defaults).
     "excitation_width": None,  # auto: min(λ_ref / 2, sensing_length / 10)
-    "source_x": None,  # auto: absorb_length + min(max(λ_ref, width), sensing_length / 8)
+    "source_x": None,  # auto: absorb_length + max(min(max(λ_ref, width), L / 8), width / 2)
     "source_fx": 0.0,
     "source_fy": 1.0,
-    "elems_per_wavelength": 10,
-    "min_elems_x": 100,
-    "min_elems_y": 4,
+    "nx": None,  # required exact longitudinal element count
+    "ny_per_region": None,  # required exact counts in bottom-to-top region order
     "degree": 2,
     "max_frequency": None,
+    "min_frequency": None,  # arrival-sizing lower edge (default f_center / 5; no filtering)
+    "min_wavelength": None,  # conservative wavelength bound across retained band [m]
+    "min_group_velocity": None,  # conservative packet travel speed [m/s]
     "n_sensors": None,  # auto: fill the sensing region up to MAX_AUTO_SENSORS
     "sensor_offset": None,  # auto: min(2 λ_ref, sensing_length / 4)
-    "sensor_pitch": None,  # auto: min(λ_ref / 8, sensing_length / 100)
+    "sensor_pitch": None,  # auto: min(λ_ref / 8, λ_mesh / 4, sensing_length / 100)
     "sensor_y": None,
     "sensor_sample_rate": None,  # auto: 20 × mesh frequency (solvers.AUTO_SAMPLES_PER_MESH_PERIOD)
     "run_postprocess": True,
+    "structure_analysis": True,  # structure-aware dispersion, polarization and propagation report
+    "wave_characterisation": None,
+    "lamb_modes": False,
     "disp_f_min": None,  # auto: 0
     "disp_f_max": None,  # auto: 2 * f_center
     "disp_k_min": None,  # auto: 0
-    "disp_k_max": None,  # auto: 2π disp_f_max / slowest wave speed (capped at π / pitch)
+    "disp_k_max": None,  # auto: sizing wavenumber at disp_f_max, limited by spatial Nyquist
     "output_dir": None,
     "target_snapshots": 200,
     "write_vtx": False,
     "quick_plot": True,
     "compress_output": False,
+    "history_storage": "memory",  # disk: scratch-backed histories with bounded collection RAM
     "figure_formats": list(FIGURE_FORMATS),
-    "usetex": "auto",
+    "usetex": False,
 }
 
 #: Upper limit for the automatic sensor count (``sensors.n_sensors: null``).
@@ -202,6 +222,63 @@ def _suggest(key: str, candidates: set[str] | frozenset[str]) -> str:
 # ---------------------------------------------------------------------------
 # File I/O
 # ---------------------------------------------------------------------------
+class _UniqueSafeLoader(yaml.SafeLoader):
+    """Validate original mapping keys before SafeLoader expands YAML merges."""
+
+    def construct_document(self, node: Any) -> Any:
+        # flatten_mapping mutates merge-source nodes, including aliased nodes.
+        # Inspect the entire original graph first so inherited overrides remain
+        # valid and duplicate keys cannot disappear during merge expansion.
+        pending = [node]
+        visited = set()
+        while pending:
+            current = pending.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            if isinstance(current, yaml.MappingNode):
+                self._validate_mapping_keys(current)
+                for key_node, value_node in current.value:
+                    pending.extend((key_node, value_node))
+            elif isinstance(current, yaml.SequenceNode):
+                pending.extend(current.value)
+        return super().construct_document(node)
+
+    def _validate_mapping_keys(self, node: yaml.MappingNode) -> None:
+        seen = {}
+        merge_key = object()
+        for key_node, _ in node.value:
+            if not isinstance(key_node, yaml.ScalarNode):
+                raise ValueError(f"Invalid mapping key at {key_node.start_mark}")
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                # A merge directive and a quoted literal "<<" key are distinct.
+                key = merge_key
+            elif key_node.tag == "tag:yaml.org,2002:value":
+                # SafeLoader normalizes the plain '=' key to a string on flattening.
+                key = self.construct_scalar(key_node)
+            else:
+                key = self.construct_object(key_node, deep=True)
+            try:
+                if key in seen:
+                    label = "<<" if key is merge_key else key
+                    raise ValueError(
+                        f"Duplicate key {label!r} at {key_node.start_mark}; "
+                        f"first defined at {seen[key]}"
+                    )
+                seen[key] = key_node.start_mark
+            except TypeError as exc:
+                raise ValueError(f"Invalid mapping key at {key_node.start_mark}") from exc
+
+
+def _unique_json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"Duplicate JSON key {key!r} in the same object")
+        result[key] = value
+    return result
+
+
 def load_config(config_path: str) -> dict[str, Any]:
     """Load a configuration mapping from a YAML, TOML, or JSON file."""
     if not os.path.exists(config_path):
@@ -210,13 +287,19 @@ def load_config(config_path: str) -> dict[str, Any]:
     ext = os.path.splitext(config_path)[1].lower()
     if ext in (".yaml", ".yml"):
         with open(config_path, encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+            try:
+                data = yaml.load(f, Loader=_UniqueSafeLoader)
+            except yaml.YAMLError as exc:
+                raise ValueError(f"Invalid YAML in {config_path}: {exc}") from exc
     elif ext == ".toml":
         with open(config_path, "rb") as f:
             data = tomllib.load(f)
     elif ext == ".json":
         with open(config_path, encoding="utf-8") as f:
-            data = json.load(f)
+            try:
+                data = json.load(f, object_pairs_hook=_unique_json_pairs)
+            except ValueError as exc:
+                raise ValueError(f"Invalid JSON in {config_path}: {exc}") from exc
     else:
         raise ValueError(
             f"Unsupported configuration format '{ext}'. Supported: .yaml, .yml, .toml, .json"
@@ -249,7 +332,7 @@ def dump_config(cfg_dict: dict[str, Any], out_path: str) -> None:
     """
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     cleaned = _sanitize(cfg_dict)
-    with open(out_path, "w", encoding="utf-8") as f:
+    with atomic_output(out_path) as f:
         if os.path.splitext(out_path)[1].lower() in (".yaml", ".yml"):
             yaml.safe_dump(cleaned, f, default_flow_style=False, sort_keys=False)
         else:
@@ -273,6 +356,14 @@ def flatten_config(cfg_in: Mapping[str, Any]) -> dict[str, Any]:
     flat: dict[str, Any] = {}
     origin: dict[str, str] = {}
 
+    def _reject_removed_mesh_key(key: str, where: str) -> None:
+        if key in {"elems_per_wavelength", "min_elems_x", "min_elems_y"}:
+            raise ValueError(
+                f"'{where}' is no longer supported: automatic mesh sizing has been removed. "
+                "Specify exact counts with 'mesh.nx' and 'mesh.ny_per_region' "
+                "(one count for each region, ordered bottom-to-top)."
+            )
+
     def _put(flat_key: str, value: Any, where: str) -> None:
         if flat_key in flat:
             raise ValueError(
@@ -286,11 +377,14 @@ def flatten_config(cfg_in: Mapping[str, Any]) -> dict[str, Any]:
         if key.startswith("_"):
             flat[key] = value  # internal metadata (e.g. _config_source)
             continue
+        _reject_removed_mesh_key(key, key)
         if key in SECTION_KEYS:
             if not isinstance(value, Mapping):
                 raise ValueError(f"Section '{key}' must be a mapping, got {type(value).__name__}")
             mapping = SECTION_KEYS[key]
             for sub_key, sub_value in value.items():
+                if key == "mesh":
+                    _reject_removed_mesh_key(str(sub_key), f"mesh.{sub_key}")
                 if sub_key not in mapping:
                     raise ValueError(
                         f"Unknown key '{key}.{sub_key}'.{_suggest(str(sub_key), set(mapping))}"
@@ -345,8 +439,21 @@ def _bool(cfg: dict[str, Any], key: str) -> bool:
 
 
 def _validate_output_options(cfg: dict[str, Any]) -> None:
-    for key in ("run_postprocess", "write_vtx", "quick_plot", "compress_output"):
+    for key in (
+        "run_postprocess",
+        "structure_analysis",
+        "write_vtx",
+        "quick_plot",
+        "compress_output",
+    ):
         _bool(cfg, key)
+    history_storage = cfg["history_storage"]
+    if not isinstance(history_storage, str) or history_storage.strip().lower() not in (
+        "memory",
+        "disk",
+    ):
+        raise ValueError("'history_storage' must be 'memory' or 'disk'")
+    cfg["history_storage"] = history_storage.strip().lower()
     formats = cfg["figure_formats"]
     if isinstance(formats, str):
         formats = [s.strip() for s in formats.split(",") if s.strip()]
@@ -429,24 +536,19 @@ def _resolve_automatic_values(cfg: dict[str, Any], summary: Mapping[str, Any]) -
         cfg["disp_k_min"] = 0.0
     if cfg["disp_k_max"] is None:
         k_nyquist = np.pi / cfg["sensor_pitch"]
-        k_wave = 2.0 * np.pi * cfg["disp_f_max"] / summary["c_wave_min"]
+        k_wave = 2.0 * np.pi / sizing_wavelength(cfg, summary, cfg["disp_f_max"])
         cfg["disp_k_max"] = float(max(min(k_wave, k_nyquist), 1.5 * cfg["disp_k_min"]))
     _resolve_dispersion_limits(cfg)  # re-check ordering with the automatic values
 
 
 def _resolve_layout_defaults(cfg: dict[str, Any], summary: Mapping[str, Any]) -> None:
-    """Fill source/sensor geometry left as ``null`` from the reference wavelength.
+    """Fill source/sensor geometry using the center-frequency sizing wavelength.
 
-    ``λ_ref = c_slow / f_center`` (``c_R`` for a halfspace, else the slowest
-    physical speed) makes the defaults valid at any scale: the load is half a
-    wavelength wide and one wavelength from the sponge, sensors start two
-    wavelengths away, are spaced ``λ_ref / 8`` apart, and fill the remaining
-    sensing region (at most :data:`MAX_AUTO_SENSORS`). Each length is also
-    capped by a fixed fraction of ``sensing_length`` (width ≤ L/10, sponge gap
-    ≤ L/8, offset ≤ L/4, pitch ≤ L/100), so the automatic layout always fits
-    even when the domain is short compared with λ_ref.
+    Sensor pitch also resolves the shortest retained-band wavelength. A0 is
+    included for free isotropic plates; other guided structures need explicit
+    conservative bounds. Domain-fraction caps keep the layout inside the mesh.
     """
-    wavelength = reference_wave_speed(summary) / cfg["f_center"]
+    wavelength = sizing_wavelength(cfg, summary, cfg["f_center"])
     sensing = cfg["sensing_length"]
     if cfg["excitation_width"] is None:
         cfg["excitation_width"] = min(0.5 * wavelength, 0.1 * sensing)
@@ -462,7 +564,8 @@ def _resolve_layout_defaults(cfg: dict[str, Any], summary: Mapping[str, Any]) ->
         cfg["sensor_offset"] = min(2.0 * wavelength, 0.25 * sensing)
     _float(cfg, "sensor_offset")
     if cfg["sensor_pitch"] is None:
-        cfg["sensor_pitch"] = min(wavelength / 8.0, 0.01 * sensing)
+        shortest = sizing_wavelength(cfg, summary, cfg.get("max_frequency") or 3 * cfg["f_center"])
+        cfg["sensor_pitch"] = min(wavelength / 8.0, shortest / 4.0, 0.01 * sensing)
     _float(cfg, "sensor_pitch", positive=True)
     if cfg["n_sensors"] is None:
         first = cfg["source_x"] + cfg["sensor_offset"]
@@ -481,15 +584,34 @@ def _validate_simulation(cfg: dict[str, Any], source: str) -> None:
         if cfg.get(key) is None:
             raise ValueError(f"Configuration '{source}' must specify '{key}'.")
 
-    for key in ("sensing_length", "absorb_length", "f_center", "CFL", "time_factor"):
+    for key in ("nx", "ny_per_region"):
+        if cfg.get(key) is None:
+            raise ValueError(f"Configuration '{source}' must specify 'mesh.{key}'.")
+    if cfg["solver_type"] == "explicit" and cfg.get("CFL") is None:
+        raise ValueError(f"Configuration '{source}' must specify 'solver.CFL' for explicit runs.")
+    if cfg.get("CFL") is not None and _float(cfg, "CFL", positive=True) > 1:
+        raise ValueError("CFL must be in (0, 1] (fraction of the RK4 stability limit)")
+
+    for key in ("sensing_length", "absorb_length", "f_center", "time_factor"):
         _float(cfg, key, positive=True)
     if _float(cfg, "steps_per_period", positive=True) < MIN_STEPS_PER_PERIOD:
         raise ValueError(
             f"'steps_per_period' must be >= {MIN_STEPS_PER_PERIOD:g}, got {cfg['steps_per_period']}"
         )
-    for key in ("dt", "duration", "max_frequency"):
+    for key in (
+        "dt",
+        "duration",
+        "max_frequency",
+        "min_frequency",
+        "min_wavelength",
+        "min_group_velocity",
+    ):
         if cfg.get(key) is not None:
             _float(cfg, key, positive=True)
+    if (cfg.get("min_frequency") or cfg["f_center"] / 5) >= (
+        cfg.get("max_frequency") or 3 * cfg["f_center"]
+    ):
+        raise ValueError("min_frequency must be less than max_frequency")
     if cfg.get("sensor_sample_rate") is not None:
         try:
             rate = parse_quantity(cfg["sensor_sample_rate"], "frequency")
@@ -499,15 +621,13 @@ def _validate_simulation(cfg: dict[str, Any], source: str) -> None:
             raise ValueError(f"'sensors.sample_rate' must be positive, got {rate}")
         cfg["sensor_sample_rate"] = rate
     for key, minimum in (
-        ("elems_per_wavelength", 1),
-        ("min_elems_x", 1),
-        ("min_elems_y", 1),
         ("target_snapshots", 1),
         ("degree", 1),
     ):
         _int(cfg, key, minimum)
 
     summary = structure_from_config(cfg)
+    cfg["nx"], cfg["ny_per_region"] = mesh_resolution(cfg, summary)
     _resolve_layout_defaults(cfg, summary)
     _int(cfg, "n_sensors", 2)
     for key in ("source_fx", "source_fy", "traction_max"):
@@ -520,8 +640,6 @@ def _validate_simulation(cfg: dict[str, Any], source: str) -> None:
             _float(cfg, key, nonneg=True)
 
     solver = cfg["solver_type"]
-    if solver == "explicit" and cfg["CFL"] > 1:
-        raise ValueError("Explicit CFL must be in (0, 1] (fraction of the RK4 stability limit)")
     beta, gamma = _float(cfg, "beta_val"), _float(cfg, "gamma_val")
     if solver == "implicit" and (gamma < 0.5 or beta < 0.25 * (gamma + 0.5) ** 2):
         raise ValueError("Newmark requires gamma >= 0.5 and beta >= (gamma+0.5)^2/4")
@@ -626,6 +744,11 @@ def parse_and_resolve_config(
     resolved["structure_mode"] = canonicalize_mode(resolved["structure_mode"])
 
     _validate_output_options(resolved)
+    from guidedwavefem.characterisation import validate_options
+
+    resolved["wave_characterisation"] = validate_options(resolved["wave_characterisation"])
+    if not isinstance(resolved["lamb_modes"], bool):
+        raise ValueError("postprocess.lamb_modes must be boolean")
     if validate_simulation:
         _validate_simulation(resolved, config_source)
     return resolved
@@ -641,12 +764,15 @@ TEMPLATE_CONFIG = """# =========================================================
 
 solver:
   type: "explicit"              # "explicit" (lumped-mass RK4) or "implicit" (Newmark-beta)
-  CFL: 0.5                      # Explicit only: fraction (0, 1] of the rigorous RK4 stability limit
+  CFL: 0.8                      # Required for explicit: fraction (0, 1] of the assembled stability certificate
   steps_per_period: 40          # Implicit only: Newmark steps per period at max_frequency
-  time_factor: 1.2              # T = time_factor * sensing_length / c_slow + pulse length
+  time_factor: 1.2              # Travel-time margin plus source pulse length
+  min_group_velocity: null     # [m/s] Independent bound for the modes/frequencies to retain
+  # Automatic duration estimates A0 only for a free isotropic plate; it cannot
+  # guarantee higher-mode arrivals near cutoffs. Set duration or this bound.
   beta: 0.25                    # Newmark-beta (implicit only)
   gamma: 0.5                    # Newmark-gamma (implicit only)
-  dt: null                      # Optional maximum time step [s]
+  dt: null                      # Optional maximum time step [s]; explicit stability checked after assembly
   duration: null                # Optional duration [s]; overrides time_factor
   device: "auto"                # Explicit, single-process only: auto | cpu | cuda | cuda:N | mps
   precision: "double"           # Explicit device engine: "double" or "single"
@@ -665,7 +791,6 @@ structure:
     rho: 2700.0                 # [kg/m^3]
     E: 70.0e9                   # [Pa]
     nu: 0.33                    # [-]
-    min_elems_y: 6              # Minimum elements through thickness
 
 absorbing_boundaries:
   alpha: null                   # [1/s] Peak mass-proportional damping (null = 1e7 * f_center / 1 MHz)
@@ -676,34 +801,40 @@ excitation:
   f_center: 1.0e6               # [Hz] Centre frequency
   n_cycles: null                # tone_burst only: number of cycles (null = 5)
   traction_max: 1.0e6           # [Pa] Peak traction amplitude
-  # Below, lambda_ref = c_slow / f_center (c_R for a halfspace, else the slowest speed).
-  excitation_width: null        # [m] Gaussian load width, sigma = width / 3 (null = lambda_ref / 2)*
-  source_x: null                # [m] Source position (null = absorb_length + lambda_ref)*
+  # lambda_ref is the sizing wavelength at f_center: bulk/Rayleigh reference,
+  # tightened by A0 for a free isotropic plate and by mesh.min_wavelength if set.
+  excitation_width: null        # [m] sigma = width / 3; auto min(lambda_ref / 2, L_sensing / 10)
+  source_x: null                # [m] Auto sponge clearance (gap formula below)
   source_fx: 0.0                # Tangential traction direction component
   source_fy: 1.0                # Normal traction direction component (default: normal load)
-  # * capped at L_sensing/10 (width), L_sensing/8 (sponge gap), L_sensing/100 (pitch).
+  # Auto source_x = absorb_length + max(min(max(lambda_ref, width), L_sensing/8), width/2).
 
 mesh:
-  elems_per_wavelength: 10      # Elements (not nodes) per shortest physical wavelength
-  min_elems_x: 100              # Longitudinal element floor
-  min_elems_y: 4                # Element floor per region
+  nx: 4000                     # Required exact longitudinal element count; verify mesh convergence
+  ny_per_region: [8]           # Required exact counts, bottom-to-top (including any halfspaces)
   degree: 2                     # Lagrange polynomial order (Q2 quadrilaterals)
-  max_frequency: null           # [Hz] Mesh sizing frequency (null = 3 * f_center)
+  # Frequency and wavelength controls below support time stepping, arrival
+  # estimates, source/sensor defaults, and plots; they never change mesh counts.
+  max_frequency: null           # [Hz] Analysis/time-step band edge (null = 3 * f_center)
+  min_frequency: null           # [Hz] Arrival-sizing band edge (null = f_center / 5)
+  min_wavelength: null          # [m] Conservative shortest retained-band wavelength
 
 sensors:
   n_sensors: null               # Measurement points (null = fill the sensing region, max 1001)
   sensor_offset: null           # [m] Source to first sensor (null = min(2 lambda_ref, L_sensing / 4))
-  sensor_pitch: null            # [m] Sensor spacing (null = lambda_ref / 8)*
+  sensor_pitch: null            # [m] Auto min(lambda_ref/8, lambda_mesh/4, L_sensing/100)
+  # lambda_mesh is the reference wavelength at mesh.max_frequency, not an element size.
   sensor_y: null                # [m] Sensor line height (null = loaded surface/interface)
   sample_rate: null             # [Hz] Stored sampling rate, e.g. "20 MHz" (null = 20 * max_frequency)
 
 postprocess:
+  structure_analysis: true     # Physics-aware multi-panel reports selected from archived structure
   run_postprocess: true         # 2D FFT dispersion analysis and figures
   # Plot limits: SI numbers (Hz, rad/m) or strings with units ("2 MHz", "3 rad/mm").
   f_min: null                   # null = 0
   f_max: null                   # null = 2 * f_center
   k_min: null                   # null = 0
-  k_max: null                   # null = 2*pi*f_max / slowest wave speed (capped at pi/pitch)
+  k_max: null                   # Auto sizing wavenumber at f_max, limited by spatial Nyquist
 
 output:
   output_dir: null              # null = results_guided_waves_{solver}
@@ -711,8 +842,9 @@ output:
   target_snapshots: 200         # VTX snapshot count
   quick_plot: true              # Overview figure (disabled by --no-postprocess)
   compress_output: false        # Write sensor_data.npz with zlib compression
+  history_storage: memory       # memory | disk (temporary maps; FFT postprocess still needs RAM)
   figure_formats: [png, pdf, svg, eps]
-  usetex: auto                  # auto (LaTeX if latex, dvipng, gs found) | true | false
+  usetex: false                 # true = external LaTeX; false = built-in serif/mathtext
 """
 
 

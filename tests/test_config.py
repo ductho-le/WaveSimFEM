@@ -19,7 +19,7 @@ from guidedwavefem.config import (
     load_config,
     parse_and_resolve_config,
 )
-from guidedwavefem.materials import reference_wave_speed, structure_from_config
+from guidedwavefem.materials import sizing_wavelength, structure_from_config
 from guidedwavefem.sources import DEFAULT_N_CYCLES
 
 ALUMINUM = {"thickness": 1e-3, "rho": 2700.0, "E": 70e9, "nu": 0.33, "material_model": "isotropic"}
@@ -27,7 +27,8 @@ ALUMINUM = {"thickness": 1e-3, "rho": 2700.0, "E": 70e9, "nu": 0.33, "material_m
 
 def _base(**overrides):
     cfg = {
-        "solver": {"type": "explicit"},
+        "solver": {"type": "explicit", "CFL": 0.8},
+        "mesh": {"nx": 3213, "ny_per_region": [7]},
         "geometry": {"sensing_length": 0.3, "absorb_length": 0.1},
         "excitation": {"f_center": 1e6},
         "structure": {"mode": "1_layer", "single_layer": dict(ALUMINUM)},
@@ -42,15 +43,26 @@ def test_valid_base_resolves_with_defaults():
     cfg = parse_and_resolve_config(custom_cfg=_base())
     assert cfg["device"] == "auto"
     assert cfg["precision"] == "double"
-    wavelength = reference_wave_speed(structure_from_config(cfg)) / 1e6
+    assert (cfg["nx"], cfg["ny_per_region"], cfg["CFL"]) == (3213, [7], 0.8)
+    summary = structure_from_config(cfg)
+    wavelength = sizing_wavelength(cfg, summary, 1e6)
     assert cfg["excitation_width"] == pytest.approx(wavelength / 2)
     assert cfg["source_x"] == pytest.approx(0.1 + wavelength)
-    assert cfg["sensor_pitch"] == pytest.approx(wavelength / 8)
+    assert cfg["sensor_pitch"] == pytest.approx(
+        min(wavelength / 8, sizing_wavelength(cfg, summary, 3e6) / 4)
+    )
     assert cfg["steps_per_period"] == 40 and cfg["sensor_sample_rate"] is None
     assert cfg["absorb_alpha"] == pytest.approx(ABSORB_ALPHA_REF)  # f0 = 1 MHz reference
     assert cfg["absorb_beta"] == pytest.approx(ABSORB_BETA_REF)
     assert cfg["source_type"] == "ricker" and cfg["n_cycles"] is None
     assert cfg["figure_formats"] == ["png", "pdf", "svg", "eps"]
+    assert cfg["usetex"] is False
+
+
+@pytest.mark.parametrize("value,expected", [(False, False), (True, True), ("AUTO", "auto")])
+def test_latex_setting_is_preserved(value, expected):
+    cfg = parse_and_resolve_config(custom_cfg=_base(output__usetex=value))
+    assert cfg["usetex"] == expected
 
 
 def test_auto_layout_scales_with_wavelength():
@@ -164,6 +176,107 @@ def test_invalid_values_are_rejected(key, value, match):
         parse_and_resolve_config(custom_cfg=_base(**{key: value}))
 
 
+@pytest.mark.parametrize("key", ["nx", "ny_per_region"])
+@pytest.mark.parametrize("missing", [False, True])
+def test_mesh_counts_are_required(key, missing):
+    cfg = _base()
+    if missing:
+        del cfg["mesh"][key]
+    else:
+        cfg["mesh"][key] = None
+    with pytest.raises(ValueError, match=rf"must specify 'mesh\.{key}'"):
+        parse_and_resolve_config(custom_cfg=cfg)
+
+
+@pytest.mark.parametrize("value", [0, -1, 3.5, True, "4", float("nan"), float("inf")])
+def test_longitudinal_count_must_be_a_positive_integer(value):
+    with pytest.raises(ValueError, match="nx"):
+        parse_and_resolve_config(custom_cfg=_base(mesh__nx=value))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        [],
+        4,
+        "4",
+        (4,),
+        {"plate": 4},
+        [0],
+        [-1],
+        [True],
+        [1.5],
+        ["4"],
+        [float("nan")],
+        [float("inf")],
+    ],
+)
+def test_region_counts_must_be_a_list_of_positive_integers(value):
+    with pytest.raises(ValueError, match="ny_per_region"):
+        parse_and_resolve_config(custom_cfg=_base(mesh__ny_per_region=value))
+
+
+def test_integer_counts_are_normalized_without_mutating_input():
+    cfg = _base(mesh__nx=3213.0, mesh__ny_per_region=[7.0])
+    resolved = parse_and_resolve_config(custom_cfg=cfg)
+    assert type(resolved["nx"]) is int
+    assert type(resolved["ny_per_region"][0]) is int
+    assert type(cfg["mesh"]["ny_per_region"][0]) is float
+
+
+@pytest.mark.parametrize("counts", [[4], [4, 5, 6]])
+def test_region_counts_must_match_the_normalized_structure(counts):
+    cfg = _base(mesh__ny_per_region=counts)
+    cfg["structure"] = {"mode": "N_layers", "layers": [dict(ALUMINUM), dict(ALUMINUM)]}
+    with pytest.raises(ValueError, match="ny_per_region"):
+        parse_and_resolve_config(custom_cfg=cfg)
+
+
+@pytest.mark.parametrize("key", ["elems_per_wavelength", "min_elems_x", "min_elems_y"])
+@pytest.mark.parametrize("sectioned", [False, True])
+def test_removed_automatic_mesh_keys_explain_migration(key, sectioned):
+    cfg = _base()
+    (cfg["mesh"] if sectioned else cfg)[key] = 8
+    with pytest.raises(ValueError, match=r"no longer supported.*mesh\.nx.*mesh\.ny_per_region"):
+        parse_and_resolve_config(custom_cfg=cfg)
+
+
+def test_removed_regional_minimum_explains_migration():
+    cfg = _base()
+    cfg["structure"]["single_layer"]["min_elems_y"] = 4
+    with pytest.raises(ValueError, match=r"min_elems_y.*ny_per_region"):
+        parse_and_resolve_config(custom_cfg=cfg)
+
+
+@pytest.mark.parametrize("dt", [None, 1e-9])
+@pytest.mark.parametrize("missing", [False, True])
+def test_explicit_cfl_is_required_even_with_a_dt_override(dt, missing):
+    cfg = _base(solver__dt=dt, solver__CFL=None)
+    if missing:
+        del cfg["solver"]["CFL"]
+    with pytest.raises(ValueError, match=r"must specify 'solver\.CFL'"):
+        parse_and_resolve_config(custom_cfg=cfg)
+
+
+def test_explicit_cfl_can_be_supplied_as_a_cli_override():
+    cfg = _base()
+    del cfg["solver"]["CFL"]
+    resolved = parse_and_resolve_config(custom_cfg=cfg, args=argparse.Namespace(cfl=0.5))
+    assert resolved["CFL"] == 0.5
+
+
+def test_implicit_cfl_is_optional():
+    cfg = _base(solver__type="implicit")
+    del cfg["solver"]["CFL"]
+    assert parse_and_resolve_config(custom_cfg=cfg)["CFL"] is None
+
+
+@pytest.mark.parametrize("value", [0, -1, 1.1, True, float("nan"), float("inf")])
+def test_implicit_cfl_is_validated_when_supplied(value):
+    with pytest.raises(ValueError, match="CFL"):
+        parse_and_resolve_config(custom_cfg=_base(solver__type="implicit", solver__CFL=value))
+
+
 @pytest.mark.parametrize("n_cycles", [0, 2.5, True, "five"])
 def test_tone_burst_cycles_are_strict(n_cycles):
     with pytest.raises(ValueError, match="n_cycles"):
@@ -240,6 +353,18 @@ def test_booleans_are_strict(value):
         parse_and_resolve_config(custom_cfg=_base(output__write_vtx=value))
 
 
+@pytest.mark.parametrize("value", ["false", 0, 1])
+def test_structure_report_switch_is_strict(value):
+    with pytest.raises(ValueError, match=r"structure_analysis.*true or false"):
+        parse_and_resolve_config(custom_cfg=_base(postprocess__structure_analysis=value))
+
+
+def test_structure_report_is_default_and_can_be_disabled():
+    assert parse_and_resolve_config(custom_cfg=_base())["structure_analysis"] is True
+    cfg = parse_and_resolve_config(custom_cfg=_base(postprocess__structure_analysis=False))
+    assert cfg["structure_analysis"] is False
+
+
 def test_unknown_section_key_suggests_correction():
     with pytest.raises(ValueError, match=r"Unknown key 'solver\.devcie'.*'device'"):
         flatten_config(_base(solver__devcie="cpu"))
@@ -273,6 +398,7 @@ def test_cli_overrides_take_precedence():
 
 def test_halfspace_aliases():
     cfg = _base()
+    cfg["mesh"]["ny_per_region"] = [8, 7]
     cfg["structure"] = {
         "mode": "plate_on_halfspace",
         "single_layer": dict(ALUMINUM),
@@ -317,6 +443,11 @@ def test_yaml_json_toml_resolve_identically(tmp_path):
     toml_text = """
 [solver]
 type = "explicit"
+CFL = 0.8
+
+[mesh]
+nx = 3213
+ny_per_region = [7]
 
 [geometry]
 sensing_length = 0.3

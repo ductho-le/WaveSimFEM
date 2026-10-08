@@ -1,82 +1,103 @@
-# ==============================================================================
-# Example 01 - structure.mode: "1_layer"
 # Lamb waves in a free aluminium plate (NDE / structural health monitoring)
-# ==============================================================================
-# Physics
-#   A 1 mm aluminium-alloy plate in vacuum (both faces traction-free) supports
-#   the dispersive Lamb modes: the extensional S0 mode (fast, ~5.4 km/s at low
-#   f*d) and the flexural A0 mode (slow, strongly dispersive). Above
-#   f*d ≈ 1.6 MHz*mm the A1 mode appears. The broadband Ricker pulse excites all
-#   modes in the 0-2 MHz band so that the 2D-FFT reproduces the dispersion curves.
+# Both faces are traction-free except for the top surface load; lateral sponges
+# truncate the plate. The broadband pulse excites dispersive A0/S0 and higher modes.
 #
 # Application
-#   Plate-like metallic structures (aircraft skins, pressure vessels, pipes
-#   unrolled) are inspected with Lamb waves for corrosion and cracks over long
-#   distances from a few transducers.
-#
-# Boundary conditions
-#   - Top (y = 1 mm):    traction-free except the Gaussian surface load strip
-#   - Bottom (y = 0):    traction-free
-#   - Left/right:        5th-order Rayleigh-damping sponges
+#   Dispersion and arrival-time analysis for non-destructive evaluation (NDE)
+#   and structural health monitoring (SHM) of uniform plates.
+# Model and numerical scope
+#   Linear 2D plane strain; 0.2-2 MHz sizing band and 200 mm receiver aperture.
+#   Q2 spacing provides approximately six elements per Rayleigh-like wavelength
+#   at 2 MHz. Compare A0/S0 with Rayleigh-Lamb theory and establish mesh, time-step,
+#   and recording-window convergence for the selected modes.
+# Usage
+#   sh tools/run_cpu4.sh -c configs/01_plate_aluminum_lamb.yaml
+#   Add --dry-run to inspect resource estimates. Run from the repository root.
+#   The launcher uses four MPI ranks with one library thread per rank.
+# Conventions
+#   Numeric inputs use SI units; null selects automatic sizing. Mesh counts are
+#   elements. See template.yaml for parameter definitions and README.md for setup.
 #
 # References
 #   - H. Lamb (1917), Proc. R. Soc. Lond. A 93, 114-128.
 #   - J. L. Rose (2014), Ultrasonic Guided Waves in Solid Media, Cambridge Univ. Press.
-# ==============================================================================
 
 solver:
-  type: "explicit"              # "explicit" (lumped-mass RK4) or "implicit" (Newmark-beta)
-  CFL: 0.5                      # Fraction (0, 1] of the rigorous RK4 stability limit
-  time_factor: 1.5              # T = time_factor * sensing_length / c_T + pulse length (keeps slow low-frequency A0 at the far sensors)
+  type: "explicit"
+  CFL: 0.8                     # Fraction of the assembled RK4 stability limit
+  device: cpu                  # CPU execution; MPI process count is set by the launcher
+  precision: double
+  dt: null                     # Assembled RK4 stability bound selects the step
+  duration: null               # Automatic A0-aware window, not all cutoff arrivals
+  time_factor: 1.2             # Travel-time multiplier for automatic duration
+  # Set min_group_velocity or duration to include slower near-cutoff higher modes.
 
 geometry:
-  sensing_length: 0.30          # [m] Pristine sensing region (300 mm)
-  absorb_length: 0.15           # [m] Lateral absorbing sponge width (150 mm)
+  sensing_length: 0.30          # [m]
+  absorb_length: 0.02           # [m]
 
 structure:
   mode: "1_layer"
   single_layer:
     name: "Aluminium alloy plate (6061-T6)"
-    thickness: 3.0e-3           # [m] 3 mm
+    thickness: 3.0e-3           # [m]
     material_model: "isotropic"
     rho: 2700.0                 # [kg/m^3]
     E: 70.0e9                   # [Pa]   -> c_L = 6.20 km/s (plane strain), c_T = 3.12 km/s
-    nu: 0.33                    # [-]
-    min_elems_y: 6              # Elements through the thickness
+    nu: 0.33
 
 absorbing_boundaries:
-  alpha: null                   # [1/s] null = 1e7 * f_center / 1 MHz
-  beta: null                    # [s]   null = 1e-9 * 1 MHz / f_center
+  alpha: null                  # [1/s] Frequency-scaled mass-proportional sponge damping
+  beta: null                   # [s] Frequency-scaled stiffness-proportional damping
 
 excitation:
-  source_type: "ricker"         # Broadband pulse: best for dispersion-curve extraction
-  f_center: 1.0e6               # [Hz] 1 MHz
-  traction_max: 1.0e6           # [Pa] 1 MPa peak surface traction
+  source_type: "ricker"
+  f_center: 1.0e6               # [Hz]
+  traction_max: 1.0e6           # [Pa]
   excitation_width: 2.0e-3      # [m] Gaussian strip width (sigma = width / 3)
-  source_x: null                # [m] null = absorb_length + lambda_ref (<= sensing_length / 8)
+  source_x: null               # [m] Automatic source position inside the sensing region
   source_fx: 1.0                # Tangential component (favours S0)
   source_fy: 1.0                # Normal component (favours A0)
 
 mesh:
-  elems_per_wavelength: 8       # Q2 elements per shortest (shear) wavelength
-  min_elems_x: 100
-  min_elems_y: 4
+  nx: 1440                     # Full 340 mm domain; dx = 0.236 mm
+  ny_per_region: [12]           # dy = 0.25 mm; resolves thickness mode shapes
   degree: 2
-  max_frequency: 1.5e6          # [Hz] Mesh sizing: 6 Q2 elements per shear wavelength at 2 MHz
+  max_frequency: 2.0e6          # [Hz] Accuracy/sampling band, not a source filter
+  min_frequency: 0.2e6          # [Hz] Positive arrival-sizing edge; does not filter signals
+  min_wavelength: null          # Automatic A0-aware estimate for this isotropic plate
 
 sensors:
-  n_sensors: 401                # Points along the loaded (top) surface
-  sensor_offset: 0.05           # [m] Source to first sensor (50 mm)
-  sensor_pitch: 0.5e-3          # [m] 0.5 mm -> Nyquist wavenumber 6.3 rad/mm
+  n_sensors: 401
+  sensor_offset: 0.05           # [m]
+  sensor_pitch: 0.5e-3         # [m] Receiver spacing; 200 mm total aperture
+  sensor_y: null                # Loaded top surface, y = 3 mm
+  sample_rate: "20 MHz"        # Requested storage rate: 10 samples per band-edge period
 
+# Display limits do not filter the excitation or recorded histories.
 postprocess:
+  structure_analysis: true    # Structure-specific dispersion, wave references and transport panels
   run_postprocess: true
-  f_min: 0.0                    # SI numbers (Hz, rad/m) or strings with units
+  # Theory-guided A0/S0 reconstruction for a free isotropic plate.
+  lamb_modes: true
+  # Receiver reports: inspect A0/S0 peak selection before interpreting fitted values.
+  wave_characterisation:
+    enabled: false             # Use the mode-resolved report instead of mixed-packet fits
+    component: y
+    frequency_band: ["0.0 MHz", "2.0 MHz"]
+    time_window: null          # Full record; specify [start, end] in seconds to isolate a mode
+    min_relative_amplitude: 0.01 # Exclude peaks below 1% of the array maximum
+  f_min: 0.0
   f_max: "2 MHz"
   k_min: 0.0
   k_max: "3 rad/mm"
 
+# Receiver histories and figures; full-field output is optional.
 output:
   output_dir: "results_01_plate_aluminum_lamb"
-  write_vtx: false              # true: ADIOS2 VTX (.bp) snapshots for ParaView
-  target_snapshots: 200
+  write_vtx: false
+  quick_plot: true
+  compress_output: false        # Avoid compression CPU cost
+  history_storage: memory       # Use disk if preflight exceeds available RAM
+  figure_formats: [png, pdf]    # Raster preview and vector publication layout
+  usetex: true                # true enables external LaTeX; default needs no TeX install
