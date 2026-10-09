@@ -15,6 +15,52 @@ from mpi4py import MPI
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit, RuntimeError])
+def test_mpi_abort_flushes_complete_diagnostic(monkeypatch, error_type):
+    from guidedwavefem import solvers
+
+    class BufferedStderr:
+        def __init__(self):
+            self.pending = []
+            self.forwarded = []
+
+        def write(self, text):
+            self.pending.append(text)
+            return len(text)
+
+        def flush(self):
+            self.forwarded.extend(self.pending)
+            self.pending.clear()
+
+    class AbortRequested(Exception):
+        pass
+
+    stderr = BufferedStderr()
+
+    class AbortComm:
+        def Abort(self, code):
+            assert code == 1
+            # The launcher must receive a complete diagnostic before termination,
+            # including the exception line rather than just the first frame.
+            assert any(
+                "Traceback (most recent call last):" in text
+                and f"{error_type.__name__}: injected rank-local failure" in text
+                for text in stderr.forwarded
+            )
+            raise AbortRequested
+
+    monkeypatch.setattr(solvers, "nprocs", 2)
+    monkeypatch.setattr(solvers, "comm", AbortComm())
+    monkeypatch.setattr(sys, "stderr", stderr)
+
+    @solvers.mpi_fail_fast
+    def fail():
+        raise error_type("injected rank-local failure")
+
+    with pytest.raises(AbortRequested):
+        fail()
+
+
 @pytest.mark.parametrize(
     "case",
     [

@@ -18,6 +18,7 @@ import functools
 import hashlib
 import os
 import platform
+import sys
 import tempfile
 import time as pytime
 import uuid
@@ -118,7 +119,10 @@ def mpi_fail_fast(function: Callable[..., Any]) -> Callable[..., Any]:
             if nprocs > 1 and not successful_exit:
                 import traceback
 
-                traceback.print_exc()
+                # Send the complete traceback together and flush it before MPI
+                # terminates the ranks and their output-forwarding channels.
+                sys.stderr.write(traceback.format_exc())
+                sys.stderr.flush()
                 comm.Abort(1)
             raise
 
