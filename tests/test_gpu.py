@@ -49,7 +49,7 @@ def test_invalid_device_request_raises(bad):
 
 @pytest.mark.parametrize(
     "raw,expected",
-    [("AUTO", "auto"), (" cpu ", "cpu"), ("cuda", "cuda:0"), ("cuda:1", "cuda:1"), ("mps", "mps")],
+    [("AUTO", "auto"), (" cpu ", "cpu"), ("cuda", "cuda:0"), ("cuda:1", "cuda:1")],
 )
 def test_normalize_device_request(raw, expected):
     assert normalize_device_request(raw) == expected
@@ -61,8 +61,6 @@ def test_explicit_unavailable_gpu_request_raises(monkeypatch):
     monkeypatch.setattr(device_mod, "detect_available_devices", lambda: [CPU_DEVICE])
     with pytest.raises(DeviceUnavailableError):
         device_mod.select_device("cuda:0")
-    with pytest.raises(DeviceUnavailableError):
-        device_mod.select_device("mps")
     assert device_mod.select_device("auto").device == "cpu"
 
 
@@ -249,26 +247,6 @@ def test_legacy_device_wrapper_and_tuple_csr():
         device_info=CPU_DEVICE,
     )
     assert times.shape == (11,) and sx.shape == (11, 3) and sy.shape == (11, 3)
-
-
-def test_torch_cpu_backend_matches_reference():
-    pytest.importorskip("torch")
-    K, C, inv_mass, load, S = _random_damped_system()
-    dt, n_steps = 2e-3, 50
-    ref = _reference_rk4(K, C, inv_mass, load, S, dt, n_steps)
-    torch_cpu = DeviceInfo(backend="torch", device="cpu", name="torch CPU")
-    result = integrate_explicit_rk4(
-        K,
-        C,
-        inv_mass,
-        load,
-        S,
-        dt=dt,
-        n_steps=n_steps,
-        source=_source,
-        backend=make_backend(torch_cpu, "double"),
-    )
-    np.testing.assert_allclose(result.sensor_data_x, ref[:, 0::2], rtol=1e-10, atol=1e-14)
 
 
 @pytest.mark.gpu

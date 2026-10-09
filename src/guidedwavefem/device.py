@@ -3,14 +3,11 @@
 Device requests are canonical strings:
 
 ``auto``
-    Best available accelerator (CuPy CUDA → PyTorch CUDA → PyTorch MPS), else CPU.
+    First available CuPy CUDA device, else CPU.
 ``cpu``
     Host CPU via SciPy sparse kernels.
 ``cuda`` / ``cuda:N``
-    NVIDIA GPU *N* (default 0) via CuPy, or PyTorch if CuPy is not installed.
-``mps``
-    Apple-Silicon GPU via PyTorch, only if PyTorch supports sparse CSR SpMV on
-    Metal (not the case as of PyTorch 2.x).
+    NVIDIA GPU *N* (default 0) via CuPy.
 
 Explicit accelerator requests that cannot be honored raise
 :class:`DeviceUnavailableError` instead of silently running on the CPU.
@@ -25,8 +22,8 @@ from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
 
-DEVICE_CHOICES_HELP = "auto, cpu, cuda, cuda:N, mps"
-_DEVICE_RE = re.compile(r"^(auto|cpu|mps|cuda(:\d+)?)$")
+DEVICE_CHOICES_HELP = "auto, cpu, cuda, cuda:N"
+_DEVICE_RE = re.compile(r"^(auto|cpu|cuda(:\d+)?)$")
 
 
 class DeviceUnavailableError(RuntimeError):
@@ -37,15 +34,15 @@ class DeviceUnavailableError(RuntimeError):
 class DeviceInfo:
     """Hardware device descriptor."""
 
-    backend: str  # 'cupy', 'torch', or 'scipy'
-    device: str  # e.g. 'cuda:0', 'mps', 'cpu'
+    backend: str  # 'cupy' or 'scipy'
+    device: str  # e.g. 'cuda:0', 'cpu'
     name: str  # e.g. 'NVIDIA GeForce RTX 4090', 'Host CPU'
     total_memory_bytes: int | None = None
     compute_capability: tuple[int, int] | None = None
 
     @property
     def is_gpu(self) -> bool:
-        return self.backend in ("cupy", "torch") and self.device != "cpu"
+        return self.backend == "cupy" and self.device != "cpu"
 
     @property
     def memory_gb(self) -> float | None:
@@ -74,7 +71,7 @@ def normalize_device_request(requested: object) -> str:
     Raises
     ------
     ValueError
-        If the request is not one of ``auto``, ``cpu``, ``cuda``, ``cuda:N``, ``mps``.
+        If the request is not one of ``auto``, ``cpu``, ``cuda``, ``cuda:N``.
     """
     req = str(requested).strip().lower() if requested is not None else "auto"
     if not _DEVICE_RE.match(req):
@@ -92,47 +89,6 @@ def is_cupy_available() -> bool:
         return False
     except Exception as exc:  # driver/runtime errors
         logger.debug("CuPy present but unusable: %s", exc)
-        return False
-
-
-def is_torch_cuda_available() -> bool:
-    """Return True if PyTorch is installed with a usable CUDA device."""
-    try:
-        import torch
-
-        return bool(torch.cuda.is_available() and torch.cuda.device_count() > 0)
-    except ImportError:
-        return False
-    except Exception as exc:
-        logger.debug("PyTorch CUDA unusable: %s", exc)
-        return False
-
-
-def is_torch_mps_available() -> bool:
-    """Return True if PyTorch MPS exists *and* supports sparse CSR SpMV.
-
-    As of PyTorch 2.x the Metal backend does not implement sparse CSR
-    matrix-vector products, so this probe normally returns False.
-    """
-    try:
-        import torch
-
-        if not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
-            return False
-        dev = torch.device("mps")
-        a_sp = torch.sparse_csr_tensor(
-            torch.tensor([0, 1], dtype=torch.int64, device=dev),
-            torch.tensor([0], dtype=torch.int64, device=dev),
-            torch.tensor([1.0], dtype=torch.float32, device=dev),
-            size=(1, 1),
-            device=dev,
-        )
-        torch.mv(a_sp, torch.ones(1, dtype=torch.float32, device=dev))
-        return True
-    except ImportError:
-        return False
-    except Exception as exc:
-        logger.debug("PyTorch MPS sparse SpMV unsupported: %s", exc)
         return False
 
 
@@ -159,27 +115,6 @@ def detect_available_devices() -> list[DeviceInfo]:
             except Exception as exc:
                 logger.debug("Failed querying CuPy device %d: %s", i, exc)
 
-    if not devices and is_torch_cuda_available():
-        import torch
-
-        for i in range(torch.cuda.device_count()):
-            try:
-                props = torch.cuda.get_device_properties(i)
-                devices.append(
-                    DeviceInfo(
-                        backend="torch",
-                        device=f"cuda:{i}",
-                        name=props.name,
-                        total_memory_bytes=props.total_memory,
-                        compute_capability=(props.major, props.minor),
-                    )
-                )
-            except Exception as exc:
-                logger.debug("Failed querying PyTorch device %d: %s", i, exc)
-
-    if is_torch_mps_available():
-        devices.append(DeviceInfo(backend="torch", device="mps", name="Apple Silicon GPU (Metal)"))
-
     devices.append(CPU_DEVICE)
     return devices
 
@@ -191,7 +126,7 @@ def select_device(
     """Resolve a device request to a concrete :class:`DeviceInfo`.
 
     ``auto`` falls back to the CPU when no accelerator is present. Explicit
-    accelerator requests (``cuda``, ``cuda:N``, ``mps``) raise
+    accelerator requests (``cuda``, ``cuda:N``) raise
     :class:`DeviceUnavailableError` when they cannot be satisfied.
     """
     req = normalize_device_request(requested)
@@ -218,11 +153,7 @@ def select_device(
         return matches[0]
 
     available = ", ".join(d.device for d in avail)
-    hint = (
-        " PyTorch does not support sparse CSR SpMV on Apple Metal (MPS); use 'auto' or 'cpu'."
-        if req == "mps"
-        else " Install CuPy (pip install cupy-cuda12x) or a CUDA build of PyTorch."
-    )
+    hint = " Install CuPy (pip install cupy-cuda12x) with a compatible CUDA driver."
     raise DeviceUnavailableError(
         f"Requested device '{req}' is not available (available: {available}).{hint}"
     )

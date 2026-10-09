@@ -81,7 +81,7 @@ jobs:
           destination = Path(os.environ["RUNNER_TEMP"])
           for filename, nx, rows in (
               ("03_halfspace_steel_rayleigh.yaml", 188, [25]),
-              ("02_layers_bonded_joint.yaml", 873, [6, 4, 6]),
+              ("02_plate_cfrp.yaml", 873, [1] * 8),
           ):
               cfg = yaml.safe_load((Path("configs") / filename).read_text())
               cfg["mesh"].update(nx=nx, ny_per_region=rows, min_frequency=None)
@@ -89,12 +89,12 @@ jobs:
           PY
           mpiexec -n 2 gwfem -c "$RUNNER_TEMP/03_halfspace_steel_rayleigh.yaml" -q \
             --duration 4e-6 --max-frequency 5e5 --no-postprocess --output "$RUNNER_TEMP/ex03"
-          mpiexec -n 2 gwfem -c "$RUNNER_TEMP/02_layers_bonded_joint.yaml" -q \
-            --duration 10e-6 --max-frequency 3e5 --no-postprocess --output "$RUNNER_TEMP/ex02"
+          mpiexec -n 2 gwfem -c "$RUNNER_TEMP/02_plate_cfrp.yaml" -q \
+            --duration 8e-6 --max-frequency 5e5 --no-postprocess --output "$RUNNER_TEMP/ex02"
           test -s "$RUNNER_TEMP/ex03/sensor_data.npz" && test -s "$RUNNER_TEMP/ex02/sensor_data.npz"
 
   array-backends:
-    name: SciPy and Torch CPU backend validation
+    name: SciPy CPU backend validation
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
@@ -106,7 +106,6 @@ jobs:
         with:
           python-version: "3.11"
       - run: python -m pip install -e . pytest
-      - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
       - name: Array backends against the exact matrix exponential
         run: python -m pytest -q tests/test_backend_validation.py -m "not gpu"
 

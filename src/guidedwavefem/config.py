@@ -786,7 +786,7 @@ solver:
   gamma: 0.5                    # Newmark-gamma (implicit only)
   dt: null                      # Optional maximum time step [s]; explicit stability checked after assembly
   duration: null                # Optional duration [s]; overrides time_factor
-  device: "auto"                # Explicit, single-process only: auto | cpu | cuda | cuda:N | mps
+  device: "auto"                # Explicit, single-process only: auto | cpu | cuda | cuda:N
   precision: "double"           # Explicit device engine: "double" or "single"
 
 geometry:

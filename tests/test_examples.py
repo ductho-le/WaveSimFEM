@@ -11,11 +11,12 @@ import pytest
 import yaml
 
 CONFIGS = sorted((Path(__file__).resolve().parents[1] / "configs").glob("0*.yaml"))
-# Fixed smoke-test grids preserve the earlier short-run meshes independently of
-# the frequency used for temporal accuracy and sensor sampling.
+# Fixed smoke-test grids check finite short-run output independently of the
+# frequency used for temporal accuracy and sensor sampling; they are not
+# convergence meshes.
 SMOKE_GRIDS = {
     "01_plate_aluminum_lamb": (857, [7]),
-    "02_layers_bonded_joint": (2910, [8, 4, 8]),
+    "02_plate_cfrp": (600, [1] * 8),
     "03_halfspace_steel_rayleigh": (376, [49]),
     "04_plate_on_halfspace_soil_bedrock": (100, [34, 8]),
     "05_layers_bone_qus": (379, [6, 16, 6]),

@@ -22,6 +22,11 @@ All notable changes are documented here. Versions follow
 
 ### Changed
 
+- Replace Example 02's aluminium/adhesive sandwich with a 1 mm symmetric
+  T300/914 CFRP cross-ply plate in `configs/02_plate_cfrp.yaml`. Eight elastic
+  anisotropic plies use plane-strain tensors reconstructed from published
+  three-dimensional constants and explicit RK4 integration. Update the example
+  catalogue, structure-report references, and serial/MPI smoke configurations.
 - Rename the CLI launcher executable to `gwfem` for consistent and concise
   simulation invocation.
 - Standardize all figure exports at 190 mm width with 10-point text,
@@ -58,14 +63,14 @@ All notable changes are documented here. Versions follow
 ## [0.3.0] — 2026-10-03 — production hardening
 
 ### Breaking changes
-- Explicit device requests are strict: `cuda`, `cuda:N` and `mps` raise
+- Explicit device requests are strict: `cuda` and `cuda:N` raise
   `DeviceUnavailableError` (CLI exit code 3) instead of silently falling back to
   the CPU; invalid device strings raise `ValueError`. `auto` still falls back.
 - Configuration schema is strict: unknown keys (top-level, section, or region),
   duplicated parameters, non-boolean switches, and constitutive fields ignored by
   a region's `material_model` (e.g. `Cv` without `viscoelastic`) are rejected.
 - `1_layer` mode rejects multiple layers; `absorb_depth` is only accepted on halfspaces.
-- Removed `solve_explicit_rk4_torch/cupy/scipy` and the `HAS_CUPY`/`HAS_TORCH`
+- Removed backend-specific legacy solver wrappers and library-availability
   globals (use `integrate_explicit_rk4` or the retained `solve_explicit_rk4_device`).
   Private helpers `_normalize_structure`/`_canonicalize_mode` are now public as
   `normalize_structure`/`structure_from_config`/`canonicalize_mode`.
@@ -144,7 +149,7 @@ All notable changes are documented here. Versions follow
 - `clean-junk` and `forbid-junk` pre-commit hooks backed by `tools/clean_junk.py`
   (safe removal of caches, build artifacts, and OS/editor files; staged junk is
   rejected). Ruff is pinned to the same version in pre-commit and CI.
-- Unified, backend-agnostic single-process RK4 engine (SciPy/CuPy/PyTorch): stacked
+- Unified, backend-agnostic single-process RK4 engine (SciPy/CuPy): stacked
   `[K|C]` operator, allocation-free stages, chunked device-resident sensor
   history, periodic non-finite detection; verified against the PETSc engine.
 - Config keys `output.compress_output`, `output.figure_formats`, `output.usetex`;

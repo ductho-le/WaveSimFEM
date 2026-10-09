@@ -67,7 +67,7 @@ solver:
   # but cost more steps/storage and can admit unwanted boundary reflections.
   duration: null
 
-  # auto (default), cpu, cuda, cuda:N (e.g. cuda:1), or mps.
+  # auto (default), cpu, cuda, or cuda:N (e.g. cuda:1).
   # Accelerators apply to single-process explicit integration. MPI and implicit
   # runs use CPU/PETSc. Choose cpu for reproducible backend comparisons;
   # explicit accelerator requests require a working supported backend.
@@ -75,7 +75,7 @@ solver:
 
   # double (default) or single for the single-process explicit engine.
   # Start with double; compare single against it before saving memory/runtime.
-  # Apple MPS uses float32; implicit and MPI/PETSc use float64.
+  # Implicit and MPI/PETSc use float64.
   precision: double
 
 geometry:

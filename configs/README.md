@@ -11,14 +11,16 @@ then establish convergence for the quantities required by your study.
 | :-- | :-- | :-- | :-- |
 | [`template.yaml`](template.yaml) | Complete parameter reference; 1 mm free aluminium plate | Ricker, 500 kHz | 1 MHz |
 | [`01_plate_aluminum_lamb.yaml`](01_plate_aluminum_lamb.yaml) | 3 mm aluminium plate; Lamb-wave NDE and structural health monitoring | Ricker, 1 MHz | 2 MHz |
-| [`02_layers_bonded_joint.yaml`](02_layers_bonded_joint.yaml) | Aluminium / epoxy / aluminium sandwich; bond-sensitive dispersion | Five-cycle Hann burst, 1 MHz | 1.5 MHz |
+| [`02_plate_cfrp.yaml`](02_plate_cfrp.yaml) | 1 mm T300/914 CFRP cross-ply plate, `[0/90/0/90]_s`; anisotropic laminate dispersion | Five-cycle Hann burst, 500 kHz | 750 kHz |
 | [`03_halfspace_steel_rayleigh.yaml`](03_halfspace_steel_rayleigh.yaml) | Truncated steel halfspace; Rayleigh-wave velocity measurement | Five-cycle Hann burst, 1 MHz | 2 MHz |
 | [`04_plate_on_halfspace_soil_bedrock.yaml`](04_plate_on_halfspace_soil_bedrock.yaml) | 10 m soil layer over bedrock; seismic surface-wave analysis | Ricker, 15 Hz | 30 Hz |
 | [`05_layers_bone_qus.yaml`](05_layers_bone_qus.yaml) | Marrow / cortical bone / tissue; axial-transmission ultrasound | Ricker, 500 kHz | 1 MHz |
 | [`06_plate_in_halfspaces_immersed_water.yaml`](06_plate_in_halfspaces_immersed_water.yaml) | Aluminium plate between water regions; immersion loading | Ricker, 500 kHz | 1 MHz |
 
-The examples cover all supported structure modes and isotropic,
-anisotropic-viscoelastic, and fluid material behaviour. Material properties are
+The examples cover all supported structure modes and the isotropic, anisotropic,
+viscoelastic, and fluid material models. All six use explicit RK4 integration;
+implicit Newmark integration is available through the solver setting or CLI.
+Material properties are
 representative application inputs; calibrate them to the specimen or site when
 comparing with measurements. References in each file provide physical context.
 
@@ -113,11 +115,15 @@ depends on wavelength, incidence angle, and sponge dimensions.
 ### Materials
 
 - **Isotropic:** specify density, Young's modulus, and Poisson ratio.
-- **Anisotropic:** specify the plane-strain stiffness tensor in global x/y axes.
-  Tensor entries follow `[C11, C12, C16, C22, C26, C66]`.
+- **Anisotropic:** specify the plane-strain stiffness tensor in global x1/x2 axes.
+  Tensor entries follow `[C11, C12, C16, C22, C26, C66]`. Example 02 uses eight
+  elastic CFRP plies with fibres along x1 at 0 degrees and along the invariant
+  plate direction x3 at 90 degrees. Its tensors are reconstructed from the
+  full three-dimensional compliance and restricted to plane strain after
+  rotation; each layer supplies its global tensor directly.
 - **Viscoelastic:** provide both `C` and `Cv` in the same order. Kelvin-Voigt loss
-  grows with frequency. In example 02, `Cv ≈ 2.65e-8 s * C`, giving a loss factor
-  of approximately 0.05 at 300 kHz and 0.167 at 1 MHz.
+  grows with frequency. Example 05 uses anisotropic elastic and viscous tensors
+  for its cortical-bone layer; example 02 is purely elastic.
 - **Fluid:** the displacement formulation uses small shear regularisation and
   full tangential continuity. Validate quantitative interface-wave dispersion
   and leakage against an appropriate fluid-loaded reference solution.
@@ -125,8 +131,9 @@ depends on wavelength, incidence angle, and sponge dimensions.
 ### Excitation
 
 `ricker` provides a broadband pulse for dispersion studies. `tone_burst` provides
-a Hann-windowed sinusoid with duration `n_cycles / f_center`; examples 02 and 03
-use five cycles at 1 MHz, giving a 5 µs pulse.
+a Hann-windowed sinusoid with duration `n_cycles / f_center`. Example 02 uses
+five cycles at 500 kHz, giving a 10 µs pulse; example 03 uses five cycles at
+1 MHz, giving a 5 µs pulse.
 
 The Gaussian traction footprint has `sigma = excitation_width / 3`. The vector
 `(source_fx, source_fy)` is normalised, and `traction_max` sets the resultant
@@ -207,11 +214,12 @@ the assembled stiffness/damping stability certificate, not simply `c * dt / dx`.
 The final step also depends on time-grid and sampling alignment. Halve CFL or a
 specified `dt` to assess temporal sensitivity.
 
-Example 02 uses implicit Newmark integration because the thin viscous adhesive
-can severely restrict explicit steps. Its average-acceleration parameters are
-`beta: 0.25` and `gamma: 0.5`, with 40 steps per period at the upper sizing
-frequency. Compare with 80 steps per period to assess phase and arrival-time
-accuracy. Unconditional stability does not establish temporal accuracy.
+Example 02 uses explicit RK4 for the elastic CFRP laminate. Refine the cells
+through each ply and reduce the time step independently when comparing its
+anisotropic dispersion with a layered reference. Implicit Newmark remains
+available for separate studies, with average-acceleration defaults
+`beta: 0.25` and `gamma: 0.5`. Compare 40 and 80 steps per period to assess
+temporal sensitivity; unconditional stability does not establish accuracy.
 
 ### Frequency band and duration
 
@@ -239,12 +247,13 @@ Spatial Nyquist requires `sensor_pitch < lambda_min/2`; a quarter-wavelength pit
 provides additional margin.
 
 Examples 01/02 use 200 mm apertures; 03/05/06 use 60 mm; example 04 uses 60 m.
-Example 02's 0.5 mm pitch targets the displayed branches up to 3 rad/mm. For
-0.7 mm adhesive-localised wavelengths, use pitch at most 0.175 mm and increase
-receiver count to preserve aperture. Unresolved modes can alias into the displayed
-range; plot limits do not prevent aliasing.
+Example 02's 0.5 mm pitch has spatial Nyquist 6.28 rad/mm, while the displayed
+range ends at 3 rad/mm. Check the independently calculated CFRP wavelengths
+over the excited band and reduce pitch if needed, increasing receiver count
+to preserve aperture. Unresolved modes can alias into the displayed range;
+plot limits do not prevent aliasing.
 
-The requested storage rates provide ten samples per upper-band period. Actual
+The requested storage rates provide at least ten samples per upper-band period. Actual
 recording intervals are quantised to solver steps. Stored sampling controls history
 size rather than integration accuracy, and recording does not apply an anti-alias
 filter.
@@ -306,7 +315,7 @@ The supplied starting bands are:
 | :-- | :-- |
 | Template | 0.3–0.8 MHz |
 | 01 aluminium plate | 0.5–1.5 MHz |
-| 02 bonded joint | 0.7–1.3 MHz |
+| 02 CFRP plate | 0.3–0.7 MHz |
 | 03 steel halfspace | 0.7–1.3 MHz |
 | 04 soil/bedrock | 8–25 Hz |
 | 05 bone | 0.3–0.8 MHz |

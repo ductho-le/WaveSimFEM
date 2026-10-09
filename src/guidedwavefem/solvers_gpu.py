@@ -1,4 +1,4 @@
-"""Single-process explicit RK4 engine for CPU (SciPy), CUDA (CuPy/PyTorch) and MPS.
+"""Single-process explicit RK4 engine for CPU (SciPy) and CUDA (CuPy).
 
 Design
 ------
@@ -13,7 +13,7 @@ Design
 * **Device-resident telemetry.** Sensor samples (decimated to the configured
   sample rate) are written into a bounded on-device ring buffer and flushed to
   host memory in large chunks, so there is no host synchronization per time step.
-* **Lazy imports.** CuPy/PyTorch are only imported when their backend is used.
+* **Lazy imports.** CuPy is only imported when its backend is used.
 
 The distributed (MPI) explicit solver uses :class:`guidedwavefem.numerics.PetscRK4`
 with PETSc operators; both implement the scheme of
@@ -203,65 +203,6 @@ class _CupyBackend(_NumpyLikeBackend):
         return self.xp.asnumpy(array)
 
 
-class _TorchBackend:
-    name = "torch"
-
-    def __init__(self, dtype: np.dtype, device: str = "cpu") -> None:
-        import torch
-
-        self.torch = torch
-        self.dtype = np.dtype(dtype)
-        self.tdtype = torch.float32 if self.dtype == np.float32 else torch.float64
-        self.device = torch.device(device)
-
-    def context(self) -> contextlib.AbstractContextManager[Any]:
-        return contextlib.nullcontext()
-
-    def synchronize(self) -> None:
-        if self.device.type == "cuda":
-            self.torch.cuda.synchronize(self.device)
-        elif self.device.type == "mps":
-            self.torch.mps.synchronize()
-
-    def from_host(self, array: np.ndarray) -> Any:
-        return self.torch.as_tensor(
-            np.ascontiguousarray(array, dtype=self.dtype), device=self.device
-        )
-
-    def csr(self, matrix: sp.csr_matrix) -> Any:
-        m = sp.csr_matrix(matrix, dtype=self.dtype)
-        return self.torch.sparse_csr_tensor(
-            self.torch.as_tensor(m.indptr.astype(np.int64)),
-            self.torch.as_tensor(m.indices.astype(np.int64)),
-            self.torch.as_tensor(m.data),
-            size=m.shape,
-            device=self.device,
-        )
-
-    def zeros(self, shape: int | tuple[int, ...]) -> Any:
-        return self.torch.zeros(shape, dtype=self.tdtype, device=self.device)
-
-    def to_host(self, array: Any) -> np.ndarray:
-        return array.detach().cpu().numpy().copy()
-
-    def spmv(self, matrix: Any, vector: Any) -> Any:
-        return self.torch.mv(matrix, vector)
-
-    def axpy(self, out: Any, x: Any, a: float, y: Any) -> None:
-        self.torch.add(x, y, alpha=a, out=out)
-
-    def add_scaled(self, acc: Any, a: float, y: Any, scratch: Any) -> None:
-        acc.add_(y, alpha=a)
-
-    def force_balance(self, out: Any, f: float, load: Any, r: Any, inv_mass: Any) -> None:
-        self.torch.mul(load, f, out=out)
-        out.sub_(r)
-        out.mul_(inv_mass)
-
-    def all_finite(self, array: Any) -> bool:
-        return bool(self.torch.isfinite(array).all())
-
-
 def resolve_precision(precision: str) -> np.dtype:
     """Map ``'double'``/``'single'`` to a NumPy dtype."""
     p = str(precision).lower()
@@ -274,18 +215,12 @@ def make_backend(
     device_info: DeviceInfo,
     precision: str = "double",
     log_func: Callable[[str], None] | None = None,
-) -> _NumpyLikeBackend | _TorchBackend:
+) -> _NumpyLikeBackend:
     """Instantiate the array backend for a resolved device."""
     dtype = resolve_precision(precision)
     if device_info.backend == "cupy":
         dev_id = int(device_info.device.split(":")[1]) if ":" in device_info.device else 0
         return _CupyBackend(dtype, dev_id)
-    if device_info.backend == "torch":
-        if device_info.device == "mps" and dtype == np.float64:
-            if log_func:
-                log_func("  [Device] MPS does not support float64; using single precision.")
-            dtype = np.dtype(np.float32)
-        return _TorchBackend(dtype, device_info.device)
     if device_info.backend == "scipy":
         return _NumpyLikeBackend(dtype)
     raise ValueError(f"Unknown backend '{device_info.backend}'")
@@ -339,7 +274,7 @@ def integrate_explicit_rk4(
     dt: float,
     n_steps: int,
     source: Callable[[float], float],
-    backend: _NumpyLikeBackend | _TorchBackend,
+    backend: _NumpyLikeBackend,
     save_every: int = 1,
     snapshot_callback: SnapshotCallback | None = None,
     report_interval: int = 0,

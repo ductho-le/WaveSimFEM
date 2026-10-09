@@ -16,7 +16,7 @@ from guidedwavefem.structure_analysis import reference_dispersion, structure_pro
 CONFIGS = Path(__file__).resolve().parents[1] / "configs"
 EXAMPLES = [
     ("01_plate_aluminum_lamb.yaml", "free_isotropic_plate"),
-    ("02_layers_bonded_joint.yaml", "layered_plate"),
+    ("02_plate_cfrp.yaml", "layered_plate"),
     ("03_halfspace_steel_rayleigh.yaml", "solid_halfspace"),
     ("04_plate_on_halfspace_soil_bedrock.yaml", "layered_halfspace"),
     ("05_layers_bone_qus.yaml", "solid_fluid_waveguide"),

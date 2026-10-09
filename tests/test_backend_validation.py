@@ -1,6 +1,6 @@
 """Independent, hardware-selectable checks for the shared array integrator.
 
-Set GWFEM_REQUIRE_CUDA_BACKENDS=cupy,torch on a CUDA validation machine.
+Set GWFEM_REQUIRE_CUDA_BACKENDS=cupy on a CUDA validation machine.
 Requested backends must actually run; missing libraries/devices then fail.
 """
 
@@ -20,29 +20,23 @@ from guidedwavefem.solvers_gpu import integrate_explicit_rk4, make_backend
 
 BACKENDS = [
     "scipy",
-    "torch_cpu",
     pytest.param("cupy", marks=pytest.mark.gpu),
-    pytest.param("torch_cuda", marks=pytest.mark.gpu),
 ]
 
 
 def _backend(name, precision):
     required = set(filter(None, os.environ.get("GWFEM_REQUIRE_CUDA_BACKENDS", "").split(",")))
-    if required - {"cupy", "torch"}:
-        pytest.fail("GWFEM_REQUIRE_CUDA_BACKENDS must contain cupy and/or torch")
-    library = "torch" if name.startswith("torch") else name
-    cuda = name in {"cupy", "torch_cuda"}
+    if required - {"cupy"}:
+        pytest.fail("GWFEM_REQUIRE_CUDA_BACKENDS must contain only cupy")
+    library = name
+    cuda = name == "cupy"
     if cuda and required and library not in required:
         pytest.skip(f"{library} was not selected for this hardware run")
     if library != "scipy":
         try:
             module = importlib.import_module(library)
             if cuda:
-                available = (
-                    module.cuda.is_available()
-                    if library == "torch"
-                    else module.cuda.runtime.getDeviceCount() > 0
-                )
+                available = module.cuda.runtime.getDeviceCount() > 0
                 if not available:
                     raise RuntimeError("no usable CUDA device")
         except (ImportError, RuntimeError) as exc:
