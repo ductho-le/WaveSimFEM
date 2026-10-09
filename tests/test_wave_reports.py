@@ -70,7 +70,7 @@ def _rows(path, name):
     "pattern,family,diagnostic",
     [
         ("01_*.yaml", "free_isotropic_plate", "polarization"),
-        ("02_*.yaml", "layered_plate", "spectral_decay"),
+        ("02_*.yaml", "layered_plate", "polarization"),
         ("03_*.yaml", "solid_halfspace", "polarization"),
         ("04_*.yaml", "layered_halfspace", "wavelength_thickness"),
         ("05_*.yaml", "solid_fluid_waveguide", "fluid_sound_line"),

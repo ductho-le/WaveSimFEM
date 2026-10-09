@@ -1,54 +1,60 @@
 # GuidedWaveFEM
 
-### GPU-accelerated wave simulation and receiver-data analysis
+**An open-source GPU-accelerated finite element framework for wave simulation and synthetic-data generation in layered media**
 
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg?logo=python&logoColor=white)](https://www.python.org/)
-[![FEniCSx](https://img.shields.io/badge/FEniCSx-0.10.0-orange.svg?logo=data%3Aimage%2Fpng%3Bbase64%2CiVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8%2F9hAAABN0lEQVR42oWSIUuDURSGH7YpuA0sBhcMWqbNJYNlLLggDIvNYJtZxGQR%2FAM2sTosJotFESxi2k8QwSboGE5BFB%2BDd%2Fjtc9%2B3Fw6Xe%2B5733Pvew4qI6Kkrqq5YecZ0lECDoBx4GsoI6XytHquttWpJF7SCwqhcgN4BT4S35igXFN7%2FuJd3Vazw7jxRE4tqhX1yT901S01M0pgWT1VZ9WWg3hRN9IE8upZIB%2BqK%2BpzTORRrSYJ1CP%2FflOb6pH%2FcRtm418XasF9gDywC9wB9zHfl4C1%2FiYTWWdixDmgDrQAI%2FkMUAWyUYFv4Ab4jImUgQvgIZbvhjsDHhTU%2FdAygx%2Bb6kIwr4%2B2upjUxjG1oV6pe%2BqkehwZqBO1nDYH%2FSiqE%2BqO2lGv1fWQG%2BDmEia8B1SAeaAJXAKdYcQfQWUiB%2F9coZIAAAAASUVORK5CYII%3D)](https://fenicsproject.org/)
-[![MPI Parallel](https://img.shields.io/badge/MPI-MPI4Py%20%7C%20PETSc-green.svg?logo=data:image/svg%2Bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI%2BPHBhdGggZD0iTTEyIDVWNTRNNSAxOVYxNEgxOVYxOSIgZmlsbD0ibm9uZSIgc3Ryb2tlPSJ3aGl0ZSIgc3Ryb2tlLXdpZHRoPSIyIi8%2BPGcgZmlsbD0id2hpdGUiPjxjaXJjbGUgY3g9IjEyIiBjeT0iNSIgcj0iNCIvPjxjaXJjbGUgY3g9IjUiIGN5PSIxOSIgcj0iNCIvPjxjaXJjbGUgY3g9IjE5IiBjeT0iMTkiIHI9IjQiLz48L2c%2BPC9zdmc%2B)](https://petsc.org/)
+[![DOLFINx 0.10.0](https://img.shields.io/badge/DOLFINx-0.10.0-orange.svg)](https://fenicsproject.org/)
+[![MPI / PETSc](https://img.shields.io/badge/MPI-PETSc-green.svg)](https://petsc.org/)
 [![CI](https://img.shields.io/github/actions/workflow/status/ductho-le/GuidedWaveFEM/tests.yml?branch=main&label=CI&logo=githubactions&logoColor=white)](https://github.com/ductho-le/GuidedWaveFEM/actions/workflows/tests.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?logo=opensourceinitiative&logoColor=white)](LICENSE)
-[![Code Style: Ruff](https://img.shields.io/badge/Code%20Style-Ruff-D7FF64?logo=ruff&logoColor=white)](https://github.com/astral-sh/ruff)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**GuidedWaveFEM** is an open-source Python framework for simulating transient guided and surface waves in two-dimensional layered media. It connects finite element modeling to receiver measurements, waveform archives, and frequency–wavenumber analysis in one configurable workflow.
+**GuidedWaveFEM** is a Python framework for transient wave simulation and synthetic-data generation in two-dimensional layered media. It combines DOLFINx finite element assembly with distributed PETSc solvers and a single-device CuPy CUDA engine, carrying physical parameters and acquisition settings through to archived receiver measurements and frequency–wavenumber representations.
 
-Use it to study wave propagation, compare acquisition settings, and generate traceable synthetic data for inverse problems and machine-learning applications. Documented examples span ultrasonic inspection, composite laminates, geophysics, and bone ultrasound.
+The framework supports guided- and surface-wave studies in metallic and composite plates, layered ground, and biomedical and immersed structures across ultrasonic and seismic scales. Its common simulation-to-data workflow provides reusable infrastructure for parameter studies, acquisition design, inverse problems, and labeled training collections for machine-learning and deep-learning applications.
 
-**Configure → inspect resources → simulate → record receivers → analyze and reuse**
-
----
+**Configure the structure and acquisition → assemble → integrate → record receivers → archive → analyze and reuse**
 
 ## Contents
 
-- [What it provides](#what-it-provides)
+- [Framework capabilities](#framework-capabilities)
+- [Physical model](#physical-model)
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [CPU and GPU execution](#cpu-and-gpu-execution)
 - [Example models](#example-models)
-- [Configure your own simulation](#configure-your-own-simulation)
+- [Configuration](#configuration)
 - [Outputs and post-processing](#outputs-and-post-processing)
-- [Synthetic-data workflows](#synthetic-data-workflows)
-- [Model scope and numerical accuracy](#model-scope-and-numerical-accuracy)
-- [Development and verification](#development-and-verification)
+- [Synthetic-data campaigns](#synthetic-data-campaigns)
+- [Numerical accuracy and verification](#numerical-accuracy-and-verification)
+- [Development](#development)
 - [Citation and license](#citation-and-license)
 
-## What it provides
+## Framework capabilities
 
-| Capability | What you can do |
+| Stage | Implementation |
 | :--- | :--- |
-| **Layered models** | Simulate free plates, bonded layers, truncated halfspaces, layers on substrates, and immersed plates. |
-| **Material options** | Use isotropic or anisotropic elasticity, Kelvin–Voigt viscosity, and a regularized fluid approximation. |
-| **CPU and GPU solvers** | Run explicit RK4 on a single CUDA GPU through CuPy, or use SciPy/PETSc on CPUs; implicit Newmark integration is also available through PETSc. |
-| **Receiver acquisition** | Specify receiver coordinates and sampling rate; evaluate displacement using finite element interpolation, including off-node positions. |
-| **Integrated analysis** | Generate waveforms, B-scans, dispersion spectra, and structure-specific reports from the recorded data. |
-| **Reproducible outputs** | Save resolved configurations, model metadata, execution settings, and source hashes alongside receiver histories. |
+| Model configuration | Validated YAML, TOML, or JSON inputs for geometry, materials, excitation, receivers, numerical controls, and output |
+| Finite element model | Interface-conforming quadrilateral meshes and shared DOLFINx/UFL assembly of mass, stiffness, and damping operators |
+| Transient integration | Lumped-mass explicit RK4 on SciPy, CuPy, or distributed PETSc; consistent-mass implicit Newmark on PETSc |
+| Receiver acquisition | Both in-plane displacement components evaluated by finite element interpolation at specified coordinates, including off-node positions |
+| Analysis | Waveforms, B-scans, frequency–wavenumber spectra, structure-specific diagnostics, and optional mode or packet reports |
+| Reproducible data | Receiver archives with resolved inputs, acquisition geometry, realized time grids, backend and precision metadata, and source hashes |
 
-The CUDA engine keeps operators and state on the device, combines stiffness and damping products, and buffers receiver data to reduce transfer overhead. CPU and GPU paths share the finite element assembly and acquisition conventions.
+The CUDA engine retains sparse operators and evolving state on the device. It evaluates stiffness and damping through a combined sparse block, using one internal-force product per RK4 stage, and buffers receiver samples before transferring them to host storage. Mesh generation, finite element assembly, and spectral post-processing run on the CPU.
+
+## Physical model
+
+GuidedWaveFEM solves **linear, two-dimensional plane-strain elastodynamics** in flat, layered structures. The propagation and depth/thickness coordinates are `x1` and `x2`; the recorded components are `u1` and `u2`, named `x` and `y` in the API and archives. The model is invariant in the third direction and assumes perfectly bonded solid interfaces.
+
+Supported structures are free single or multilayer plates, truncated halfspaces, plates on substrates, and plates between lower and upper halfspaces. Materials may be isotropic elastic, anisotropic elastic, or Kelvin–Voigt viscoelastic. Anisotropic stiffness and any Kelvin–Voigt viscosity are supplied in the simulation axes; three-dimensional material orientations must permit decoupling of in-plane and out-of-plane motion. Excitation is a Gaussian distributed traction with a Ricker pulse or Hann-windowed tone burst. Graded mass- and stiffness-proportional sponge damping truncates the domain.
+
+Fluid regions use a **weak-shear elastic surrogate** with artificial shear stiffness and continuous tangential displacement at solid–fluid interfaces. Quantitative interface-wave phase and leaky-wave attenuation require mesh and regularization studies against an independent inviscid acoustic reference. The bone and immersed-plate examples demonstrate this surrogate within the shared workflow. Curved or three-dimensional geometries, out-of-plane polarization, nonlinear response, local defects, and detailed transducer coupling are outside the current model.
 
 ## Installation
 
-### 1. Create the environment
+### Create the environment
 
-Use the supplied Conda environment on Linux or macOS. It installs Python 3.11/3.12, DOLFINx 0.10.0, PETSc 3.24, MPI, and the scientific Python dependencies.
+The supplied Conda environment supports Linux and macOS and specifies Python 3.11/3.12, DOLFINx 0.10.0, PETSc/petsc4py 3.24, MPI, and the scientific Python dependencies.
 
 ```bash
 git clone https://github.com/ductho-le/GuidedWaveFEM.git
@@ -68,179 +74,173 @@ gwfem --help
 > [!IMPORTANT]
 > Install the DOLFINx/PETSc/MPI stack through `environment.yml`. Installing the Python package with pip alone does not supply these runtime dependencies.
 
-### 2. Optional: enable CUDA
+### Enable CUDA execution
 
-On an NVIDIA GPU system with a compatible CUDA driver:
+On a system with a supported NVIDIA GPU and a compatible CUDA driver, install the optional CuPy dependency:
 
 ```bash
 python -m pip install -e ".[cuda]"
 ```
 
-This extra installs `cupy-cuda12x`. CUDA acceleration supports single-process explicit runs. Systems without a supported NVIDIA device, including Apple Silicon, can use the CPU solvers.
+The extra installs `cupy-cuda12x`. Each CUDA simulation uses one process and one GPU. CPU execution is available on systems without a supported NVIDIA device, including Apple Silicon.
 
 ## Quick start
 
-Run the following commands from the repository root with the `gwfem` environment active.
+Run these commands from the repository root with the `gwfem` environment active.
 
-### 1. Inspect an example
+### Inspect the model
 
 ```bash
 gwfem -c configs/01_plate_aluminum_lamb.yaml --dry-run
 ```
 
-The preflight report shows mesh dimensions, degrees of freedom, estimated time stepping, and memory requirements without constructing the finite element model.
+Preflight reports element spacing, estimated degrees of freedom, duration, step count, receiver-history size, and memory without constructing the finite element model. The supplied examples are research-scale configurations; use these estimates to plan a run.
 
-### 2. Run the simulation
+### Simulate and archive receiver data
 
 ```bash
 gwfem -c configs/01_plate_aluminum_lamb.yaml --device cpu --no-postprocess
 ```
 
-This records the aluminum-plate receiver signals in `results_01_plate_aluminum_lamb/`. The supplied examples are research-scale models; inspect the preflight before running them.
+This writes the aluminum-plate measurements and resolved run configuration to `results_01_plate_aluminum_lamb/`.
 
-### 3. Plot the saved data
+### Analyze the saved record
 
 ```bash
 gwfem --postprocess results_01_plate_aluminum_lamb/sensor_data.npz
 ```
 
-This separate analysis command uses built-in fonts and needs no LaTeX installation. It produces waveform and dispersion figures plus the enabled structure reports.
+Standalone post-processing uses the archived physical model and generates waveforms, B-scans, frequency–wavenumber spectra, and the default structure report. A plotting configuration selects optional reports such as Lamb reconstruction. Without a plotting configuration, it uses built-in fonts and requires no LaTeX installation.
 
-For simulation and plotting in one command, omit `--no-postprocess`. The shipped example configurations currently set `output.usetex: true`; change it to `false` to use built-in fonts, or install a LaTeX toolchain with `latex`, `dvipng`, and Ghostscript.
+Omit `--no-postprocess` to simulate and plot in one invocation. Example 01 sets `output.usetex: true`; change that setting to `false` for built-in rendering, or provide `latex`, `dvipng`, and Ghostscript. The reference template and Examples 02–06 already use `usetex: false`.
 
 `python -m guidedwavefem` can replace `gwfem` in these commands.
 
 ## CPU and GPU execution
 
-Choose an execution path using the same physical configuration:
+Select an execution path while retaining the same physical and acquisition configuration:
 
 ```bash
-# Single NVIDIA GPU, explicit integration
-gwfem -c configs/01_plate_aluminum_lamb.yaml --device cuda
+# Single NVIDIA GPU, explicit RK4
+gwfem -c configs/01_plate_aluminum_lamb.yaml --device cuda --no-postprocess
 
-# Four CPU processes, distributed PETSc integration
-mpiexec -n 4 gwfem -c configs/01_plate_aluminum_lamb.yaml --device cpu
+# Four CPU processes, distributed PETSc RK4
+mpiexec -n 4 gwfem -c configs/01_plate_aluminum_lamb.yaml --device cpu --no-postprocess
 
-# Implicit Newmark integration on CPUs
-mpiexec -n 4 gwfem -c configs/01_plate_aluminum_lamb.yaml --solver implicit --device cpu
+# Four CPU processes, consistent-mass Newmark
+mpiexec -n 4 gwfem -c configs/01_plate_aluminum_lamb.yaml --solver implicit --device cpu --no-postprocess
 ```
 
-| Device request | Single-process explicit | MPI explicit, multiple processes | Implicit |
+| Device request | Single-process explicit | Distributed explicit | Implicit |
 | :--- | :--- | :--- | :--- |
-| `auto` | CuPy CUDA if available; otherwise SciPy CPU | PETSc CPU | PETSc CPU |
+| `auto` | CuPy CUDA when available; otherwise SciPy CPU | PETSc CPU | PETSc CPU |
 | `cpu` | SciPy CPU | PETSc CPU | PETSc CPU |
-| `cuda` or `cuda:N` | Requested GPU; error if unavailable | Unsupported; raises an error | Ignored with a warning |
+| `cuda` or `cuda:N` | Requested GPU; error if unavailable | Unsupported; raises an error | Ignored with a warning; PETSc CPU |
 
-The examples select `cpu` explicitly. Use `--device auto` to request automatic selection or `--device cuda:1` to select another GPU.
+The examples explicitly select `cpu`. Use `--device auto` for automatic selection or `--device cuda:1` to choose a specific GPU. Distributed multi-GPU integration is outside the current execution model; independent cases can run on separate devices through external campaign scripts.
 
-**Precision.** Double precision is the default. `--precision single` enables FP32 for the single-process explicit engine; PETSc paths use FP64. Check waveform accuracy before adopting FP32 for long propagation distances.
+Double precision is the default. `--precision single` enables FP32 in the single-process SciPy/CuPy engine; PETSc paths use FP64. Assess precision over the complete observation window because phase differences can accumulate with propagation distance and step count.
 
-**MPI threads.** The CLI limits library threads per rank to avoid oversubscription and respects explicit thread settings. For example:
+The CLI limits numerical-library threads per MPI rank and respects explicit thread settings. The supplied launcher selects four ranks, one library thread per rank, CPU execution, and double precision:
 
 ```bash
-OMP_NUM_THREADS=1 mpiexec -n 4 gwfem -c configs/01_plate_aluminum_lamb.yaml --device cpu
+sh tools/run_cpu4.sh -c configs/template.yaml --no-postprocess
 ```
 
 ## Example models
 
-All six examples use explicit RK4 and include material definitions, source and receiver settings, mesh counts, and output options.
+The six application configurations use Q2 quadrilateral elements and explicit RK4. They include material references, source and receiver settings, exact element counts, and output options.
 
-| Configuration | Physical model | Application | Source |
+| Configuration | Structure | Application | Excitation |
 | :--- | :--- | :--- | :--- |
-| [01 · Aluminum plate](configs/01_plate_aluminum_lamb.yaml) | 3 mm free plate | Lamb-wave inspection | 1 MHz Ricker |
-| [02 · CFRP laminate](configs/02_plate_cfrp.yaml) | 1 mm, eight-ply `[0/90/0/90]_s` plate | Composite guided waves | 500 kHz tone burst |
-| [03 · Steel halfspace](configs/03_halfspace_steel_rayleigh.yaml) | Truncated solid halfspace | Rayleigh surface waves | 1 MHz tone burst |
-| [04 · Soil over bedrock](configs/04_plate_on_halfspace_soil_bedrock.yaml) | 10 m soil layer on a substrate | Seismic surface-wave analysis | 15 Hz Ricker |
-| [05 · Cortical bone](configs/05_layers_bone_qus.yaml) | Marrow/bone/tissue layers | Axial-transmission ultrasound | 500 kHz Ricker |
+| [01 · Aluminum plate](configs/01_plate_aluminum_lamb.yaml) | 3 mm free isotropic plate | Lamb-wave inspection | 1 MHz Ricker |
+| [02 · CFRP plate](configs/02_plate_cfrp.yaml) | 1 mm, eight-ply T300/914 `[0/90/0/90]_s` laminate | Anisotropic guided-wave dispersion | 1 MHz Ricker |
+| [03 · Steel halfspace](configs/03_halfspace_steel_rayleigh.yaml) | Truncated isotropic halfspace | Rayleigh surface waves | 1 MHz, five-cycle tone burst |
+| [04 · Soil over bedrock](configs/04_plate_on_halfspace_soil_bedrock.yaml) | 10 m soil layer on a truncated substrate | Seismic surface-wave analysis | 15 Hz Ricker |
+| [05 · Cortical bone](configs/05_layers_bone_qus.yaml) | Marrow / viscoelastic bone / tissue stack | Axial-transmission ultrasound | 500 kHz Ricker |
 | [06 · Immersed plate](configs/06_plate_in_halfspaces_immersed_water.yaml) | 1.5 mm aluminum plate between water regions | Fluid-loaded guided waves | 500 kHz Ricker |
 
-See [the example guide](configs/README.md) for material references, geometry conventions, and application-specific interpretation. Fluid regions use the approximation described under [model scope](#model-scope-and-numerical-accuracy).
+These inputs are starting points for application studies. Establish resolution, recording-window, and boundary requirements for the observables of interest before using them in a data-generation campaign. See the [example guide](configs/README.md) for material conventions and acquisition details, and the [annotated reference configuration](configs/template.yaml) for the complete parameter guide.
 
-## Configure your own simulation
+## Configuration
 
-Start from the closest example, or generate an annotated template:
+Copy the closest example or the annotated reference configuration. The CLI can also generate a starter file:
 
 ```bash
 gwfem --generate-config my_waveguide.yaml
 gwfem -c my_waveguide.yaml --dry-run
 ```
 
-YAML, TOML, and JSON are supported. Settings are resolved in this order: **built-in defaults → configuration file → CLI overrides**. Unknown or incompatible fields produce an input error.
+YAML, TOML, and JSON share the same validated schema. Settings resolve in the order **built-in defaults → configuration file → CLI overrides**. Unknown, duplicated, or incompatible fields produce an input error.
 
-### Configuration at a glance
-
-| Section | Main choices |
+| Section | Controls |
 | :--- | :--- |
-| `structure` | Structure mode, layers, thicknesses, densities, and material properties |
-| `geometry` | Observation-region length and lateral absorbing extensions |
-| `mesh` | Exact element counts and polynomial degree |
-| `solver` | Explicit/implicit integration, device, precision, time step, and duration |
-| `excitation` | Ricker pulse or tone burst, frequency, width, position, and traction direction |
-| `sensors` | Receiver count, pitch, offset, height, and recording rate |
-| `absorbing_boundaries` | Damping in the terminating sponge layers |
-| `postprocess` | Analysis options, reports, and displayed frequency/wavenumber limits |
+| `structure` | Structure mode, region thicknesses, densities, and constitutive properties |
+| `geometry` | Observation-region length and lateral sponge widths |
+| `mesh` | Exact element counts, polynomial degree, and frequency/wavelength sizing inputs |
+| `solver` | Integration scheme, device, precision, step controls, and duration |
+| `excitation` | Pulse type, center frequency, traction scale, Gaussian width, position, and direction |
+| `sensors` | Receiver count, pitch, source offset, height, and storage rate |
+| `absorbing_boundaries` | Peak mass- and stiffness-proportional sponge damping |
+| `postprocess` | Spectral display limits and structure, mode, or packet reports |
 | `output` | Destination, figure formats, history storage, compression, and field snapshots |
 
-Numeric physical inputs use **SI units**. Supported frequency and plot-limit fields also accept unit strings such as `"20 MHz"` or `"3 rad/mm"`. Logs and figures adapt their displayed units to the problem scale.
+Numeric physical inputs use **SI units**. Receiver sampling rates and spectral display limits also accept unit strings such as `"20 MHz"`, `"2 MHz"`, and `"3 rad/mm"`. Logs and figures choose displayed units appropriate to the problem scale.
 
-### Settings to choose explicitly
+Choose the following controls for each study:
 
-- **Mesh:** supply `mesh.nx` and `mesh.ny_per_region` as positive element counts. Regions are ordered bottom to top; absorbing depths belong to their existing regions. Changing frequency or material properties does not automatically refine the mesh.
-- **Explicit step:** supply `solver.CFL` in `(0, 1]`. The solver computes a stiffness-and-damping step limit from the assembled operators. An optional `solver.dt` is checked against that limit.
-- **Recording window:** set `solver.duration` when the required arrivals are known. Automatic duration is an estimate; `solver.min_group_velocity` can provide a conservative bound for slower packets.
-- **Receivers:** choose pitch, aperture, and sample rate for the modes and frequency band of interest. Display limits do not filter the source or recorded signals.
+- **Mesh counts:** supply positive integers for `mesh.nx` and each entry of `mesh.ny_per_region`. Horizontal counts cover the observation region and both lateral sponges. Vertical counts follow physical regions from bottom to top, including any halfspaces; sponge depths remain part of those regions. Frequency, wavelength, and polynomial-degree changes do not refine the counts automatically.
+- **Explicit step:** supply `solver.CFL` in `(0, 1]`, including when specifying `solver.dt`. CFL scales the assembled stiffness–damping stability limit. A requested step is checked against that limit and may shrink to align the time and recording grids.
+- **Implicit step:** `solver.steps_per_period` controls temporal resolution at `mesh.max_frequency` when `dt` is automatic. Average-acceleration Newmark defaults to `beta: 0.25` and `gamma: 0.5`.
+- **Duration:** set `solver.duration` for the required arrivals, or supply `solver.min_group_velocity` from an independent dispersion calculation. Automatic duration is an estimate, with A0-aware sizing for free isotropic plates; slow layered modes and cutoff tails may need longer records.
+- **Acquisition:** choose receiver pitch, aperture, and storage rate for the retained signal band. Frequency sizing and display limits do not filter the source or recorded histories, and stored-data decimation applies no anti-alias filter.
 
-The [annotated template](configs/template.yaml) contains the full parameter reference. Older wavelength-based mesh settings must be replaced by explicit element counts; see [the changelog](CHANGELOG.md).
-
-### Common command-line overrides
+Common overrides include:
 
 ```bash
-# Save a run to a separate directory
 gwfem -c my_waveguide.yaml --output results_my_waveguide
-
-# Set physical duration and explicit stability fraction
 gwfem -c my_waveguide.yaml --duration 2e-4 --cfl 0.4
-
-# Adjust displayed spectral limits
 gwfem -c my_waveguide.yaml --f-max "2 MHz" --k-max "3 rad/mm"
-
-# Record data without generating figures
 gwfem -c my_waveguide.yaml --no-postprocess
 ```
 
-Use `-q` for warnings only, `-v` for diagnostic logging, and `gwfem --help` for the complete option list.
+Use `-q` for warnings only, `-v` for diagnostic logging, and `gwfem --help` for all options. Migration notes for older mesh and parameter conventions are in [CHANGELOG.md](CHANGELOG.md).
 
 ## Outputs and post-processing
 
-### What a run saves
+### Run archives and figures
 
 | Output | Contents |
 | :--- | :--- |
-| `sensor_data.npz` | Sample times, receiver coordinates, both displacement components, model metadata, and the embedded run configuration |
-| `simulation_config.yaml` | Resolved inputs and runtime metadata, including mesh, time grid, backend, precision, versions, and source hashes |
-| `quick_results.png` | Quick waveform/B-scan overview when enabled |
-| `full_analysis.*` | Waveforms, B-scan, and frequency–wavenumber spectra in the requested formats |
-| `wave_physics/` | Structure-specific figures, numerical diagnostics, and explanatory report files |
-| `guided_wave.bp` | Optional full-field displacement snapshots for ParaView (`output.write_vtx: true`) |
+| `sensor_data.npz` | Stored times, receiver coordinates, both displacement components, model metadata, run identifier, and embedded resolved configuration |
+| `simulation_config.yaml` | Resolved inputs and runtime provenance: mesh, realized step and sampling, backend, precision, package/runtime versions, and source hashes |
+| `quick_results.png` | Optional waveform and B-scan overview |
+| `full_analysis.*` | Receiver waveforms, B-scan, and component-resolved frequency–wavenumber spectra |
+| `wave_physics/` | Structure-specific figures, qualified measurements, spectral arrays, and interpretation notes |
+| `lamb_modes/` | Optional A0/S0 reconstructions, residual signals, figures, and separation diagnostics |
+| `characterisation/` | Optional packet reports, per-receiver measurements, fit diagnostics, and interpretation notes |
+| `guided_wave.bp` | Optional full-field displacement snapshots for ParaView when `output.write_vtx: true` |
 
-Receiver histories have shape **`(number of stored times, number of receivers)`**. Read them directly with NumPy:
+Receiver histories have shape **`(number of stored times, number of receivers)`**. Load the measured components with NumPy:
 
 ```python
 import numpy as np
 
 with np.load("results_01_plate_aluminum_lamb/sensor_data.npz", allow_pickle=False) as data:
     times = data["times"]
-    u_x = data["sensor_data_x"]
-    u_y = data["sensor_data_y"]
+    receiver_x = data["sensor_x"]
+    u1 = data["sensor_data_x"]
+    u2 = data["sensor_data_y"]
+    run_id = str(data["run_id"].item())
 
-print(times.shape, u_x.shape, u_y.shape)
+print(run_id, times.shape, receiver_x.shape, u1.shape, u2.shape)
 ```
 
-Use the saved time array rather than assuming the requested recording rate was realized exactly. The configuration embedded in the NPZ archive is authoritative if an interrupted run leaves the YAML sidecar out of sync.
+Use the saved time array: storage intervals are integer multiples of the integration step, so the realized sampling rate can differ from the requested rate. The configuration embedded in the archive is authoritative if an interrupted output update leaves the YAML sidecar out of sync.
 
-### Analyze an existing archive
+### Reprocess an existing record
 
-Change figure settings without repeating the simulation:
+Change plotting settings without repeating the finite element solve:
 
 ```bash
 gwfem --postprocess results_01_plate_aluminum_lamb/sensor_data.npz \
@@ -265,39 +265,41 @@ gwfem -c plot_settings.yaml \
     --postprocess results_01_plate_aluminum_lamb/sensor_data.npz
 ```
 
-| Report | Purpose |
+| Report | Interpretation |
 | :--- | :--- |
-| Structure analysis | Dispersion and phase-velocity diagnostics, component comparison, and propagation direction; enabled by default |
-| Lamb modes | Theory-guided A0/S0 reconstruction for a free, single isotropic plate with archived model provenance |
-| Wave characterisation | Optional packet arrival, apparent decay, pulse evolution, particle motion, and time–frequency reports |
+| Structure analysis | Uses archived geometry and materials to select applicable dispersion references, phase-velocity diagnostics, component and polarization comparisons, directionality, or spatial-decay measurements; enabled by default |
+| Lamb modes | Approximate theory-guided A0/S0 spectral reconstruction for a free, single isotropic elastic plate with archived model provenance; enabled in Example 01 |
+| Wave characterisation | Optional packet arrival, apparent velocity and decay, pulse evolution, particle motion, and time–frequency reports; enabled in Examples 03–06 |
 
-Enable packet analysis through `postprocess.wave_characterisation.enabled` and choose a frequency band and time window containing the packet of interest. Report directories include README files explaining their methods, exclusions, and interpretation. Fitted decay is an apparent signal property, not automatically intrinsic material attenuation.
+Lamb reconstruction is a spectral filter of the tapered input. Its residual includes higher modes, out-of-band signals, and unresolved or rejected content. Interpret it as an approximate displacement separation; it does not measure modal energy.
 
-Figures use a consistent **190 mm width and 10-point text**. PNG, PDF, SVG, and EPS are supported; built-in text rendering requires no external LaTeX.
+Enable packet reports through `postprocess.wave_characterisation.enabled` and select a band and time window containing the packet of interest. The analysis screens weak, incomplete, ambiguous, or insufficiently resolved signals and records exclusion reasons. Fitted velocity is an apparent packet velocity; fitted decay can include interference, radiation, geometric effects, and numerical error as well as material loss. Report directories contain README files describing methods, qualifications, and provenance.
 
-## Synthetic-data workflows
+Frequency–wavenumber maps show displacement spectral power. Finite duration and receiver aperture set physical resolution; zero padding only provides denser spectral bins. Figures use a common 190 mm width and 10-point text, with PNG, PDF, SVG, and EPS export options. Built-in serif fonts and mathtext require no external LaTeX installation.
 
-Run parameter studies by scripting repeated CLI invocations or using the Python API. Give each configuration its own output directory and retain its resolved parameters as labels alongside the receiver archive. Parameter sampling, scheduling, and ML training are handled by your campaign code.
+## Synthetic-data campaigns
 
-For large collections:
+A synthetic example consists of a complete physical and acquisition configuration and its recorded measurement. Retaining geometry, constitutive properties, source settings, and receiver sampling with each archive preserves their association with candidate learning targets. Waveforms can be reused to produce different spectral or preprocessing representations without another forward solve.
 
-- Use `--no-postprocess` during generation and analyze selected archives afterward.
-- Keep a manifest linking each configuration, output path, target labels, and run status.
-- Use `output.history_storage: disk` for disk-backed recording when histories are large. Solver workspace and FFT analysis still require RAM.
-- Enable `output.compress_output` when reduced archive size is worth the compression cost.
-- Check representative cases and parameter extremes for adequate mesh, recording duration, and receiver sampling.
+Build campaigns by scripting repeated CLI invocations or calling `guidedwavefem.run_simulation`. The framework supplies forward simulation, receiver extraction, archiving, and analysis; campaign code supplies parameter sampling, scheduling, label definitions, dataset assembly, and ML/DL training. Assign a unique output directory to every case. Independent CUDA cases can run on separate devices, each with one process and one GPU.
 
-The same waveform archive can support multiple preprocessing choices without another finite element solve. For reproducible time and memory measurements, see [`tools/benchmark.py`](tools/benchmark.py).
+For reproducible collections:
 
-## Model scope and numerical accuracy
+- Keep a manifest containing parameter distributions, units, sampling seeds, target definitions, run identifiers, output paths, and accepted, failed, or rejected status with reasons.
+- Establish spatial, temporal, boundary, and acquisition requirements on representative cases and parameter extremes, then check complete histories and adequate sampling for each retained case.
+- Define common physical coordinates, sample times, and preprocessing. Equal array shapes alone do not establish comparable acquisition when automatically resolved time grids differ.
+- Keep receivers, windows, and augmented representations from the same physical realization in the same training or evaluation partition.
+- Use `--no-postprocess` during generation and analyze selected archives afterward. Choose `output.history_storage: disk` for large host histories and `output.compress_output: true` when archive savings justify compression cost. Solver workspaces and FFT analysis still require memory.
 
-The framework solves **linear, two-dimensional plane-strain elastodynamics** in flat layered structures. It uses conforming quadrilateral finite elements, explicit lumped-mass RK4 or implicit consistent-mass Newmark integration, and graded absorbing layers. Solid interfaces are perfectly bonded.
+Assess campaign performance as **accepted independent configurations per elapsed campaign time**, including setup, acquisition, archive writing, retries, and shared-resource contention. Record numerical acceptance criteria and hardware alongside throughput; a count of receiver traces represents a different quantity from a count of independent model realizations.
 
-Fluid regions use a **weak-shear elastic approximation**, rather than a dedicated inviscid acoustic formulation. Interface-sensitive phase and leakage predictions need comparison with an independent acoustic reference. Out-of-plane polarization, arbitrary 3D geometry, and nonlinear response are outside the current model.
+## Numerical accuracy and verification
 
-The shipped inputs are starting points for studies. A stable time step or a successful run does not establish accuracy: refine mesh counts and time stepping, check absorbing-boundary effects, and ensure the observation window captures the intended arrivals.
+The assembled RK4 step restriction accounts for stiffness and damping and supplies a stability bound. Accuracy depends separately on spatial resolution, integration step, receiver sampling, observation window, and domain truncation. Implicit stability likewise leaves phase and amplitude accuracy dependent on time-step choice and linear-solver tolerances.
 
-For an early-arrival refinement comparison:
+Refine horizontal and through-thickness element counts while keeping the physical source and receiver coordinates fixed. Reduce the explicit step or increase implicit steps per period independently. Compare the complete measurement window, including distant receivers where phase error accumulates, and vary sponge dimensions and undamped depth at fixed spacing. Use Rayleigh–Lamb theory, homogeneous Rayleigh speed, or an independent anisotropic, layered, or acoustic reference appropriate to the model and observable.
+
+The resolution utility provides an initial early-arrival comparison:
 
 ```bash
 python tools/compare_resolution.py \
@@ -306,59 +308,57 @@ python tools/compare_resolution.py \
     --refinement-factor 1.5 --step-factor 0.5
 ```
 
-This tool compares spatial and temporal refinement using a shortened record and a small receiver subset. Validate the full recording window separately. Detailed formulations and verification studies belong in the accompanying manuscript; this README focuses on operating the software.
+It compares refined spatial and temporal settings over a shortened record and a small receiver subset. Follow it with full-aperture and full-window checks for the intended study.
 
-## Development and verification
+Measure complete-run cost on the intended hardware with the benchmark utility:
 
-### Project layout
+```bash
+python tools/benchmark.py \
+    -c configs/template.yaml --output results_template_benchmark
+```
+
+The utility records simulation wall time and peak host memory, including setup, integration, receiver collection, and archive writing while disabling plots and VTX snapshots. Use fresh output directories, repeat matched runs, and distinguish cold compilation from warm-cache execution. CPU/GPU comparisons should retain the same model, acquisition, time grid, and precision; GPU memory and campaign throughput require additional measurements.
+
+The automated tests provide implementation and selected physics checks. Application-wide accuracy, speedup, dataset yield, and fluid-model validity require the corresponding reference and performance studies; the supplied configurations alone do not establish those results.
+
+## Development
 
 ```text
 GuidedWaveFEM/
-├── src/guidedwavefem/   # Configuration, materials, solvers, storage, and analysis
-├── configs/            # Annotated template and application examples
-├── tests/              # Unit, numerical, physics, MPI, and CLI tests
-├── tools/              # Benchmarking, refinement, and report-preview utilities
-├── environment.yml     # Supported scientific-computing environment
+├── src/guidedwavefem/   # Configuration, FEM assembly, integration, acquisition, and analysis
+├── configs/            # Annotated reference configuration and six application examples
+├── tests/              # Unit, numerical, physics, backend, MPI, and CLI checks
+├── tools/              # CPU launcher, benchmarking, refinement, and report previews
+├── environment.yml     # Scientific-computing environment
 ├── pyproject.toml      # Package metadata and optional dependencies
-└── CHANGELOG.md         # Version history and migration notes
+├── CITATION.cff        # Software citation metadata
+└── CHANGELOG.md        # Version history and migration notes
 ```
 
-The CPU and GPU array engines are implemented in [`solvers_gpu.py`](src/guidedwavefem/solvers_gpu.py); FEM assembly and PETSc integration are in [`solvers.py`](src/guidedwavefem/solvers.py). Configuration, material handling, storage, and analysis have separate modules under [`src/guidedwavefem/`](src/guidedwavefem/).
+[`solvers.py`](src/guidedwavefem/solvers.py) handles finite element construction and PETSc integration. [`solvers_gpu.py`](src/guidedwavefem/solvers_gpu.py) provides the shared SciPy/CuPy RK4 engine. Configuration, material tensors, numerical bounds, storage, spectra, and report generation have separate modules under [`src/guidedwavefem/`](src/guidedwavefem/).
 
-### Run the checks
+With the runtime environment active:
 
 ```bash
 python -m pip install -e ".[dev]"
 pre-commit install
 
-# Full test suite, or skip longer end-to-end physics runs
 python -m pytest
+# Skip longer end-to-end physics runs
 python -m pytest -m "not slow"
 
-# Lint and formatting
 ruff check src tests tools
 ruff format --check src tests tools
 ```
 
-Tests cover analytical wave references, integration accuracy, receiver interpolation, backend agreement, configuration validation, output integrity, and post-processing. CUDA tests require suitable hardware; to require that backend rather than silently skip it:
+Tests cover configuration validation, analytical wave references, integration accuracy, receiver interpolation, backend agreement, MPI collection, archive integrity, and post-processing. CUDA checks require suitable hardware. To require the CuPy backend instead of skipping unavailable-device checks:
 
 ```bash
 GWFEM_REQUIRE_CUDA_BACKENDS=cupy python -m pytest tests/test_backend_validation.py
 ```
 
-Report bugs and feature requests through [GitHub Issues](https://github.com/ductho-le/GuidedWaveFEM/issues). Include the configuration, package/environment versions, command, and error output where applicable.
+Report issues through [GitHub Issues](https://github.com/ductho-le/GuidedWaveFEM/issues), including the configuration, command, package/environment versions, and error output.
 
 ## Citation and license
 
-GuidedWaveFEM is distributed under the [MIT License](LICENSE). If you use it in research, cite the software using [`CITATION.cff`](CITATION.cff) and identify the version or commit used.
-
-```bibtex
-@software{Le_GuidedWaveFEM_2026,
-  author       = {Le, Ductho},
-  title        = {{GuidedWaveFEM: Unified Guided \& Surface Wave Finite Element Framework}},
-  year         = {2026},
-  version      = {0.3.0},
-  publisher    = {GitHub},
-  url          = {https://github.com/ductho-le/GuidedWaveFEM}
-}
-```
+GuidedWaveFEM is distributed under the [MIT License](LICENSE), which permits reuse and modification. If you use the framework in research, cite the software using [`CITATION.cff`](CITATION.cff) and identify the version or commit associated with the reported simulations or dataset. Retain the study configurations, campaign scripts, and processing settings with your results.

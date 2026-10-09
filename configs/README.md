@@ -11,8 +11,8 @@ then establish convergence for the quantities required by your study.
 | :-- | :-- | :-- | :-- |
 | [`template.yaml`](template.yaml) | Complete parameter reference; 1 mm free aluminium plate | Ricker, 500 kHz | 1 MHz |
 | [`01_plate_aluminum_lamb.yaml`](01_plate_aluminum_lamb.yaml) | 3 mm aluminium plate; Lamb-wave NDE and structural health monitoring | Ricker, 1 MHz | 2 MHz |
-| [`02_plate_cfrp.yaml`](02_plate_cfrp.yaml) | 1 mm T300/914 CFRP cross-ply plate, `[0/90/0/90]_s`; anisotropic laminate dispersion | Five-cycle Hann burst, 500 kHz | 750 kHz |
-| [`03_halfspace_steel_rayleigh.yaml`](03_halfspace_steel_rayleigh.yaml) | Truncated steel halfspace; Rayleigh-wave velocity measurement | Five-cycle Hann burst, 1 MHz | 2 MHz |
+| [`02_plate_cfrp.yaml`](02_plate_cfrp.yaml) | 1 mm T300/914 CFRP cross-ply plate, `[0/90/0/90]_s`; anisotropic laminate dispersion | Ricker, 1 MHz | 2 MHz |
+| [`03_halfspace_steel_rayleigh.yaml`](03_halfspace_steel_rayleigh.yaml) | Truncated steel halfspace; Rayleigh-wave velocity measurement | Five-cycle Hann burst, 1 MHz | 1.5 MHz |
 | [`04_plate_on_halfspace_soil_bedrock.yaml`](04_plate_on_halfspace_soil_bedrock.yaml) | 10 m soil layer over bedrock; seismic surface-wave analysis | Ricker, 15 Hz | 30 Hz |
 | [`05_layers_bone_qus.yaml`](05_layers_bone_qus.yaml) | Marrow / cortical bone / tissue; axial-transmission ultrasound | Ricker, 500 kHz | 1 MHz |
 | [`06_plate_in_halfspaces_immersed_water.yaml`](06_plate_in_halfspaces_immersed_water.yaml) | Aluminium plate between water regions; immersion loading | Ricker, 500 kHz | 1 MHz |
@@ -130,10 +130,9 @@ depends on wavelength, incidence angle, and sponge dimensions.
 
 ### Excitation
 
-`ricker` provides a broadband pulse for dispersion studies. `tone_burst` provides
-a Hann-windowed sinusoid with duration `n_cycles / f_center`. Example 02 uses
-five cycles at 500 kHz, giving a 10 µs pulse; example 03 uses five cycles at
-1 MHz, giving a 5 µs pulse.
+`ricker` provides a broadband pulse for dispersion studies; example 02 uses it
+at 1 MHz. `tone_burst` provides a Hann-windowed sinusoid with duration
+`n_cycles / f_center`. Example 03 uses five cycles at 1 MHz, giving a 5 µs pulse.
 
 The Gaussian traction footprint has `sigma = excitation_width / 3`. The vector
 `(source_fx, source_fy)` is normalised, and `traction_max` sets the resultant
@@ -191,7 +190,7 @@ superstrate where present. Sponge depths do not create additional regions.
 | :-- | --: | :-- | :-- |
 | Template | 640 | `[6]` | 0.219 mm |
 | 01 | 1440 | `[12]` | 0.236 mm |
-| 02 | 3300 | `[6, 2, 6]` | 0.121 mm |
+| 02 | 3300 | `[2, 2, 2, 2, 2, 2, 2, 2]` | 0.121 mm |
 | 03 | 920 | `[60]` | 0.283 mm |
 | 04 | 180 | `[30, 10]` | 1 m |
 | 05 | 757 | `[6, 22, 6]` | 0.185 mm |
@@ -247,10 +246,10 @@ Spatial Nyquist requires `sensor_pitch < lambda_min/2`; a quarter-wavelength pit
 provides additional margin.
 
 Examples 01/02 use 200 mm apertures; 03/05/06 use 60 mm; example 04 uses 60 m.
-Example 02's 0.5 mm pitch has spatial Nyquist 6.28 rad/mm, while the displayed
-range ends at 3 rad/mm. Check the independently calculated CFRP wavelengths
-over the excited band and reduce pitch if needed, increasing receiver count
-to preserve aperture. Unresolved modes can alias into the displayed range;
+Example 02 uses 801 receivers at 0.25 mm pitch, with spatial Nyquist
+12.57 rad/mm, while the displayed range ends at 6 rad/mm. Check the independently
+calculated CFRP wavelengths over the excited band and reduce pitch if needed,
+increasing receiver count to preserve aperture. Unresolved modes can alias into the displayed range;
 plot limits do not prevent aliasing.
 
 The requested storage rates provide at least ten samples per upper-band period. Actual
@@ -265,8 +264,9 @@ Postprocessing can still require substantial memory.
 
 All figures use 190 mm width and 10-point text, including tick numbers,
 legends and colourbars. `output.usetex: false` is the default and uses Matplotlib's
-bundled serif fonts and mathtext, so no LaTeX installation is needed. Set
-`output.usetex: true` to enable external LaTeX rendering; this requires `latex`,
+bundled serif fonts and mathtext, so no LaTeX installation is needed. The template
+and examples 02–06 select this setting. Example 01 selects `output.usetex: true`
+for external LaTeX rendering; this requires `latex`,
 `dvipng` and Ghostscript. The legacy `auto` setting uses LaTeX when its toolchain
 is available, otherwise built-in rendering. Panel sizing and styling stay the
 same in either mode.
@@ -290,11 +290,12 @@ free-plate Lamb references, halfspace Rayleigh/polarization comparisons,
 layered-ground wavelength/thickness, viscoelastic spatial-decay fits, or
 solid–fluid sound-line comparisons. Qualified measurements, exclusion reasons
 and physical references accompany the figures in CSV, JSON and NPZ files.
-The [main post-processing guide](../README.md#5-standalone-signal-post-processing)
+The [main post-processing guide](../README.md#outputs-and-post-processing)
 describes the sampling checks and limits of each measurement.
 
-The application configurations enable the receiver report in `postprocess`,
-except example 01, which uses the dedicated Lamb-mode report instead.
+Examples 03–06 enable the receiver report in `postprocess`. Example 01 uses the
+dedicated Lamb-mode report, while example 02 uses dispersion reports; both
+disable packet measurements.
 Set `wave_characterisation.enabled: false` to omit packet measurements; set
 `structure_analysis: false` separately to omit the structure-specific reports.
 The report settings follow this structure:
@@ -314,8 +315,8 @@ The supplied starting bands are:
 | Configuration | Report frequency band |
 | :-- | :-- |
 | Template | 0.3–0.8 MHz |
-| 01 aluminium plate | 0.5–1.5 MHz |
-| 02 CFRP plate | 0.3–0.7 MHz |
+| 01 aluminium plate (disabled) | 0.5–1.5 MHz |
+| 02 CFRP plate (disabled) | 0–2 MHz |
 | 03 steel halfspace | 0.7–1.3 MHz |
 | 04 soil/bedrock | 8–25 Hz |
 | 05 bone | 0.3–0.8 MHz |
@@ -328,8 +329,9 @@ especially for overlapping modes. Report filtering does not change the simulatio
 or the standard dispersion plot. `null` leaves the report signal unfiltered.
 A zero lower edge, such as `["0 MHz", "2 MHz"]`, selects a low-pass filter.
 A positive lower edge selects a band-pass filter. The upper edge must remain
-strictly below the stored sampling Nyquist frequency. Low-pass filtering retains
-DC and slow drift, which can affect envelope-based packet measurements.
+strictly below the stored sampling Nyquist frequency. The complete-record mean
+is removed before filtering. Low-pass filtering still retains slowly varying
+trends, which can affect envelope-based packet measurements.
 A time window is a pair of seconds
 within the archive, used to isolate a packet; filtering precedes windowing.
 An omitted or disabled report leaves standard dispersion processing unchanged.
@@ -345,15 +347,17 @@ using the configured figure formats. `receivers.csv` records per-receiver SI
 measurements and fit inclusion; `metrics.json` records settings, fit results,
 method, source archive path, and interpretation notes.
 
-Arrival detection uses the Hilbert-envelope maximum within the selected gate.
-Receivers with boundary maxima or amplitudes below the relative threshold are
-excluded. Velocity is a signed ordinary-least-squares travel-time slope along x;
-the fit requires at least three accepted receivers. It is an apparent packet
-velocity, not automatic modal identification. Apparent attenuation fits log peak
-amplitude along the inferred propagation direction and can be negative for growing
-signals. It includes interference and radiation, not only material loss. Pulse
-width is the envelope-energy RMS width. Inspect the plotted picks and R-squared
-before interpreting a fit; a single gate may contain multiple packets.
+Arrival detection interpolates the Hilbert-envelope peak within the selected gate.
+Receivers are excluded for weak signals, truncated packets, or multiple resolved
+packets. Velocity is the reciprocal of the signed ordinary-least-squares
+travel-time slope along x; the fit requires at least three accepted receivers,
+R-squared of at least 0.9, and a fitted arrival span of at least two stored samples.
+It is an apparent packet velocity, not automatic modal identification. Apparent
+attenuation fits log peak amplitude along the inferred propagation direction;
+unqualified spatial trends are withheld and growing signals can give negative
+values. It includes interference and radiation, not only material loss. Pulse
+width is the envelope-energy RMS width. Inspect the plotted picks and fit
+diagnostics before interpreting a measurement.
 
 Particle-motion plots use both displacement components at the first, middle, and
 last receivers. Spectrogram power is normalised separately at each receiver.
