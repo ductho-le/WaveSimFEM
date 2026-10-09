@@ -5,7 +5,7 @@
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![DOLFINx 0.10.0](https://img.shields.io/badge/DOLFINx-0.10.0-orange.svg)](https://fenicsproject.org/)
 [![MPI / PETSc](https://img.shields.io/badge/MPI-PETSc-green.svg)](https://petsc.org/)
-[![CI](https://img.shields.io/github/actions/workflow/status/ductho-le/GuidedWaveFEM/tests.yml?branch=main&label=CI&logo=githubactions&logoColor=white)](https://github.com/ductho-le/GuidedWaveFEM/actions/workflows/tests.yml)
+[![CI](https://github.com/ductho-le/GuidedWaveFEM/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/ductho-le/GuidedWaveFEM/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **GuidedWaveFEM** is a Python framework for transient wave simulation and synthetic-data generation in two-dimensional layered media. It combines DOLFINx finite element assembly with distributed PETSc solvers and a single-device CuPy CUDA engine, carrying physical parameters and acquisition settings through to archived receiver measurements and frequency–wavenumber representations.
