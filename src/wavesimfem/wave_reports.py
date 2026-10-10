@@ -676,8 +676,7 @@ def write_structure_report(
         )
         fig.colorbar(artist, cax=colour_axes[0], label="Power [dB]")
         ax = axes[1]
-        cmap = matplotlib.colormaps["viridis"].copy()
-        cmap.set_bad("#EDF1F5")
+        cmap = matplotlib.colormaps["viridis"].with_extremes(bad="#EDF1F5")
         artist = ax.pcolormesh(
             fu(scan["frequencies"]),
             scan["phase_velocities"] / velocity_scale,
