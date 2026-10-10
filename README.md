@@ -1,6 +1,6 @@
 # WaveSimFEM
 
-**An open-source GPU-accelerated finite element framework for wave simulation and synthetic-data generation in layered media**
+**A GPU-accelerated multi-scale finite element framework for acoustic and elastic wave simulation in heterogeneous layered media**
 
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![DOLFINx 0.10.0](https://img.shields.io/badge/DOLFINx-0.10.0-orange.svg)](https://fenicsproject.org/)
@@ -8,7 +8,7 @@
 [![CI](https://github.com/ductho-le/WaveSimFEM/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/ductho-le/WaveSimFEM/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**WaveSimFEM** is a Python framework for transient wave simulation and synthetic-data generation in two-dimensional layered media. It combines DOLFINx finite element assembly with distributed PETSc solvers and a single-device CuPy CUDA engine, carrying physical parameters and acquisition settings through to archived receiver measurements and frequency–wavenumber representations.
+**WaveSimFEM** is a GPU-accelerated multi-scale finite element framework for acoustic and elastic wave simulation in heterogeneous layered media. It combines DOLFINx finite element assembly with distributed PETSc solvers and a single-device CuPy CUDA engine, carrying physical parameters and acquisition settings through to archived receiver measurements and frequency–wavenumber representations.
 
 The framework supports guided- and surface-wave studies in metallic and composite plates, layered ground, and biomedical and immersed structures across ultrasonic and seismic scales. Its common simulation-to-data workflow provides reusable infrastructure for parameter studies, acquisition design, inverse problems, and labeled training collections for machine-learning and deep-learning applications.
 

@@ -1,4 +1,4 @@
-"""WaveSimFEM: Unified Guided & Surface Wave Finite Element Framework.
+"""WaveSimFEM: A GPU-accelerated multi-scale finite element framework for acoustic and elastic wave simulation in heterogeneous layered media.
 
 Public symbols are resolved lazily so that ``import wavesimfem`` (and
 lightweight modules such as :mod:`wavesimfem.config`) do not pull in

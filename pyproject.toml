@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "wavesimfem"
 version = "0.4.0"
-description = "Transient plane-strain guided and surface wave finite element simulations with dispersion extraction"
+description = "A GPU-accelerated multi-scale finite element framework for acoustic and elastic wave simulation in heterogeneous layered media"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"

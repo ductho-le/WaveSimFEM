@@ -906,7 +906,7 @@ resolve_and_apply_config = parse_and_resolve_config
 
 
 TEMPLATE_CONFIG = """# ==============================================================================
-# WaveSimFEM Simulation Configuration Template
+# WaveSimFEM: A GPU-accelerated multi-scale finite element framework for acoustic and elastic wave simulation in heterogeneous layered media
 # ==============================================================================
 
 solver:

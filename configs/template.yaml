@@ -1,4 +1,5 @@
-# WaveSimFEM parameter reference and runnable starting configuration
+# WaveSimFEM: A GPU-accelerated multi-scale finite element framework for acoustic and elastic wave simulation in heterogeneous layered media
+# Parameter reference and runnable starting configuration
 #
 # Application
 #   Reference configuration for A0/S0 dispersion in a free 1 mm aluminium plate.
