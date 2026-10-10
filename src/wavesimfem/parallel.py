@@ -1,6 +1,6 @@
 """Thread-placement policy for MPI runs.
 
-GuidedWaveFEM parallelises with MPI: one rank per core. Threaded BLAS/OpenMP
+WaveSimFEM parallelises with MPI: one rank per core. Threaded BLAS/OpenMP
 libraries loaded by NumPy, SciPy, and PETSc default to one thread *per core*
 in *every* rank, so ``mpiexec -n 4`` on an 11-core machine can run 40+ threads
 that contend for the same cores (measured: ~1000 % CPU for 4 ranks with no
@@ -9,7 +9,7 @@ speed-up). :func:`limit_threads_per_rank` caps each rank at
 
 The policy must be applied **before** NumPy/PETSc are imported, because the
 thread pools are sized when the shared libraries load. It is therefore kept
-free of third-party imports and invoked by :mod:`guidedwavefem._launcher`.
+free of third-party imports and invoked by :mod:`wavesimfem._launcher`.
 
 The policy never overrides a user's choice: if any of :data:`THREAD_ENV_VARS`
 is already set, nothing is changed. It is a no-op for single-rank runs.

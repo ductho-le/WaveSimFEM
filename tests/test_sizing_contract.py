@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from guidedwavefem.config import parse_and_resolve_config
-from guidedwavefem.materials import (
+from wavesimfem.config import parse_and_resolve_config
+from wavesimfem.materials import (
     compute_mesh_layout,
     duration_sizing_notes,
     preflight_estimate,
@@ -13,7 +13,7 @@ from guidedwavefem.materials import (
     sizing_group_velocity,
     structure_from_config,
 )
-from guidedwavefem.reporting import logger
+from wavesimfem.reporting import logger
 
 
 def plate_config(**updates):
@@ -108,7 +108,7 @@ def test_analysis_band_never_changes_user_mesh_counts(solver):
 def test_certified_explicit_request_uses_requested_grid(monkeypatch, requested_dt):
     # The element certificate is 100 ns. At CFL=0.5 the automatic step is 50 ns,
     # but a user request between 50 and 100 ns remains certified and is honored.
-    monkeypatch.setattr("guidedwavefem.materials.explicit_time_step_estimate", lambda *_: 5e-8)
+    monkeypatch.setattr("wavesimfem.materials.explicit_time_step_estimate", lambda *_: 5e-8)
     cfg = plate_config(solver_type="explicit", dt=requested_dt, duration=2e-5, CFL=0.5)
     estimates = preflight_estimate(cfg, rank=1)
     expected = sampled_time_grid(
@@ -124,7 +124,7 @@ def test_certified_explicit_request_uses_requested_grid(monkeypatch, requested_d
 
 
 def test_uncertified_explicit_request_warns_and_costs_conservatively(monkeypatch, capsys):
-    monkeypatch.setattr("guidedwavefem.materials.explicit_time_step_estimate", lambda *_: 5e-8)
+    monkeypatch.setattr("wavesimfem.materials.explicit_time_step_estimate", lambda *_: 5e-8)
     cfg = plate_config(solver_type="explicit", dt=10e-6, duration=2e-5)
     estimates = preflight_estimate(cfg)
     assert estimates["dt_stability_status"] == "requires_assembled_check"
@@ -144,7 +144,7 @@ def test_implicit_request_does_not_apply_explicit_certificate(monkeypatch):
     def must_not_run(*_args):
         pytest.fail("Explicit stability estimate must not constrain implicit Newmark")
 
-    monkeypatch.setattr("guidedwavefem.materials.explicit_time_step_estimate", must_not_run)
+    monkeypatch.setattr("wavesimfem.materials.explicit_time_step_estimate", must_not_run)
     estimates = preflight_estimate(plate_config(dt=10e-6, duration=2e-5), rank=1)
     assert estimates["dt_element_limit"] is None
     assert estimates["dt_stability_status"] == "not_applicable"
@@ -214,7 +214,7 @@ def test_disk_history_costs_scale_on_disk_with_bounded_measurement_buffers():
 
 
 def test_disk_history_costs_allow_a_row_larger_than_chunk_budget(monkeypatch):
-    monkeypatch.setattr("guidedwavefem.materials.HISTORY_CHUNK_BYTES", 8)
+    monkeypatch.setattr("wavesimfem.materials.HISTORY_CHUNK_BYTES", 8)
     cfg = plate_config(duration=1e-3, history_storage="disk")
     disk = preflight_estimate(cfg, rank=1)
     row_mb = 2 * cfg["n_sensors"] * 8 / 1024**2

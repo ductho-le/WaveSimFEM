@@ -15,8 +15,8 @@ import numpy as np
 from scipy.signal import butter, find_peaks, hilbert, sosfiltfilt
 from scipy.stats import linregress
 
-from guidedwavefem.storage import atomic_output
-from guidedwavefem.units import parse_quantity
+from wavesimfem.storage import atomic_output
+from wavesimfem.units import parse_quantity
 
 
 def validate_options(value):
@@ -38,8 +38,8 @@ def validate_options(value):
     options = defaults | value
     if not isinstance(options["enabled"], bool):
         raise ValueError("wave_characterisation.enabled must be boolean")
-    if options["component"] not in ("x", "y"):
-        raise ValueError("wave_characterisation.component must be x or y")
+    if options["component"] not in ("x", "y", "pressure"):
+        raise ValueError("wave_characterisation.component must be x, y or pressure")
     for key in ("frequency_band", "time_window"):
         pair = options[key]
         if pair is None:
@@ -325,15 +325,40 @@ def write_characterisation(
     """Write publication panels, a README, receiver CSV, and finite SI-valued metrics."""
     import matplotlib
 
-    from guidedwavefem.analysis import _PLOT_LOCK, _rc, resolve_usetex
-    from guidedwavefem.characterisation_plots import render_characterisation
+    from wavesimfem.analysis import _PLOT_LOCK, _rc, resolve_usetex
+    from wavesimfem.characterisation_plots import render_characterisation
 
     with np.load(archive_path, allow_pickle=False) as archive:
-        required = ("times", "sensor_x", "sensor_data_x", "sensor_data_y")
+        observable = (
+            str(archive["sensor_observable"]) if "sensor_observable" in archive else "displacement"
+        )
+        vector_keys = (
+            ("sensor_data_x", "sensor_data_y")
+            if observable == "displacement"
+            else ("sensor_data_vx", "sensor_data_vy")
+        )
+        required = (
+            ("times", "sensor_x", "sensor_data_pressure")
+            if observable == "pressure"
+            else ("times", "sensor_x", *vector_keys)
+        )
         missing = set(required) - set(archive.files)
         if missing:
             raise ValueError(f"Characterisation archive is missing {sorted(missing)}")
-        report, arrays = measure_packets(*(archive[k] for k in required), options=options)
+        if observable == "pressure":
+            options = {**(options or {}), "component": "pressure"}
+            signal = archive["sensor_data_pressure"]
+            report, arrays = measure_packets(
+                archive["times"],
+                archive["sensor_x"],
+                np.zeros_like(signal),
+                signal,
+                options=options,
+            )
+        else:
+            if options and options.get("component") == "pressure":
+                raise ValueError("The selected archive does not contain pressure sensors")
+            report, arrays = measure_packets(*(archive[k] for k in required), options=options)
         provenance = (
             str(archive["provenance"].item())
             if "provenance" in archive and archive["provenance"].ndim == 0
@@ -344,8 +369,26 @@ def write_characterisation(
         provenance=provenance,
         archive=str(Path(archive_path).resolve()),
         method="Baseline-corrected Hilbert envelope; sub-sample peaks; quality-screened spatial fits",
+        observable=observable,
+        amplitude_units={
+            "displacement": "m",
+            "pressure": "Pa",
+            "velocity": "m/s",
+            "particle_velocity": "m/s",
+        }[observable],
     )
     rows = report["receivers"]
+    if observable != "displacement":
+        for row in rows:
+            row["peak_envelope_si"] = row.pop("peak_envelope_m")
+            row["envelope_squared_integral_si"] = row.pop("envelope_energy_m2_s")
+        report["preprocessing"]["baseline"] = (
+            "Complete-record mean removed separately from each observable component and receiver"
+        )
+    if observable == "pressure":
+        report["summary"]["notes"].append(
+            "Pressure is scalar; particle-motion and polarization plots are unavailable."
+        )
     destination = Path(output_dir or Path(archive_path).parent) / "characterisation"
     destination.mkdir(parents=True, exist_ok=True)
     with _PLOT_LOCK, matplotlib.rc_context(_rc(resolve_usetex(usetex))):
@@ -369,7 +412,7 @@ def write_characterisation(
         "## Processing and provenance",
         "",
         f"- Provenance: {provenance or 'No provenance string was supplied in the archive.'}",
-        f"- Displacement component: {report['options']['component']}.",
+        f"- Observable: {observable}; component: {report['options']['component']}; amplitude units: {report['amplitude_units']}.",
         f"- Effective time gate [s]: {report['preprocessing']['effective_time_window_s']}.",
         f"- Frequency filter [Hz]: {report['options']['frequency_band'] or 'none'}.",
         f"- Receivers accepted: {report['summary']['valid_receivers']} of {len(rows)}.",

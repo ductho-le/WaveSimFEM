@@ -1,6 +1,6 @@
 """Console reporting: package logger, verbosity control, and summary tables.
 
-All user-facing progress output goes through the ``guidedwavefem`` logger so
+All user-facing progress output goes through the ``wavesimfem`` logger so
 that applications can silence, redirect, or capture it with the standard
 :mod:`logging` machinery. By default messages are written to the *current*
 ``sys.stdout`` (resolved at emit time, so pytest/IPython capture works).
@@ -13,9 +13,9 @@ import sys
 from collections.abc import Sequence
 from typing import Any
 
-from guidedwavefem.units import fmt_frequency, fmt_length, length_unit
+from wavesimfem.units import fmt_frequency, fmt_length, length_unit
 
-LOGGER_NAME = "guidedwavefem"
+LOGGER_NAME = "wavesimfem"
 logger = logging.getLogger(LOGGER_NAME)
 
 
@@ -89,6 +89,13 @@ def print_structure_table(summary: dict[str, Any], rank: int = 0, f0: float | No
     )
     log(mid)
     for i, r in enumerate(regions):
+        model_display = (
+            "acoustic"
+            if r.get("is_acoustic")
+            else "legacy fluid"
+            if r.get("is_legacy_fluid")
+            else r["material_model"]
+        )
         ct_display = (
             f"{'— (fluid)':<{w_ct - 2}}"
             if r.get("is_fluid", False)
@@ -97,17 +104,26 @@ def print_structure_table(summary: dict[str, Any], rank: int = 0, f0: float | No
         log(
             f"│ {i + 1:<{w_no - 2}} │ {r['name'][: w_name - 2]:<{w_name - 2}} │ "
             f"{th_unit(r['thickness']):<{w_th - 2}.4g} │ "
-            f"{r['material_model'][: w_mod - 2]:<{w_mod - 2}} │ "
+            f"{model_display[: w_mod - 2]:<{w_mod - 2}} │ "
             f"{r['rho']:<{w_rho - 2}.1f} │ {r['c_L']:<{w_cl - 2}.1f} │ "
             f"{ct_display} │ {r['role'][: w_role - 2]:<{w_role - 2}} │"
         )
     log(bot)
+    if summary.get("has_acoustic", False):
+        log(
+            "  Acoustic fluid: scalar pressure, zero shear stiffness, normal coupling with tangential slip."
+        )
+    if summary.get("has_legacy_fluid", False):
+        warn(
+            "Legacy regularized-elastic fluid approximation: artificial shear stiffness "
+            "and tangential displacement continuity."
+        )
 
     n_plate = len(summary["plate_layers"])
     mode_labels = {
         "1_layer": "1 layer (free plate in vacuum)",
         "N_layers": f"N layers ({n_plate} layers in vacuum)",
-        "halfspace": "Halfspace (semi-infinite solid, surface at y = 0)",
+        "halfspace": "Halfspace (truncated semi-infinite medium, surface at y = 0)",
         "plate_on_halfspace": f"N layers over a halfspace ({n_plate} plate layers on substrate)",
         "plate_in_halfspaces": (
             f"N layers between 2 halfspaces ({n_plate} plate layers between "
@@ -133,7 +149,7 @@ def print_structure_table(summary: dict[str, Any], rank: int = 0, f0: float | No
         is_fluid_hs = hs.get("is_fluid", False)
         wav_lbl = "λ_f" if is_fluid_hs else "λ_R"
         log(
-            f"  Halfspace free surface: y = 0 (total depth {fmt_length(summary['H_domain'])}, "
+            f"  Halfspace exterior surface: y = 0 (total depth {fmt_length(summary['H_domain'])}, "
             f"y ∈ {_span(summary['y_min'], 0.0)})"
         )
         if is_fluid_hs:
@@ -157,7 +173,7 @@ def print_structure_table(summary: dict[str, Any], rank: int = 0, f0: float | No
             f"  Bottom absorbing sponge: {fmt_length(h_sponge)} ({h_sponge / lambda_ref:.1f} {wav_lbl}), "
             f"y ∈ {_span(summary['y_min'], summary['y_min'] + h_sponge)}"
         )
-        log("  Sensors and excitation surface: y = 0\n")
+        log("  Default acquisition reference: exterior surface y = 0\n")
         return
 
     log(
@@ -207,4 +223,4 @@ def print_structure_table(summary: dict[str, Any], rank: int = 0, f0: float | No
         loc_str = (
             f"top surface of '{top_reg['name']}' [{top_type}] at y = {fmt_length(summary['y_max'])}"
         )
-    log(f"  Sensors and excitation boundary: {loc_str}\n")
+    log(f"  Default acquisition reference: {loc_str}\n")

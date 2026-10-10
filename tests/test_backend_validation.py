@@ -1,6 +1,6 @@
 """Independent, hardware-selectable checks for the shared array integrator.
 
-Set GWFEM_REQUIRE_CUDA_BACKENDS=cupy on a CUDA validation machine.
+Set WAVESIM_REQUIRE_CUDA_BACKENDS=cupy on a CUDA validation machine.
 Requested backends must actually run; missing libraries/devices then fail.
 """
 
@@ -15,8 +15,8 @@ import pytest
 import scipy.linalg
 import scipy.sparse as sp
 
-from guidedwavefem.device import DeviceInfo
-from guidedwavefem.solvers_gpu import integrate_explicit_rk4, make_backend
+from wavesimfem.device import DeviceInfo
+from wavesimfem.solvers_gpu import integrate_explicit_rk4, make_backend
 
 BACKENDS = [
     "scipy",
@@ -25,9 +25,9 @@ BACKENDS = [
 
 
 def _backend(name, precision):
-    required = set(filter(None, os.environ.get("GWFEM_REQUIRE_CUDA_BACKENDS", "").split(",")))
+    required = set(filter(None, os.environ.get("WAVESIM_REQUIRE_CUDA_BACKENDS", "").split(",")))
     if required - {"cupy"}:
-        pytest.fail("GWFEM_REQUIRE_CUDA_BACKENDS must contain only cupy")
+        pytest.fail("WAVESIM_REQUIRE_CUDA_BACKENDS must contain only cupy")
     library = name
     cuda = name == "cupy"
     if cuda and required and library not in required:

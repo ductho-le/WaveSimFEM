@@ -1,4 +1,4 @@
-"""Testable numerical utilities for GuidedWaveFEM.
+"""Testable numerical utilities for WaveSimFEM.
 
 The explicit solver uses classical RK4 on displacement and velocity. The
 stability estimate assumes symmetric positive (semi)definite FE operators.
@@ -81,7 +81,7 @@ def rk4_step(
 
     This functional reference implementation is the oracle for the distributed
     :class:`PetscRK4` integrator and for the array-backend engine in
-    :mod:`guidedwavefem.solvers_gpu`.
+    :mod:`wavesimfem.solvers_gpu`.
     """
     k1u = v
     k1v = acceleration(u, v, t)

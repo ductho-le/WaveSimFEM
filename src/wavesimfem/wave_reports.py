@@ -1,7 +1,7 @@
 """Structure-aware, multi-panel reports of measured wave propagation.
 
 The report separates observations, applicable reference solutions and sampling
-limitations. Single-line displacement histories cannot determine modal energy,
+limitations. Single-line pressure or motion histories cannot determine modal energy,
 material loss, depth localization, or a unique subsurface/material inversion.
 """
 
@@ -15,7 +15,7 @@ import matplotlib
 import numpy as np
 from matplotlib.ticker import MaxNLocator
 
-from guidedwavefem.analysis import (
+from wavesimfem.analysis import (
     _PLOT_LOCK,
     _figure,
     _label,
@@ -25,18 +25,18 @@ from guidedwavefem.analysis import (
     _save,
     resolve_usetex,
 )
-from guidedwavefem.reporting import log
-from guidedwavefem.storage import atomic_output
-from guidedwavefem.structure_analysis import reference_dispersion, structure_profile
-from guidedwavefem.units import (
-    displacement_unit,
+from wavesimfem.reporting import log
+from wavesimfem.storage import atomic_output
+from wavesimfem.structure_analysis import reference_dispersion, structure_profile
+from wavesimfem.units import (
     frequency_unit,
     length_unit,
+    observable_unit,
     parse_quantity,
     time_unit,
     wavenumber_unit,
 )
-from guidedwavefem.wave_spectra import phase_velocity_spectrum, polarization_spectrum
+from wavesimfem.wave_spectra import phase_velocity_spectrum, polarization_spectrum
 
 _BLUE, _ORANGE, _PURPLE, _GREEN = "#167D9A", "#D97732", "#7356A6", "#248267"
 _INK, _MUTED = "#233044", "#667085"
@@ -50,7 +50,22 @@ def _finite(value):
 def _read_record(path):
     with np.load(path, allow_pickle=False) as archive:
         data = dict(archive)
-    missing = {"times", "sensor_x", "sensor_data_y"} - data.keys()
+    observable = str(data.get("sensor_observable", "displacement"))
+    if "sensor_data_pressure" in data and "sensor_observable" not in data:
+        observable = "pressure"
+    if observable == "pressure":
+        keys, unit = (None, "sensor_data_pressure"), "Pa"
+    elif observable in ("velocity", "particle_velocity"):
+        keys, unit = ("sensor_data_vx", "sensor_data_vy"), "m/s"
+    elif observable == "displacement":
+        keys, unit = ("sensor_data_x", "sensor_data_y"), "m"
+    else:
+        raise ValueError(f"Unknown archived sensor_observable {observable!r}")
+    data["sensor_observable"] = observable
+    data.setdefault("sensor_units", unit)
+    if str(data["sensor_units"]) != unit:
+        raise ValueError(f"Archived {observable} history must use SI units '{unit}'")
+    missing = {"times", "sensor_x", keys[1]} - data.keys()
     if missing:
         raise ValueError(f"Wave report archive is missing {sorted(missing)}")
     t, x = [np.asarray(data[key], dtype=float) for key in ("times", "sensor_x")]
@@ -65,13 +80,26 @@ def _read_record(path):
         ):
             raise ValueError("Wave report requires finite, uniform increasing coordinates")
     arrays = []
-    for key in ("sensor_data_x", "sensor_data_y"):
+    # Two slots allow the existing spectral routine to process vector or scalar
+    # observables. A scalar has one empty slot; it never becomes a motion field.
+    for key in keys:
         values = np.asarray(data[key], dtype=float) if key in data else np.zeros((len(t), len(x)))
         if values.shape != (len(t), len(x)) or not np.isfinite(values).all():
-            raise ValueError("Invalid displacement history shape or nonfinite values")
+            raise ValueError("Invalid observable history shape or nonfinite values")
         values = values - values[:1]
         arrays.append(values - values.mean(axis=0))
     return data, t, x, arrays[0], arrays[1]
+
+
+def _unavailable_polarization(frequencies, reason):
+    return dict(
+        frequencies=frequencies,
+        vertical_horizontal_ratio=np.full_like(frequencies, np.nan),
+        cross_phase_deg=np.full_like(frequencies, np.nan),
+        coherence=np.zeros_like(frequencies),
+        valid=np.zeros(len(frequencies), bool),
+        diagnostics={"status": "unavailable", "reason": reason},
+    )
 
 
 def _one_side(data, x):
@@ -318,7 +346,7 @@ def _physics_diagnostic(ax, profile, scan, pol, decay, fu):
         ax.legend()
         kind, note = (
             "polarization",
-            "V/H is a coherent displacement ratio, not an A0/S0 fraction. Mixed modes can bias the measured polarization.",
+            "V/H is a coherent vector-motion ratio, not an A0/S0 fraction. Mixed modes can bias the measured polarization.",
         )
         if not pol["valid"].any():
             # Show why the ratio is withheld instead of an empty amplitude axis.
@@ -344,6 +372,18 @@ def _physics_diagnostic(ax, profile, scan, pol, decay, fu):
 def _write_readme(destination, report):
     """Keep figure captions, provenance and interpretation beside each export."""
     profile, summary = report["profile"], report["summary"]
+    observable = summary.get("sensor_observable", "displacement")
+    scalar = observable == "pressure"
+    wavefield_caption = (
+        "- **(a) Pressure wavefield:** all receivers with a pressure colour scale. "
+        "**(b) Pressure at receivers:** first, middle and last receiver histories. "
+        "Pressure is scalar; no vector polarization is inferred."
+        if scalar
+        else f"- **(a, b) Horizontal and vertical wavefields:** all receivers, with a common physical "
+        f"{observable.replace('_', ' ')} colour scale and one shared colourbar to the right of both panels. "
+        "The flat-ended colourbar saturates beyond the robust display limits; "
+        "the recorded measurements are unchanged."
+    )
     lines = [
         f"# {profile['title']}",
         "",
@@ -368,7 +408,9 @@ def _write_readme(destination, report):
         name = region["name"].replace("|", "\\|")
         domain = "Halfspace" if region["is_halfspace"] else "Finite layer"
         lines.append(
-            f"| {index} | {name} | {region['material_model']} | {thickness_text} | {domain} |"
+            f"| {index} | {name} | {region['material_model']}"
+            + (f" ({region['fluid_formulation']})" if region.get("fluid_formulation") else "")
+            + f" | {thickness_text} | {domain} |"
         )
     lines.extend(["", "Expected wave families: " + "; ".join(profile["wave_families"]) + ".", ""])
     lines.extend(f"- {text}" for text in profile["interpretation"] + profile["exclusions"])
@@ -379,8 +421,8 @@ def _write_readme(destination, report):
             "",
             "File: `dispersion_and_modes` in each requested format.",
             "",
-            "- **(a) Dispersion:** signed frequency-wavenumber power for the selected displacement "
-            "component, normalized to the peak in the displayed frequency band. The colour scale "
+            f"- **(a) Dispersion:** signed frequency-wavenumber power for the selected {observable.replace('_', ' ')} "
+            "observable, normalized to the peak in the displayed frequency band. The colour scale "
             "covers -50 to 0 dB. Reference colours match panel (c); positive and negative "
             "wavenumbers represent opposite propagation directions.",
             "- **(b) Phase coherence:** amplitude-weighted phase alignment over trial phase speeds, "
@@ -395,21 +437,19 @@ def _write_readme(destination, report):
             "",
             "File: `propagation_and_components` in each requested format.",
             "",
-            "- **(a, b) Horizontal and vertical wavefields:** all receivers, with a common physical "
-            "displacement colour scale and one shared colourbar to the right of both panels. "
-            "The flat-ended colourbar saturates beyond the robust "
-            "display limits; the recorded measurements are unchanged.",
+            wavefield_caption,
             "- **(c) Component spectra:** array-mean squared Fourier amplitudes with one shared "
             "reference for both components. The dotted -30 dB line marks relative support. "
             "There is no receiver-by-receiver amplitude normalization.",
-            "- **(d) Directionality:** opposite-direction squared-displacement spectral power as "
+            "- **(d) Directionality:** opposite-direction squared-observable spectral power as "
             "a percentage of resolved bidirectional power. This is not elastic energy flux or "
             "a reflection coefficient. The central two wavenumber bins and ambiguous spatial "
             "Nyquist bin are excluded.",
             "",
             "## Measurement selection and limitations",
             "",
-            f"- Selected displacement component: `{summary['selected_component']}`.",
+            f"- Sensor observable: `{observable}` [{summary.get('sensor_units', 'm')}].",
+            f"- Selected component: `{summary['selected_component']}`.",
             f"- Receiver selection: {summary['selected_receiver_count']} of "
             f"{summary['total_receiver_count']}; {summary['direction']}.",
             f"- Qualified phase-velocity samples: {summary['accepted_velocity_samples']}.",
@@ -481,6 +521,9 @@ def write_structure_report(
     lies inside the array. All receivers remain visible in propagation panels.
     """
     data, t, x, ux, uy = _read_record(archive_path)
+    observable = str(data["sensor_observable"])
+    scalar = observable == "pressure"
+    observable_label = observable.replace("_", " ").capitalize()
     profile = structure_profile(data)
     band = _frequency_band(data, t, f_min, f_max)
     side, direction, direction_note, known_side = _one_side(data, x)
@@ -507,7 +550,11 @@ def write_structure_report(
         if np.isfinite(v) and v > 0
     ]
     if not speeds:
-        speeds = [float(data.get("c_T", 1000)) or 1000.0, float(data.get("c_L", 6000))]
+        speeds = [
+            float(v)
+            for v in (data.get("c_T"), data.get("c_L"), data.get("c_fluid"))
+            if v is not None and np.isfinite(v) and float(v) > 0
+        ] or [1000.0, 6000.0]
     cmin, cmax = max(min(speeds) * 0.25, 1e-6), max(speeds) * 1.12
     velocities = np.geomspace(cmin, cmax, 280)
     scan = phase_velocity_spectrum(
@@ -522,25 +569,20 @@ def write_structure_report(
         scan["diagnostics"]["ridge_reason_counts"] = {
             "no one-sided aperture": len(scan["frequencies"])
         }
-    try:
-        pol = polarization_spectrum(t, usx, usy, frequency_band=band)
-    except ValueError as exc:
-        if "bins" not in str(exc):
-            raise
-        # A narrow band can contain a full-record FFT bin but no Welch bin.
-        # Keep the supported dispersion report and mark the auxiliary diagnostic unavailable.
-        frequencies = scan["frequencies"]
-        pol = dict(
-            frequencies=frequencies,
-            vertical_horizontal_ratio=np.full_like(frequencies, np.nan),
-            cross_phase_deg=np.full_like(frequencies, np.nan),
-            coherence=np.zeros_like(frequencies),
-            valid=np.zeros(len(frequencies), bool),
-            diagnostics={
-                "status": "unavailable",
-                "reason": "No Welch frequency bins in the requested band",
-            },
+    if scalar:
+        pol = _unavailable_polarization(
+            scan["frequencies"],
+            "Pressure is a scalar observable; vector polarization is unavailable",
         )
+    else:
+        try:
+            pol = polarization_spectrum(t, usx, usy, frequency_band=band)
+        except ValueError as exc:
+            if "bins" not in str(exc):
+                raise
+            pol = _unavailable_polarization(
+                scan["frequencies"], "No Welch frequency bins in the requested band"
+            )
     decay = _decay_spectrum(spectra, xs, direction)
     fu, tu = frequency_unit(band[1]), time_unit(np.max(np.abs(t)))
     offsets = x - float(data.get("source_x", 0.0))
@@ -568,7 +610,9 @@ def write_structure_report(
     velocity_label = "Phase velocity [m/s]" if velocity_scale == 1 else "Phase velocity [km/s]"
     paths = []
     summary = dict(
-        selected_component="y" if component else "x",
+        selected_component="pressure" if scalar else "y" if component else "x",
+        sensor_observable=observable,
+        sensor_units=str(data["sensor_units"]),
         direction=direction_note,
         selected_receiver_count=len(side),
         total_receiver_count=len(x),
@@ -710,16 +754,20 @@ def write_structure_report(
         gs = outer[0].subgridspec(2, 2, hspace=0.32, wspace=0.27)
         axes = [fig.add_subplot(gs[i, j]) for i in range(2) for j in range(2)]
         colour_ax = fig.add_subplot(outer[1].subgridspec(2, 1, hspace=0.32)[0])
-        uu = displacement_unit(max(np.max(np.abs(ux)), np.max(np.abs(uy))))
+        uu = observable_unit(max(np.max(np.abs(ux)), np.max(np.abs(uy))), observable)
         limit = _robust_limit(np.stack((uu(ux), uu(uy))))
         norm = matplotlib.colors.Normalize(vmin=-limit, vmax=limit)
-        for ax, values, name, letter in zip(
-            axes[:2],
-            (ux, uy),
-            ("Horizontal $u_1$", "Vertical $u_2$"),
-            ("a", "b"),
-            strict=True,
-        ):
+        component_names = (
+            ("Horizontal $u_1$", "Vertical $u_2$")
+            if observable == "displacement"
+            else ("Horizontal $v_1$", "Vertical $v_2$")
+        )
+        maps = (
+            [(axes[0], uy, "Pressure $p$", "a")]
+            if scalar
+            else list(zip(axes[:2], (ux, uy), component_names, ("a", "b"), strict=True))
+        )
+        for ax, values, name, letter in maps:
             artist = ax.pcolormesh(
                 tu(t),
                 xu(offsets),
@@ -738,11 +786,24 @@ def write_structure_report(
         fig.colorbar(
             artist,
             cax=colour_ax,
-            label=_label("Displacement", uu),
+            label=_label(observable_label, uu),
             extend="neither",
         )
+        if scalar:
+            ax = axes[1]
+            for i in sorted({0, len(x) // 2, len(x) - 1}):
+                ax.plot(tu(t), uu(uy[:, i]), label=f"x = {xu(offsets[i]):.3g} {xu.label}")
+            ax.set(
+                xlabel=_label("Time", tu),
+                ylabel=_label("Pressure", uu),
+                title="(b) Pressure at receivers",
+                xlim=(tu(t[0]), tu(t[-1])),
+            )
+            ax.legend(loc="best")
+            _line_axes(ax)
         ax = axes[2]
-        for i, label in enumerate(("Horizontal $u_1$", "Vertical $u_2$")):
+        spectral_components = [(1, "Pressure $p$")] if scalar else list(enumerate(component_names))
+        for i, label in spectral_components:
             db = 10 * np.log10(np.maximum(spectra["power"][i] / spectra["power_reference"], 1e-8))
             ax.plot(fu(spectra["frequency"]), db, color=_COLORS[i], label=label)
         ax.axhline(-30, ls=":", color=_MUTED, lw=0.9, label="Support threshold")
@@ -828,13 +889,15 @@ def write_structure_report(
             receiver_indices=side,
         )
     unavailable = []
-    if not np.any(ux):
+    if not scalar and not np.any(ux):
         unavailable.append("Horizontal component absent or without dynamic signal.")
-    if not np.any(uy):
+    if not scalar and not np.any(uy):
         unavailable.append("Vertical component absent or without dynamic signal.")
     if not scan["ridge_valid"].any():
         unavailable.append("No isolated phase-velocity ridge passes sampling and coherence checks.")
-    if not pol["valid"].any():
+    if scalar:
+        unavailable.append("Pressure is a scalar observable; vector polarization is unavailable.")
+    elif not pol["valid"].any():
         unavailable.append("No supported coherent component pair; V/H polarization is withheld.")
     if not any(row["status"] == "accepted" for row in decay):
         unavailable.append("No exponential amplitude trend passes the spatial-decay fit check.")
@@ -842,7 +905,7 @@ def write_structure_report(
         unavailable.append("No supported directional content.")
     summary["unavailable_measurements"] = unavailable
     report = dict(
-        schema_version=1,
+        schema_version=2,
         archive=str(Path(archive_path).resolve()),
         data_provenance=str(data.get("provenance", "Recorded simulation archive")),
         profile=profile,

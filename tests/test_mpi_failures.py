@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.mark.parametrize("error_type", [KeyboardInterrupt, SystemExit, RuntimeError])
 def test_mpi_abort_flushes_complete_diagnostic(monkeypatch, error_type):
-    from guidedwavefem import solvers
+    from wavesimfem import solvers
 
     class BufferedStderr:
         def __init__(self):
@@ -114,7 +114,7 @@ def test_mpi_shutdown_on_rank_local_failure(case):
         assert "collective validation completed" in stdout
     elif case in ("help", "version"):
         assert proc.returncode == 0, stdout + stderr
-        assert "gwfem" in stdout
+        assert "wavesim" in stdout
     else:
         assert proc.returncode != 0, stdout + stderr
         assert "injected" in stderr, stdout + stderr

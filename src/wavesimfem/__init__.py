@@ -1,7 +1,7 @@
-"""GuidedWaveFEM: Unified Guided & Surface Wave Finite Element Framework.
+"""WaveSimFEM: Unified Guided & Surface Wave Finite Element Framework.
 
-Public symbols are resolved lazily so that ``import guidedwavefem`` (and
-lightweight modules such as :mod:`guidedwavefem.config`) do not pull in
+Public symbols are resolved lazily so that ``import wavesimfem`` (and
+lightweight modules such as :mod:`wavesimfem.config`) do not pull in
 DOLFINx, PETSc, or MPI until a FEM feature is actually used.
 """
 
@@ -12,7 +12,7 @@ from importlib.metadata import PackageNotFoundError, version
 from typing import TYPE_CHECKING, Any
 
 try:
-    __version__ = version("guidedwavefem")
+    __version__ = version("wavesimfem")
 except PackageNotFoundError:  # pragma: no cover - source tree without installation
     __version__ = "0.0.0+unknown"
 
@@ -126,8 +126,8 @@ def __dir__() -> list[str]:
 
 
 if TYPE_CHECKING:  # pragma: no cover - static analysers only
-    from guidedwavefem.analysis import bandpass_filter, plot_full_analysis, plot_quick_overview
-    from guidedwavefem.config import (
+    from wavesimfem.analysis import bandpass_filter, plot_full_analysis, plot_quick_overview
+    from wavesimfem.config import (
         dump_config,
         flatten_config,
         generate_template_config,
@@ -135,18 +135,18 @@ if TYPE_CHECKING:  # pragma: no cover - static analysers only
         parse_and_resolve_config,
         resolve_and_apply_config,
     )
-    from guidedwavefem.device import (
+    from wavesimfem.device import (
         DeviceInfo,
         DeviceUnavailableError,
         detect_available_devices,
         select_device,
     )
-    from guidedwavefem.materials import (
+    from wavesimfem.materials import (
         compute_rayleigh_speed,
         preflight_estimate,
         structure_from_config,
     )
-    from guidedwavefem.numerics import (
+    from wavesimfem.numerics import (
         RK4_STABILITY_RADIUS,
         PetscRK4,
         PointSensors,
@@ -156,13 +156,13 @@ if TYPE_CHECKING:  # pragma: no cover - static analysers only
         time_grid,
         validate_tensor,
     )
-    from guidedwavefem.parallel import limit_threads_per_rank
-    from guidedwavefem.reporting import set_verbosity
-    from guidedwavefem.solvers import build_problem, run_simulation, solve_explicit, solve_implicit
-    from guidedwavefem.solvers_gpu import (
+    from wavesimfem.parallel import limit_threads_per_rank
+    from wavesimfem.reporting import set_verbosity
+    from wavesimfem.solvers import build_problem, run_simulation, solve_explicit, solve_implicit
+    from wavesimfem.solvers_gpu import (
         build_sensor_interpolation_matrix,
         integrate_explicit_rk4,
         solve_explicit_rk4_device,
     )
-    from guidedwavefem.sources import SOURCE_TYPES, ricker, source_signal, tone_burst
-    from guidedwavefem.units import parse_quantity
+    from wavesimfem.sources import SOURCE_TYPES, ricker, source_signal, tone_burst
+    from wavesimfem.units import parse_quantity

@@ -3,8 +3,8 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "guidedwavefem"
-version = "0.3.0"
+name = "wavesimfem"
+version = "0.4.0"
 description = "Transient plane-strain guided and surface wave finite element simulations with dispersion extraction"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,7 +12,7 @@ license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Ductho Le" }]
 keywords = [
-    "gwfem",
+    "wavesim",
     "guided-waves",
     "lamb-waves",
     "rayleigh-waves",
@@ -42,19 +42,19 @@ cuda = ["cupy-cuda12x>=13"]
 dev = ["pytest>=8", "pytest-cov>=5", "ruff>=0.6", "build>=1.2", "pre-commit>=3.7"]
 
 [project.urls]
-Homepage = "https://github.com/ductho-le/GuidedWaveFEM"
-Repository = "https://github.com/ductho-le/GuidedWaveFEM"
-Issues = "https://github.com/ductho-le/GuidedWaveFEM/issues"
-Changelog = "https://github.com/ductho-le/GuidedWaveFEM/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/ductho-le/WaveSimFEM"
+Repository = "https://github.com/ductho-le/WaveSimFEM"
+Issues = "https://github.com/ductho-le/WaveSimFEM/issues"
+Changelog = "https://github.com/ductho-le/WaveSimFEM/blob/main/CHANGELOG.md"
 
 [project.scripts]
-gwfem = "guidedwavefem._launcher:main"
+wavesim = "wavesimfem._launcher:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-guidedwavefem = ["py.typed"]
+wavesimfem = ["py.typed"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
@@ -67,7 +67,7 @@ markers = [
 filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
 
 [tool.coverage.run]
-source = ["guidedwavefem"]
+source = ["wavesimfem"]
 branch = true
 
 [tool.coverage.report]
@@ -93,4 +93,4 @@ ignore = [
 "tests/*" = ["B018"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["guidedwavefem"]
+known-first-party = ["wavesimfem"]

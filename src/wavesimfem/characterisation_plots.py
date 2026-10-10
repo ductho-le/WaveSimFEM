@@ -7,7 +7,7 @@ from matplotlib.collections import LineCollection
 from matplotlib.colors import Normalize
 from scipy.signal import spectrogram
 
-from guidedwavefem.analysis import (
+from wavesimfem.analysis import (
     TRACE_COLORS,
     _figure,
     _label,
@@ -15,7 +15,7 @@ from guidedwavefem.analysis import (
     _robust_limit,
     _save,
 )
-from guidedwavefem.units import displacement_unit, frequency_unit, length_unit, time_unit
+from wavesimfem.units import frequency_unit, length_unit, observable_unit, time_unit
 
 
 def render_characterisation(report, arrays, destination, formats, dpi=300):
@@ -26,9 +26,12 @@ def render_characterisation(report, arrays, destination, formats, dpi=300):
     rows, summary = report["receivers"], report["summary"]
     valid = np.array([row["included_in_fit"] for row in rows])
     arrival = np.array([r["arrival_s"] if r["arrival_s"] is not None else np.nan for r in rows])
-    amplitude = np.array([r["peak_envelope_m"] for r in rows])
+    amplitude = np.array([r.get("peak_envelope_si", r.get("peak_envelope_m")) for r in rows])
     tu, xu = time_unit(np.max(np.abs(t))), length_unit(np.max(np.abs(x)))
-    uu = displacement_unit(max(np.max(np.abs(ux)), np.max(np.abs(uy))))
+    observable = report.get("observable", "displacement")
+    uu = observable_unit(max(np.max(np.abs(ux)), np.max(np.abs(uy))), observable)
+    symbol = "u" if observable == "displacement" else "v"
+    component_label = "$p$" if observable == "pressure" else f"${symbol}_{component}$"
     td, xd = tu(t), xu(x)
     selected = np.unique(np.linspace(0, len(x) - 1, min(4, len(x)), dtype=int))
     velocity, attenuation = summary["velocity"], summary["apparent_attenuation"]
@@ -76,7 +79,7 @@ def render_characterisation(report, arrays, destination, formats, dpi=300):
     fig.colorbar(
         image,
         ax=scan,
-        label=_label(f"$u_{component}$", uu),
+        label=_label(component_label, uu),
         pad=0.015,
         fraction=0.035,
         extend="neither",
@@ -227,8 +230,8 @@ def render_characterisation(report, arrays, destination, formats, dpi=300):
         image.set_array(td[:-1][active])
         ax.add_collection(image)
         ax.set(
-            xlabel=_label("$u_x$", uu),
-            ylabel=_label("$u_y$", uu),
+            xlabel=_label(f"${symbol}_x$", uu),
+            ylabel=_label(f"${symbol}_y$", uu),
             title=f"({chr(97 + j)}) $x={xd[i]:.3g}$ {xu.tex}",
             xlim=(-motion_limit, motion_limit),
             ylim=(-motion_limit, motion_limit),
@@ -237,7 +240,8 @@ def render_characterisation(report, arrays, destination, formats, dpi=300):
         _line_axes(ax)
     cax = fig.add_axes((0.9, 0.2, 0.017, 0.64))
     fig.colorbar(image, cax=cax, label=_label("Time", tu))
-    finish(fig, "particle_motion")
+    if observable != "pressure":
+        finish(fig, "particle_motion")
 
     dt = t[1] - t[0]
     spectrum = np.sum(np.abs(np.fft.rfft(signal[:, selected], axis=0)) ** 2, axis=1)
@@ -303,11 +307,13 @@ def render_characterisation(report, arrays, destination, formats, dpi=300):
     fig.colorbar(image, cax=cax, label="Relative power [dB]")
     finish(fig, "time_frequency")
     report["figure_notes"] = dict(
-        arrival_velocity="Packet tracking, arrival regression and residuals. The displacement colour scale saturates at its robust display limits; the colour bar has flat ends. Accepted/excluded receivers are screened for complete, unambiguous packets. The residual band is one stored time sample. Peak tracking describes the selected packet and does not identify a guided mode.",
+        arrival_velocity="Packet tracking, arrival regression and residuals. The observable colour scale saturates at its robust display limits; the colour bar has flat ends. Accepted/excluded receivers are screened for complete, unambiguous packets. The residual band is one stored time sample. Peak tracking describes the selected packet and does not identify a guided mode.",
         pulse_evolution="Envelopes are normalised independently; peak decay uses the maximum across the complete receiver array as a shared reference. Apparent decay includes spreading, interference and numerical loss, and is not an intrinsic material attenuation measurement. Pulse width is the envelope-weighted RMS duration.",
         particle_motion="Equal physical axes and shared limits preserve polarisation shape and relative amplitude. Segments below 5% of the selected-component envelope peak are hidden. Colour indicates time within the selected gate.",
         time_frequency="Hann short-time Fourier spectra share one power reference, 87.5% overlap and a -60 dB display floor. Fourfold FFT padding interpolates the spectrum; it does not improve physical frequency resolution. Gate edges are not extrapolated.",
     )
+    if observable == "pressure":
+        del report["figure_notes"]["particle_motion"]
     report["figure_parameters"] = dict(
         export_width_mm=190,
         font_size_pt=10,

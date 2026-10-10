@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from guidedwavefem import sources, units
+from wavesimfem import sources, units
 
 # ---------------------------------------------------------------------------
 # Units

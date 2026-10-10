@@ -1,6 +1,6 @@
 """Scale-aware physical units for console output, figures, and user input.
 
-GuidedWaveFEM works in SI internally and covers problems from seismic (Hz, m, s)
+WaveSimFEM works in SI internally and covers problems from seismic (Hz, m, s)
 to ultrasonic (MHz, mm, μs) scales. This module picks a readable display unit
 for a representative magnitude and parses user-facing quantities such as
 ``"2 MHz"`` or ``"3 rad/mm"``.
@@ -79,6 +79,33 @@ def length_unit(meters: float) -> Unit:
 def displacement_unit(meters: float) -> Unit:
     """Display unit for a representative displacement amplitude."""
     return _pick(meters, _DISPLACEMENT)
+
+
+def observable_unit(magnitude: float, observable: str = "displacement") -> Unit:
+    """Amplitude display units for explicitly identified physical observables."""
+    if observable == "pressure":
+        return _pick(
+            magnitude,
+            (
+                Unit("MPa", "MPa", 1e6),
+                Unit("kPa", "kPa", 1e3),
+                Unit("Pa", "Pa", 1.0),
+                Unit("mPa", "mPa", 1e-3),
+            ),
+        )
+    if observable in ("velocity", "particle_velocity"):
+        return _pick(
+            magnitude,
+            (
+                Unit("m/s", "m/s", 1.0),
+                Unit("mm/s", "mm/s", 1e-3),
+                Unit("μm/s", r"$\mu$m/s", 1e-6),
+                Unit("nm/s", "nm/s", 1e-9),
+            ),
+        )
+    if observable != "displacement":
+        raise ValueError(f"Unknown physical observable {observable!r}")
+    return displacement_unit(magnitude)
 
 
 def frequency_unit(hertz: float) -> Unit:

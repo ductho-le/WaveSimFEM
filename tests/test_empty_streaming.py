@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 
-from guidedwavefem.solvers_gpu import _NumpyLikeBackend, integrate_explicit_rk4
+from wavesimfem.solvers_gpu import _NumpyLikeBackend, integrate_explicit_rk4
 
 
 def _system(dtype="float64", sensors=False):

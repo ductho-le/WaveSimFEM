@@ -9,7 +9,7 @@ import pytest
 import scipy.sparse as sp
 from petsc4py import PETSc
 
-from guidedwavefem.numerics import (
+from wavesimfem.numerics import (
     RK4_STABILITY_RADIUS,
     PetscRK4,
     operator_bound,
@@ -116,7 +116,7 @@ def test_sample_stride_rejects_invalid(dt, rate):
 
 @pytest.mark.parametrize("requested_dt", [7.3e-9, 1e-8, 3.3e-9])
 def test_sampled_time_grid_is_uniform_and_ends_at_duration(requested_dt):
-    from guidedwavefem.solvers import _sampled_time_grid
+    from wavesimfem.solvers import _sampled_time_grid
 
     layout = SimpleNamespace(duration=10e-6, mesh_frequency=3e6)
     cfg = {
@@ -133,8 +133,8 @@ def test_sampled_time_grid_is_uniform_and_ends_at_duration(requested_dt):
 
 
 def test_array_engine_decimated_history_matches_full():
-    from guidedwavefem.device import CPU_DEVICE
-    from guidedwavefem.solvers_gpu import integrate_explicit_rk4, make_backend
+    from wavesimfem.device import CPU_DEVICE
+    from wavesimfem.solvers_gpu import integrate_explicit_rk4, make_backend
 
     K, C, inv_mass, load = _damped_system()
     S = sp.csr_matrix(sp.eye(len(load), format="csr")[:4])
@@ -152,7 +152,7 @@ def test_array_engine_decimated_history_matches_full():
 # Sparse operator helpers
 # ---------------------------------------------------------------------------
 def test_drop_zero_entries_preserves_matvec():
-    from guidedwavefem.solvers import _drop_zero_entries
+    from wavesimfem.solvers import _drop_zero_entries
 
     rng = np.random.default_rng(3)
     dense = rng.standard_normal((12, 12))
@@ -180,7 +180,7 @@ def test_drop_zero_entries_preserves_matvec():
 # FEM-level checks on a small plate
 # ---------------------------------------------------------------------------
 def _small_plate_cfg(**overrides):
-    from guidedwavefem.config import parse_and_resolve_config
+    from wavesimfem.config import parse_and_resolve_config
 
     cfg = {
         "solver": {"type": "explicit", "CFL": 0.8},
@@ -209,8 +209,8 @@ def _assembled(form):
 @pytest.mark.parametrize("degree,nx,rows", [(1, 43, 3), (2, 26, 2)])
 def test_element_bounds_dominate_assembled_bounds(degree, nx, rows):
     """The pre-mesh element bounds never underestimate the solver's Gershgorin bounds."""
-    from guidedwavefem.materials import element_operator_bounds
-    from guidedwavefem.solvers import build_problem
+    from wavesimfem.materials import element_operator_bounds
+    from wavesimfem.solvers import build_problem
 
     cfg = _small_plate_cfg(mesh__degree=degree, mesh__nx=nx, mesh__ny_per_region=[rows])
     problem = build_problem(cfg)
@@ -238,7 +238,7 @@ def test_element_bounds_dominate_assembled_bounds(degree, nx, rows):
 
 
 def test_rigid_body_near_nullspace_is_orthonormal_kernel():
-    from guidedwavefem.solvers import _rigid_body_near_nullspace, build_problem
+    from wavesimfem.solvers import _rigid_body_near_nullspace, build_problem
 
     problem = build_problem(_small_plate_cfg())
     near_nullspace, storage = _rigid_body_near_nullspace(problem.V)
@@ -263,8 +263,8 @@ def test_rigid_body_near_nullspace_is_orthonormal_kernel():
 
 def test_preflight_explicit_step_is_conservative():
     """Preflight explicit Δt (element bounds) ≤ the solver's assembled-bound step."""
-    from guidedwavefem.materials import explicit_time_step_estimate
-    from guidedwavefem.solvers import build_problem
+    from wavesimfem.materials import explicit_time_step_estimate
+    from wavesimfem.solvers import build_problem
 
     cfg = _small_plate_cfg()
     problem = build_problem(cfg)
@@ -295,7 +295,7 @@ def _scipy_csr(mat):
 @pytest.mark.parametrize("beta", [None, 2e-7])  # wave-speed- and damping-limited steps
 def test_rk4_is_stable_just_below_the_rigorous_limit(beta):
     """Free vibration of an assembled FE system at 0.999 \u00d7 R / max(\u221aB_K, B_C) stays bounded."""
-    from guidedwavefem.solvers import build_problem
+    from wavesimfem.solvers import build_problem
 
     overrides = {} if beta is None else {"absorbing_boundaries__beta": beta}
     problem = build_problem(

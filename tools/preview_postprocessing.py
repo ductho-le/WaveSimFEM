@@ -13,10 +13,10 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from guidedwavefem.analysis import plot_full_analysis, plot_quick_overview
-from guidedwavefem.characterisation import write_characterisation
-from guidedwavefem.lamb import s0_wavenumber, write_lamb_report
-from guidedwavefem.materials import a0_wavenumber
+from wavesimfem.analysis import plot_full_analysis, plot_quick_overview
+from wavesimfem.characterisation import write_characterisation
+from wavesimfem.lamb import s0_wavenumber, write_lamb_report
+from wavesimfem.materials import a0_wavenumber
 
 
 def main():

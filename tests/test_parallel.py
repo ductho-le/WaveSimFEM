@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from guidedwavefem.parallel import (
+from wavesimfem.parallel import (
     THREAD_ENV_VARS,
     describe_thread_state,
     limit_threads_per_rank,
@@ -61,7 +61,7 @@ def test_policy_is_noop_for_single_rank():
 def test_parallel_module_is_dependency_free():
     """The policy must load before NumPy/PETSc, so importing it must not pull them in."""
     code = (
-        "import sys, guidedwavefem.parallel, guidedwavefem._launcher; "
+        "import sys, wavesimfem.parallel, wavesimfem._launcher; "
         "heavy = {'numpy', 'petsc4py', 'mpi4py', 'dolfinx'} & set(sys.modules); "
         "sys.exit(1 if heavy else 0)"
     )

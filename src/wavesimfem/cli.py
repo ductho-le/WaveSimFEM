@@ -1,4 +1,4 @@
-"""Command-line interface and execution orchestration for GuidedWaveFEM."""
+"""Command-line interface and execution orchestration for WaveSimFEM."""
 
 from __future__ import annotations
 
@@ -10,12 +10,12 @@ from typing import NoReturn
 
 from mpi4py import MPI
 
-from guidedwavefem import __version__
-from guidedwavefem.config import generate_template_config, parse_and_resolve_config
-from guidedwavefem.device import DEVICE_CHOICES_HELP, DeviceUnavailableError
-from guidedwavefem.materials import STRUCTURE_MODES, preflight_estimate
-from guidedwavefem.reporting import log, set_verbosity
-from guidedwavefem.solvers import mpi_fail_fast, run_simulation
+from wavesimfem import __version__
+from wavesimfem.config import generate_template_config, parse_and_resolve_config
+from wavesimfem.device import DEVICE_CHOICES_HELP, DeviceUnavailableError
+from wavesimfem.materials import STRUCTURE_MODES, preflight_estimate
+from wavesimfem.reporting import log, set_verbosity
+from wavesimfem.solvers import mpi_fail_fast, run_simulation
 
 comm = MPI.COMM_WORLD
 rank = comm.rank
@@ -23,9 +23,9 @@ rank = comm.rank
 _MISSING_CONFIG_MESSAGE = (
     "\n" + "=" * 70 + "\nERROR: Configuration file is required to run simulation.\n"
     "Please provide a YAML/TOML/JSON configuration file using:\n"
-    "    gwfem -c configs/01_plate_aluminum_lamb.yaml\n\n"
+    "    wavesim -c configs/01_plate_aluminum_lamb.yaml\n\n"
     "Or generate a template configuration with:\n"
-    "    gwfem --generate-config my_config.yaml\n" + "=" * 70 + "\n"
+    "    wavesim --generate-config my_config.yaml\n" + "=" * 70 + "\n"
 )
 
 #: Exit status for invalid user input (unreadable or invalid configuration, missing files).
@@ -41,15 +41,15 @@ def _exit_with_error(
     if verbose and exc is not None:
         raise exc
     if rank == 0:
-        print(f"gwfem: error: {message}", file=sys.stderr)
+        print(f"wavesim: error: {message}", file=sys.stderr)
     sys.exit(code)
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Construct the ``gwfem`` argument parser."""
+    """Construct the ``wavesim`` argument parser."""
     parser = argparse.ArgumentParser(
-        prog="gwfem",
-        description="Unified Guided Wave FEM Simulation & Dispersion Extraction",
+        prog="wavesim",
+        description="WaveSimFEM: Unified Guided & Surface Wave FEM Simulation & Dispersion Extraction",
         epilog="Options left unset fall back to the configuration file, then built-in defaults.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -182,7 +182,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         if rank == 0:
             if args.dry_run:
                 parser.print_usage(sys.stderr)
-                print("gwfem: error: --dry-run requires -c/--config", file=sys.stderr)
+                print("wavesim: error: --dry-run requires -c/--config", file=sys.stderr)
             else:
                 parser.print_help()
                 print(_MISSING_CONFIG_MESSAGE, file=sys.stderr)
@@ -224,7 +224,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     # Step 2: Signal Processing (Rank 0 only)
     if rank == 0:
         if cfg["run_postprocess"] and not args.no_postprocess:
-            from guidedwavefem.analysis import plot_full_analysis
+            from wavesimfem.analysis import plot_full_analysis
 
             # SI limits (Hz, rad/m); None falls back to the archive's stored limits.
             limits = {name: cfg[f"disp_{name}"] for name in ("f_min", "f_max", "k_min", "k_max")}
@@ -236,7 +236,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 usetex=cfg["usetex"],
             )
             if cfg["structure_analysis"]:
-                from guidedwavefem.wave_reports import write_structure_report
+                from wavesimfem.wave_reports import write_structure_report
 
                 write_structure_report(
                     sensor_data_file,
@@ -247,7 +247,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 )
             characterisation = cfg.get("wave_characterisation")
             if cfg.get("lamb_modes"):
-                from guidedwavefem.lamb import write_lamb_report
+                from wavesimfem.lamb import write_lamb_report
 
                 write_lamb_report(
                     sensor_data_file,
@@ -256,7 +256,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                     usetex=cfg["usetex"],
                 )
             if characterisation and characterisation["enabled"]:
-                from guidedwavefem.characterisation import write_characterisation
+                from wavesimfem.characterisation import write_characterisation
 
                 write_characterisation(
                     sensor_data_file,

@@ -21,9 +21,9 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from guidedwavefem.config import parse_and_resolve_config
-from guidedwavefem.lamb import s0_wavenumber
-from guidedwavefem.materials import a0_wavenumber, compute_rayleigh_speed, structure_from_config
+from wavesimfem.config import parse_and_resolve_config
+from wavesimfem.lamb import s0_wavenumber
+from wavesimfem.materials import a0_wavenumber, compute_rayleigh_speed, structure_from_config
 
 
 @dataclass(frozen=True)
@@ -268,7 +268,7 @@ def main():
     )
     parser.add_argument("--case", choices=[f"{i:02d}" for i in range(1, 7)], help="Render one case")
     args = parser.parse_args()
-    from guidedwavefem.wave_reports import write_structure_report
+    from wavesimfem.wave_reports import write_structure_report
 
     configs = Path(__file__).resolve().parents[1] / "configs"
     records = []

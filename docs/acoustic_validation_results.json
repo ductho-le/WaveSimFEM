@@ -1,0 +1,262 @@
+{
+  "cavity": {
+    "status": "pass",
+    "reference": "f_10=c/(2L), rigid square cavity",
+    "runs": [
+      {
+        "degree": 1,
+        "elements_per_side": 4,
+        "frequency_hz": 769.39431366271,
+        "relative_error": 0.025859084883613326,
+        "constant_mode_residual": 1.3372437254249522e-18,
+        "pressure_dofs": 25
+      },
+      {
+        "degree": 1,
+        "elements_per_side": 8,
+        "frequency_hz": 754.8279773204084,
+        "relative_error": 0.0064373030938778,
+        "constant_mode_residual": 2.876841134605484e-18,
+        "pressure_dofs": 81
+      },
+      {
+        "degree": 1,
+        "elements_per_side": 16,
+        "frequency_hz": 751.2053592897771,
+        "relative_error": 0.0016071457197028849,
+        "constant_mode_residual": 5.94695021943408e-18,
+        "pressure_dofs": 289,
+        "observed_order": 2.001955654353649
+      },
+      {
+        "degree": 2,
+        "elements_per_side": 4,
+        "frequency_hz": 750.192028120228,
+        "relative_error": 0.00025603749363733996,
+        "constant_mode_residual": 1.760527006941926e-17,
+        "pressure_dofs": 81
+      },
+      {
+        "degree": 2,
+        "elements_per_side": 8,
+        "frequency_hz": 750.0122871814709,
+        "relative_error": 1.6382908627932125e-05,
+        "constant_mode_residual": 3.3171049853016786e-17,
+        "pressure_dofs": 289
+      },
+      {
+        "degree": 2,
+        "elements_per_side": 16,
+        "frequency_hz": 750.0007725785765,
+        "relative_error": 1.0301047685956632e-06,
+        "constant_mode_residual": 6.845081887681026e-17,
+        "pressure_dofs": 1089,
+        "observed_order": 3.9913285345645044
+      }
+    ]
+  },
+  "temporal": {
+    "status": "pass",
+    "reference": "exact semidiscrete cavity mode; mass matches each integrator",
+    "explicit": {
+      "observed_order": 3.9999543958829187,
+      "runs": [
+        {
+          "steps": 40,
+          "relative_state_error": 1.2554374260546064e-05,
+          "pressure_time_integral_error": 5.499724050788954e-06
+        },
+        {
+          "steps": 80,
+          "relative_state_error": 7.847481328055795e-07,
+          "pressure_time_integral_error": 3.88172891105356e-07
+        },
+        {
+          "steps": 160,
+          "relative_state_error": 4.9048308710793735e-08,
+          "pressure_time_integral_error": 2.5622516084437212e-08
+        }
+      ]
+    },
+    "implicit": {
+      "observed_order": 1.999310481494914,
+      "runs": [
+        {
+          "steps": 40,
+          "relative_state_error": 0.007368283032169388,
+          "pressure_time_integral_error": 0.0040235745878877535
+        },
+        {
+          "steps": 80,
+          "relative_state_error": 0.0018455928258626778,
+          "pressure_time_integral_error": 0.0010129197035897372
+        },
+        {
+          "steps": 160,
+          "relative_state_error": 0.0004616187788186995,
+          "pressure_time_integral_error": 0.00025367051860163354
+        }
+      ]
+    }
+  },
+  "boundaries": {
+    "status": "pass",
+    "pressure_release": {
+      "reference_frequency_hz": 375.0,
+      "frequency_hz": 375.00038628935994,
+      "relative_error": 1.030104959776068e-06
+    },
+    "normal_radiation": {
+      "frequency_hz": 400.0,
+      "pressure_relative_error": 1.3997443048634002e-08,
+      "reflected_pressure_amplitude": 1.1397969282337251e-08
+    },
+    "limitation": "First-order radiation is exact in the continuum only at normal incidence; this test uses no sponge."
+  },
+  "fluid-fluid": {
+    "status": "pass",
+    "reference": "two-fluid acoustic impedance and density-weighted flux",
+    "reflection_reference": -0.04712041884816754,
+    "reflection_measured_real": -0.04712031759915244,
+    "reflection_error": 1.1327708759023866e-07,
+    "pressure_relative_error": 1.4283901528116883e-07,
+    "transmission_error": 1.1797941873978445e-07,
+    "normal_velocity_jump_relative_to_incident": 2.1349474158970543e-07,
+    "measured_energy_sum": 1.0000000172423273,
+    "reference_energy_sum": 1.0
+  },
+  "normal": {
+    "status": "pass",
+    "reference": "independent fluid/P/S plane-wave boundary matching",
+    "angle_degrees": 0.0,
+    "solid_displacement_relative_error": 1.2616591197025422e-06,
+    "pressure_relative_error": 2.062514537266839e-07,
+    "reference_reflection_real": 0.5384615384615381,
+    "reference_energy_sum": 0.9999999999999993,
+    "reference_tangential_slip_m_per_s": 0.0,
+    "fitted_fem_wave_amplitudes": {
+      "reflection_error": 9.175551208556702e-08,
+      "p_velocity_amplitude_error_relative_to_incident": 4.1376755074194076e-07,
+      "s_velocity_amplitude_error_relative_to_incident": 9.94352390371699e-08,
+      "normal_velocity_jump_relative_to_incident": 3.354803414063497e-07,
+      "normal_traction_residual_pa_per_pa_incident": 1.4609128915428523e-06,
+      "tangential_traction_pa_per_pa_incident": 1.5909638245947185e-07,
+      "tangential_slip_m_per_s_per_pa_incident": 6.629015935811327e-14,
+      "energy_sum": 0.9999994250934039
+    },
+    "legacy_sweep": [
+      {
+        "solid_displacement_relative_error": 2.8239465959608123e-05,
+        "fluid_shear_reg": 0.0001,
+        "acoustic_solid_displacement_relative_error_same_nodes": 1.3088862111155994e-06,
+        "legacy_acoustic_relative_difference_same_nodes": 2.727615592133602e-05
+      },
+      {
+        "solid_displacement_relative_error": 2.951553631335718e-07,
+        "fluid_shear_reg": 1e-06,
+        "acoustic_solid_displacement_relative_error_same_nodes": 1.3088862111155994e-06,
+        "legacy_acoustic_relative_difference_same_nodes": 1.101984531007512e-06
+      },
+      {
+        "solid_displacement_relative_error": 9.573273714952238e-09,
+        "fluid_shear_reg": 1e-08,
+        "acoustic_solid_displacement_relative_error_same_nodes": 1.3088862111155994e-06,
+        "legacy_acoustic_relative_difference_same_nodes": 1.3025003897860924e-06
+      }
+    ],
+    "legacy": {
+      "solid_displacement_relative_error": 9.573273714952238e-09,
+      "fluid_shear_reg": 1e-08,
+      "acoustic_solid_displacement_relative_error_same_nodes": 1.3088862111155994e-06,
+      "legacy_acoustic_relative_difference_same_nodes": 1.3025003897860924e-06
+    }
+  },
+  "oblique": {
+    "status": "pass",
+    "reference": "independent fluid/P/S plane-wave boundary matching",
+    "angle_degrees": 20.0,
+    "solid_displacement_relative_error": 1.327319633017772e-06,
+    "pressure_relative_error": 2.215226430286702e-07,
+    "reference_reflection_real": 0.5225849198243284,
+    "reference_energy_sum": 1.0000000000000002,
+    "reference_tangential_slip_m_per_s": 3.281603341537945e-07,
+    "fitted_fem_wave_amplitudes": {
+      "reflection_error": 1.1687389974481876e-07,
+      "p_velocity_amplitude_error_relative_to_incident": 4.3218375005549743e-07,
+      "s_velocity_amplitude_error_relative_to_incident": 3.5032694435513986e-07,
+      "normal_velocity_jump_relative_to_incident": 3.408106620233794e-07,
+      "normal_traction_residual_pa_per_pa_incident": 1.530683829181359e-06,
+      "tangential_traction_pa_per_pa_incident": 1.8256191898071538e-07,
+      "tangential_slip_m_per_s_per_pa_incident": 3.2816028431279097e-07,
+      "energy_sum": 0.9999996335009849
+    },
+    "legacy_sweep": [
+      {
+        "solid_displacement_relative_error": 0.04147054505458737,
+        "fluid_shear_reg": 0.0001,
+        "acoustic_solid_displacement_relative_error_same_nodes": 1.3770370603167908e-06,
+        "legacy_acoustic_relative_difference_same_nodes": 0.04147051822930347
+      },
+      {
+        "solid_displacement_relative_error": 0.02955721549562642,
+        "fluid_shear_reg": 1e-06,
+        "acoustic_solid_displacement_relative_error_same_nodes": 1.3770370603167908e-06,
+        "legacy_acoustic_relative_difference_same_nodes": 0.02955713898037968
+      },
+      {
+        "solid_displacement_relative_error": 0.029489897848773813,
+        "fluid_shear_reg": 1e-08,
+        "acoustic_solid_displacement_relative_error_same_nodes": 1.3770370603167908e-06,
+        "legacy_acoustic_relative_difference_same_nodes": 0.029489820805548288
+      }
+    ],
+    "legacy": {
+      "solid_displacement_relative_error": 0.029489897848773813,
+      "fluid_shear_reg": 1e-08,
+      "acoustic_solid_displacement_relative_error_same_nodes": 1.3770370603167908e-06,
+      "legacy_acoustic_relative_difference_same_nodes": 0.029489820805548288
+    }
+  },
+  "scholte": {
+    "status": "pass",
+    "reference": "Scholte secular equation and exponential fluid decay",
+    "reference_speed_m_per_s": 1009.0411173762864,
+    "runs": [
+      {
+        "nx": 8,
+        "rows_per_region": 32,
+        "phase_speed_m_per_s": 1009.087618690288,
+        "relative_error": 4.6084657206568735e-05,
+        "pressure_decay_shape_error": 9.209047271086494e-05
+      },
+      {
+        "nx": 12,
+        "rows_per_region": 48,
+        "phase_speed_m_per_s": 1009.0543174694101,
+        "relative_error": 1.3081818863946992e-05,
+        "pressure_decay_shape_error": 9.169450859886043e-05
+      }
+    ]
+  },
+  "plate": {
+    "status": "pass",
+    "reference": "exact elastic state propagator with evanescent fluid halfspaces",
+    "branch": "nonleaky flexural A0",
+    "runs": [
+      {
+        "wavenumber_rad_per_m": 3.141592653589793,
+        "frequency_hz": 112.4701793648934,
+        "reference_speed_m_per_s": 224.93038898100983,
+        "phase_speed_m_per_s": 224.9403587297868,
+        "relative_error": 4.4323707535154355e-05
+      },
+      {
+        "wavenumber_rad_per_m": 4.83321946706122,
+        "frequency_hz": 280.11920633402184,
+        "reference_speed_m_per_s": 364.14216495359807,
+        "phase_speed_m_per_s": 364.1549682342284,
+        "relative_error": 3.5160115643195766e-05
+      }
+    ]
+  }
+}

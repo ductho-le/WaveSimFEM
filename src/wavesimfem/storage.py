@@ -51,7 +51,7 @@ class HistoryStore:
             raise ValueError("history storage must be 'memory' or 'disk'")
         self.mode = mode
         self._scratch = (
-            tempfile.TemporaryDirectory(prefix=".gwfem-history-", dir=directory)
+            tempfile.TemporaryDirectory(prefix=".wavesim-history-", dir=directory)
             if mode == "disk"
             else None
         )

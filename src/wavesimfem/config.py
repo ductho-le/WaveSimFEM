@@ -21,17 +21,17 @@ from typing import Any
 import numpy as np
 import yaml
 
-from guidedwavefem.device import DEVICE_CHOICES_HELP, normalize_device_request
-from guidedwavefem.materials import (
+from wavesimfem.device import DEVICE_CHOICES_HELP, normalize_device_request
+from wavesimfem.materials import (
     DEFAULT_STEPS_PER_PERIOD,
     canonicalize_mode,
     mesh_resolution,
     sizing_wavelength,
     structure_from_config,
 )
-from guidedwavefem.sources import DEFAULT_N_CYCLES, SOURCE_TYPES
-from guidedwavefem.storage import atomic_output
-from guidedwavefem.units import parse_quantity
+from wavesimfem.sources import DEFAULT_N_CYCLES, SOURCE_TYPES
+from wavesimfem.storage import atomic_output
+from wavesimfem.units import parse_quantity
 
 # ---------------------------------------------------------------------------
 # Schema
@@ -74,6 +74,11 @@ SECTION_KEYS: dict[str, dict[str, str]] = {
             "source_x",
             "source_fx",
             "source_fy",
+            "source_kind",
+            "source_amplitude",
+            "source_boundary",
+            "source_y",
+            "source_region",
         )
     },
     "mesh": {
@@ -90,6 +95,8 @@ SECTION_KEYS: dict[str, dict[str, str]] = {
     "sensors": {
         **{k: k for k in ("n_sensors", "sensor_offset", "sensor_pitch", "sensor_y")},
         "sample_rate": "sensor_sample_rate",
+        "observable": "sensor_observable",
+        "region": "sensor_region",
     },
     "postprocess": {
         "wave_characterisation": "wave_characterisation",
@@ -123,10 +130,11 @@ SECTION_KEYS: dict[str, dict[str, str]] = {
 }
 
 #: Keys written by the solver into ``simulation_config.yaml`` (accepted on reload).
-PROVENANCE_KEYS = frozenset({"runtime", "load_y"})
+PROVENANCE_KEYS = frozenset({"runtime", "load_y", "source_units"})
 FLAT_KEYS = (
     frozenset({flat for section in SECTION_KEYS.values() for flat in section.values()})
     | PROVENANCE_KEYS
+    | {"acoustic_boundaries"}
 )
 
 FIGURE_FORMATS = ("png", "pdf", "svg", "eps")
@@ -147,6 +155,12 @@ DEFAULTS: dict[str, Any] = {
     "absorb_alpha": None,  # auto: ABSORB_ALPHA_REF * f_center / 1 MHz
     "absorb_beta": None,  # auto: ABSORB_BETA_REF * 1 MHz / f_center
     "source_type": "ricker",
+    "source_kind": "traction",
+    "source_amplitude": None,  # SI: Pa, m/s² or s^-2 according to source_kind
+    "source_boundary": "auto",
+    "source_y": None,
+    "source_region": None,
+    "acoustic_boundaries": {side: "rigid" for side in ("top", "bottom", "left", "right")},
     "n_cycles": None,  # tone_burst only (default DEFAULT_N_CYCLES)
     "traction_max": 1.0e6,
     # λ_ref is the center-frequency sizing wavelength, including A0 for free isotropic
@@ -166,6 +180,8 @@ DEFAULTS: dict[str, Any] = {
     "sensor_offset": None,  # auto: min(2 λ_ref, sensing_length / 4)
     "sensor_pitch": None,  # auto: min(λ_ref / 8, λ_mesh / 4, sensing_length / 100)
     "sensor_y": None,
+    "sensor_observable": "auto",
+    "sensor_region": None,
     "sensor_sample_rate": None,  # auto: 20 × mesh frequency (solvers.AUTO_SAMPLES_PER_MESH_PERIOD)
     "run_postprocess": True,
     "structure_analysis": True,  # structure-aware dispersion, polarization and propagation report
@@ -517,6 +533,93 @@ def _resolve_source(cfg: dict[str, Any]) -> None:
         raise ValueError("'n_cycles' only applies to source_type 'tone_burst'")
 
 
+def _validate_acoustic_options(cfg: dict[str, Any], summary: dict[str, Any]) -> None:
+    """Validate source and observable semantics before assembly."""
+    kinds = {
+        "traction": "Pa",
+        "acoustic_pressure": "Pa",
+        "acoustic_normal_acceleration": "m/s^2",
+        "acoustic_volume": "s^-2",
+    }
+    kind = str(cfg["source_kind"]).strip().lower()
+    if kind not in kinds:
+        raise ValueError(f"source_kind must be one of {tuple(kinds)}, got {kind!r}")
+    cfg["source_kind"] = kind
+    cfg["source_units"] = kinds[kind]
+    if kind == "traction":
+        if cfg.get("source_amplitude") is not None:
+            raise ValueError(
+                "source_amplitude applies to acoustic sources; use traction_max for traction"
+            )
+        if cfg["source_fx"] == 0 and cfg["source_fy"] == 0:
+            raise ValueError("Source direction (source_fx, source_fy) cannot be zero")
+    else:
+        if not summary["has_acoustic"]:
+            raise ValueError(f"source_kind '{kind}' requires an acoustic fluid region")
+        if cfg.get("source_amplitude") is None:
+            raise ValueError(
+                f"source_kind '{kind}' requires excitation.source_amplitude in SI {kinds[kind]}"
+            )
+        _float(cfg, "source_amplitude")
+    boundary = str(cfg["source_boundary"]).strip().lower()
+    if boundary not in ("auto", "top", "bottom", "left", "right", "interface"):
+        raise ValueError("source_boundary must be auto, top, bottom, left, right or interface")
+    cfg["source_boundary"] = boundary
+    if cfg.get("source_y") is not None:
+        y = _float(cfg, "source_y")
+        if not summary["y_min"] <= y <= summary["y_max"]:
+            raise ValueError("source_y must lie inside the domain")
+    if boundary == "interface" and cfg.get("source_y") is None:
+        raise ValueError("source_boundary: interface requires excitation.source_y")
+    names = {r["name"]: r for r in summary["all_regions"]}
+    if len(names) != len(summary["all_regions"]) and (
+        cfg.get("source_region") or cfg.get("sensor_region")
+    ):
+        raise ValueError(
+            "Material region names must be unique when selecting a source or sensor region"
+        )
+    for key in ("source_region", "sensor_region"):
+        name = cfg.get(key)
+        if name is not None and (not isinstance(name, str) or name not in names):
+            raise ValueError(f"{key} must name one material region from {tuple(names)}")
+    if kind == "acoustic_volume":
+        name = cfg.get("source_region")
+        if name is None or not names[name]["is_acoustic"]:
+            raise ValueError("acoustic_volume requires source_region naming an acoustic fluid")
+        if boundary != "auto" or cfg.get("source_y") is not None:
+            raise ValueError(
+                "acoustic_volume is a body source; source_boundary/source_y do not apply"
+            )
+    observable = str(cfg["sensor_observable"]).strip().lower()
+    observables = ("auto", "displacement", "velocity", "pressure", "particle_velocity")
+    if observable not in observables:
+        raise ValueError(f"sensor_observable must be one of {observables}, got {observable!r}")
+    cfg["sensor_observable"] = observable
+    if observable in ("pressure", "particle_velocity") and not summary["has_acoustic"]:
+        raise ValueError(f"sensor_observable '{observable}' requires an acoustic fluid region")
+    if cfg.get("sensor_region") is not None:
+        region = names[cfg["sensor_region"]]
+        if observable in ("pressure", "particle_velocity") and not region["is_acoustic"]:
+            raise ValueError(f"sensor_observable '{observable}' requires an acoustic sensor_region")
+        if observable in ("displacement", "velocity") and region["is_acoustic"]:
+            raise ValueError(
+                f"sensor_observable '{observable}' requires a solid/legacy sensor_region"
+            )
+    boundaries = cfg["acoustic_boundaries"]
+    if not isinstance(boundaries, Mapping):
+        raise ValueError(
+            "acoustic_boundaries must map top, bottom, left and right to boundary types"
+        )
+    sides = ("top", "bottom", "left", "right")
+    unknown = set(boundaries) - set(sides)
+    if unknown:
+        raise ValueError(f"Unknown acoustic boundary side(s): {sorted(unknown)}")
+    resolved = {side: str(boundaries.get(side, "rigid")).strip().lower() for side in sides}
+    if any(value not in ("rigid", "pressure_release", "radiation") for value in resolved.values()):
+        raise ValueError("Acoustic boundary types must be rigid, pressure_release or radiation")
+    cfg["acoustic_boundaries"] = resolved
+
+
 def _resolve_automatic_values(cfg: dict[str, Any], summary: Mapping[str, Any]) -> None:
     """Fill frequency-scaled sponge damping and dispersion plot limits left as ``null``."""
     f0 = cfg["f_center"]
@@ -553,20 +656,44 @@ def _resolve_layout_defaults(cfg: dict[str, Any], summary: Mapping[str, Any]) ->
     if cfg["excitation_width"] is None:
         cfg["excitation_width"] = min(0.5 * wavelength, 0.1 * sensing)
     _float(cfg, "excitation_width", positive=True)
-    if cfg["source_x"] is None:
+    length = 2 * cfg["absorb_length"] + sensing
+    boundary = str(cfg["source_boundary"]).strip().lower()
+    if boundary in ("left", "right"):
+        boundary_x = 0.0 if boundary == "left" else length
+        if cfg["source_x"] is not None:
+            supplied_x = _float(cfg, "source_x")
+            if not np.isclose(supplied_x, boundary_x, rtol=0.0, atol=1e-12 * length):
+                raise ValueError(
+                    f"source_boundary: {boundary} requires source_x={boundary_x:g} m; "
+                    f"got {supplied_x:g} m"
+                )
+        cfg["source_x"] = boundary_x
+    elif cfg["source_x"] is None:
         gap = min(max(wavelength, cfg["excitation_width"]), 0.125 * sensing)
         cfg["source_x"] = cfg["absorb_length"] + max(gap, 0.5 * cfg["excitation_width"])
     _float(cfg, "source_x")
-    length = 2 * cfg["absorb_length"] + sensing
     if not 0 <= cfg["source_x"] <= length:
         raise ValueError(f"source_x={cfg['source_x']} must lie inside [0, {length}]")
-    if cfg["sensor_offset"] is None:
-        cfg["sensor_offset"] = min(2.0 * wavelength, 0.25 * sensing)
-    _float(cfg, "sensor_offset")
     if cfg["sensor_pitch"] is None:
         shortest = sizing_wavelength(cfg, summary, cfg.get("max_frequency") or 3 * cfg["f_center"])
         cfg["sensor_pitch"] = min(wavelength / 8.0, shortest / 4.0, 0.01 * sensing)
     _float(cfg, "sensor_pitch", positive=True)
+    sensor_gap = min(2.0 * wavelength, 0.25 * sensing)
+    if boundary == "right" and cfg["sensor_offset"] is None:
+        # Receivers remain ordered in increasing x for FFT processing. Place the
+        # last receiver to the left of a right-boundary source, then fill leftward.
+        last = min(length - sensor_gap, cfg["absorb_length"] + sensing)
+        if cfg["n_sensors"] is None:
+            span = last - cfg["absorb_length"]
+            count = int(np.floor(span / cfg["sensor_pitch"] * (1.0 + 1e-9))) + 1
+            if count < 3:
+                raise ValueError("The automatic sensor array does not fit in the sensing region")
+            cfg["n_sensors"] = min(count, MAX_AUTO_SENSORS)
+        count = _int(cfg, "n_sensors", 2)
+        cfg["sensor_offset"] = last - (count - 1) * cfg["sensor_pitch"] - cfg["source_x"]
+    elif cfg["sensor_offset"] is None:
+        cfg["sensor_offset"] = sensor_gap
+    _float(cfg, "sensor_offset")
     if cfg["n_sensors"] is None:
         first = cfg["source_x"] + cfg["sensor_offset"]
         span = cfg["absorb_length"] + sensing - first
@@ -592,8 +719,9 @@ def _validate_simulation(cfg: dict[str, Any], source: str) -> None:
     if cfg.get("CFL") is not None and _float(cfg, "CFL", positive=True) > 1:
         raise ValueError("CFL must be in (0, 1] (fraction of the RK4 stability limit)")
 
-    for key in ("sensing_length", "absorb_length", "f_center", "time_factor"):
+    for key in ("sensing_length", "f_center", "time_factor"):
         _float(cfg, key, positive=True)
+    _float(cfg, "absorb_length", nonneg=True)
     if _float(cfg, "steps_per_period", positive=True) < MIN_STEPS_PER_PERIOD:
         raise ValueError(
             f"'steps_per_period' must be >= {MIN_STEPS_PER_PERIOD:g}, got {cfg['steps_per_period']}"
@@ -627,14 +755,15 @@ def _validate_simulation(cfg: dict[str, Any], source: str) -> None:
         _int(cfg, key, minimum)
 
     summary = structure_from_config(cfg)
+    if not summary["has_acoustic"] and cfg["absorb_length"] == 0:
+        raise ValueError("absorb_length must be positive for the elastic solver")
     cfg["nx"], cfg["ny_per_region"] = mesh_resolution(cfg, summary)
     _resolve_layout_defaults(cfg, summary)
     _int(cfg, "n_sensors", 2)
     for key in ("source_fx", "source_fy", "traction_max"):
         _float(cfg, key)
-    if cfg["source_fx"] == 0 and cfg["source_fy"] == 0:
-        raise ValueError("Source direction (source_fx, source_fy) cannot be zero")
     _resolve_source(cfg)
+    _validate_acoustic_options(cfg, summary)
     for key in ("absorb_alpha", "absorb_beta"):
         if cfg[key] is not None:
             _float(cfg, key, nonneg=True)
@@ -729,7 +858,13 @@ def parse_and_resolve_config(
         _apply_cli_overrides(resolved, args)
     for key, value in DEFAULTS.items():
         if resolved.get(key) is None:
-            resolved[key] = list(value) if isinstance(value, list) else value
+            resolved[key] = (
+                list(value)
+                if isinstance(value, list)
+                else dict(value)
+                if isinstance(value, Mapping)
+                else value
+            )
 
     # Halfspace aliases
     for alias, canonical in (("substrate", "bottom_halfspace"), ("superstrate", "top_halfspace")):
@@ -756,7 +891,7 @@ def parse_and_resolve_config(
     resolved["structure_mode"] = canonicalize_mode(resolved["structure_mode"])
 
     _validate_output_options(resolved)
-    from guidedwavefem.characterisation import validate_options
+    from wavesimfem.characterisation import validate_options
 
     resolved["wave_characterisation"] = validate_options(resolved["wave_characterisation"])
     if not isinstance(resolved["lamb_modes"], bool):
@@ -771,7 +906,7 @@ resolve_and_apply_config = parse_and_resolve_config
 
 
 TEMPLATE_CONFIG = """# ==============================================================================
-# Guided Wave FEM Simulation Configuration Template
+# WaveSimFEM Simulation Configuration Template
 # ==============================================================================
 
 solver:
@@ -791,7 +926,7 @@ solver:
 
 geometry:
   sensing_length: 0.30          # [m] Pristine observation region length
-  absorb_length: 0.15           # [m] 5th-order absorbing sponge width on lateral boundaries
+  absorb_length: 0.15           # [m] Lateral sponge width; zero allowed for acoustic configurations
 
 structure:
   # Modes: "1_layer", "N_layers", "halfspace", "plate_on_halfspace", "plate_in_halfspaces"
@@ -803,12 +938,27 @@ structure:
     rho: 2700.0                 # [kg/m^3]
     E: 70.0e9                   # [Pa]
     nu: 0.33                    # [-]
+  # Fluid alternative (replace E/nu with c): material_model: fluid, rho: 1000, c: 1480.
+  # fluid_formulation: acoustic is the default, with scalar pressure and zero shear.
+  # To reproduce old runs, explicitly set fluid_formulation: regularized_elastic
+  # and optionally fluid_shear_reg: 1e-8. Acoustic materials reject fluid_shear_reg.
 
 absorbing_boundaries:
   alpha: null                   # [1/s] Peak mass-proportional damping (null = 1e7 * f_center / 1 MHz)
   beta: null                    # [s] Peak stiffness-proportional damping (null = 1e-9 * 1 MHz / f_center)
 
+acoustic_boundaries:            # Exterior acoustic boundaries only
+  top: "rigid"                 # rigid | pressure_release | radiation
+  bottom: "rigid"
+  left: "rigid"
+  right: "rigid"
+
 excitation:
+  source_kind: "traction"       # traction | acoustic_pressure | acoustic_normal_acceleration | acoustic_volume
+  source_amplitude: null        # Acoustic kinds require SI amplitude: Pa | m/s^2 | s^-2
+  source_boundary: "auto"       # auto | top | bottom | left | right | interface
+  source_y: null                # [m] Required with source_boundary: interface
+  source_region: null           # Region name: required for acoustic_volume; selects an interface side
   source_type: "ricker"         # "ricker" (broadband) or "tone_burst" (Hann-windowed, narrowband)
   f_center: 1.0e6               # [Hz] Centre frequency
   n_cycles: null                # tone_burst only: number of cycles (null = 5)
@@ -816,7 +966,7 @@ excitation:
   # lambda_ref is the sizing wavelength at f_center: bulk/Rayleigh reference,
   # tightened by A0 for a free isotropic plate and by mesh.min_wavelength if set.
   excitation_width: null        # [m] sigma = width / 3; auto min(lambda_ref / 2, L_sensing / 10)
-  source_x: null                # [m] Auto sponge clearance (gap formula below)
+  source_x: null                # [m] Auto sponge clearance; left/right sources resolve to 0/Lx
   source_fx: 0.0                # Tangential traction direction component
   source_fy: 1.0                # Normal traction direction component (default: normal load)
   # Auto source_x = absorb_length + max(min(max(lambda_ref, width), L_sensing/8), width/2).
@@ -832,8 +982,11 @@ mesh:
   min_wavelength: null          # [m] Conservative shortest retained-band wavelength
 
 sensors:
+  observable: "auto"            # auto | displacement | velocity | pressure | particle_velocity
+  region: null                  # Material region name; selects a side for discontinuous particle velocity
   n_sensors: null               # Measurement points (null = fill the sensing region, max 1001)
   sensor_offset: null           # [m] Source to first sensor (null = min(2 lambda_ref, L_sensing / 4))
+  # For a right-boundary source, automatic offsets instead place the array to its left.
   sensor_pitch: null            # [m] Auto min(lambda_ref/8, lambda_mesh/4, L_sensing/100)
   # lambda_mesh is the reference wavelength at mesh.max_frequency, not an element size.
   sensor_y: null                # [m] Sensor line height (null = loaded surface/interface)
@@ -849,7 +1002,7 @@ postprocess:
   k_max: null                   # Auto sizing wavenumber at f_max, limited by spatial Nyquist
 
 output:
-  output_dir: null              # null = results_guided_waves_{solver}
+  output_dir: null              # null = results_wavesim_{solver}
   write_vtx: false              # ADIOS2 VTX (.bp) export for ParaView
   target_snapshots: 200         # VTX snapshot count
   quick_plot: true              # Overview figure (disabled by --no-postprocess)

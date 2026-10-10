@@ -46,4 +46,4 @@ def test_serial_mpi_embedded_plate(tmp_path, solver, history_storage):
             np.testing.assert_allclose(a["times"], b["times"], rtol=1e-12, atol=0)
             for key in ("sensor_data_x", "sensor_data_y"):
                 assert np.linalg.norm(a[key] - b[key]) / np.linalg.norm(a[key]) < 1e-8
-    assert not list(tmp_path.glob("*/.gwfem-history-*"))
+    assert not list(tmp_path.glob("*/.wavesim-history-*"))

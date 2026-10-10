@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from guidedwavefem import load_config, run_simulation
+from wavesimfem import load_config, run_simulation
 
 
 @pytest.mark.parametrize("solver", ["implicit", "explicit"])

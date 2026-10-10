@@ -1,4 +1,4 @@
-"""Independent numerical checks; run inside the gwfem environment."""
+"""Independent numerical checks; run inside the wavesim environment."""
 
 import numpy as np
 import pytest
@@ -6,7 +6,7 @@ from dolfinx import fem, mesh
 from mpi4py import MPI
 from scipy.linalg import expm
 
-from guidedwavefem import (
+from wavesimfem import (
     PointSensors,
     dispersion_spectrum,
     dump_config,
@@ -75,7 +75,7 @@ def test_point_sensor_gather(dtype):
 
 
 def test_csr_row_abs_sums_handles_empty_rows():
-    from guidedwavefem.numerics import csr_row_abs_sums
+    from wavesimfem.numerics import csr_row_abs_sums
 
     indptr = np.array([0, 2, 2, 3, 3])
     values = np.array([-1.0, 2.0, -4.0])
@@ -84,14 +84,14 @@ def test_csr_row_abs_sums_handles_empty_rows():
 
 @pytest.mark.parametrize("duration,dt", [(0.0, 1e-9), (1e-6, 0.0), (np.inf, 1e-9), (1e-6, np.nan)])
 def test_time_grid_rejects_invalid(duration, dt):
-    from guidedwavefem.numerics import time_grid
+    from wavesimfem.numerics import time_grid
 
     with pytest.raises(ValueError):
         time_grid(duration, dt)
 
 
 def test_time_grid_fits_duration_exactly():
-    from guidedwavefem.numerics import time_grid
+    from wavesimfem.numerics import time_grid
 
     dt, steps = time_grid(1e-5, 3e-8)
     assert steps * dt == pytest.approx(1e-5, rel=1e-15)
@@ -112,7 +112,7 @@ def test_boolean_provenance(tmp_path):
 
 
 def test_plot_limits_do_not_stretch_fft(tmp_path, monkeypatch):
-    import guidedwavefem as gw
+    import wavesimfem as ws
 
     t, x = np.arange(256) * 1e-7, np.arange(16) * 0.001
     signal = np.sin(2 * np.pi * 5e5 * t[:, None] - 1000 * x[None, :])
@@ -134,7 +134,7 @@ def test_plot_limits_do_not_stretch_fft(tmp_path, monkeypatch):
             extents.extend(image.get_extent() for image in ax.images)
 
     monkeypatch.setattr("matplotlib.figure.Figure.savefig", inspect_save)
-    gw.plot_full_analysis(str(path), str(tmp_path), k_max="10 rad/mm")
+    ws.plot_full_analysis(str(path), str(tmp_path), k_max="10 rad/mm")
     assert extents[1][1] < 3.3  # Nyquist ~pi rad/mm, NOT the requested 10
 
 
@@ -143,7 +143,7 @@ def test_shipped_examples_cover_every_structure_mode():
     from collections import Counter
     from pathlib import Path
 
-    from guidedwavefem.materials import STRUCTURE_MODES, structure_from_config
+    from wavesimfem.materials import STRUCTURE_MODES, structure_from_config
 
     paths = sorted(
         p
@@ -166,7 +166,7 @@ def test_assembled_operator_bound():
     from dolfinx.fem.petsc import assemble_matrix
     from scipy.linalg import eigvalsh
 
-    from guidedwavefem.numerics import operator_bound
+    from wavesimfem.numerics import operator_bound
 
     domain = mesh.create_unit_square(MPI.COMM_SELF, 3, 3)
     space = fem.functionspace(domain, ("Lagrange", 1))
@@ -187,13 +187,13 @@ def test_assembled_operator_bound():
 def test_package_namespace_exports():
     from importlib.metadata import version
 
-    import guidedwavefem as gw
+    import wavesimfem as ws
 
-    assert gw.__version__ == version("guidedwavefem")
-    assert set(gw.__all__) <= set(dir(gw))
-    assert set(gw.__all__) == {"__version__", *gw._EXPORTS}
+    assert ws.__version__ == version("wavesimfem")
+    assert set(ws.__all__) <= set(dir(ws))
+    assert set(ws.__all__) == {"__version__", *ws._EXPORTS}
     with pytest.raises(AttributeError):
-        gw.does_not_exist
+        ws.does_not_exist
     for name in (
         "run_simulation",
         "plot_full_analysis",
@@ -208,4 +208,4 @@ def test_package_namespace_exports():
         "validate_tensor",
         "dispersion_spectrum",
     ):
-        assert hasattr(gw, name) and callable(getattr(gw, name))
+        assert hasattr(ws, name) and callable(getattr(ws, name))

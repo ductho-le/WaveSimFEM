@@ -18,9 +18,9 @@ import numpy as np
 import yaml
 from mpi4py import MPI
 
-from guidedwavefem import run_simulation, set_verbosity
-from guidedwavefem.config import parse_and_resolve_config
-from guidedwavefem.storage import atomic_output
+from wavesimfem import run_simulation, set_verbosity
+from wavesimfem.config import parse_and_resolve_config
+from wavesimfem.storage import atomic_output
 
 
 def resolution_variants(cfg, refinement_factor, step_factor):
@@ -166,6 +166,6 @@ def main():
 
 
 if __name__ == "__main__":
-    from guidedwavefem.solvers import mpi_fail_fast
+    from wavesimfem.solvers import mpi_fail_fast
 
     mpi_fail_fast(main)()

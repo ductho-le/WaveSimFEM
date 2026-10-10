@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from guidedwavefem.config import load_config
+from wavesimfem.config import load_config
 
 
 def _load(tmp_path, source):

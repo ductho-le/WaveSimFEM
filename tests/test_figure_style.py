@@ -10,7 +10,7 @@ from matplotlib.texmanager import TexManager
 from matplotlib.text import Text
 from PIL import Image
 
-from guidedwavefem import analysis
+from wavesimfem import analysis
 
 
 @pytest.mark.parametrize("usetex", [False, True])

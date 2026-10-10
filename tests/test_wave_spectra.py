@@ -7,7 +7,7 @@ import json
 import numpy as np
 import pytest
 
-from guidedwavefem.wave_spectra import phase_velocity_spectrum, polarization_spectrum
+from wavesimfem.wave_spectra import phase_velocity_spectrum, polarization_spectrum
 
 
 def _wave(*, direction=1, speed=2000.0, frequency=125_000.0):

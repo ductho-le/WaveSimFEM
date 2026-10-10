@@ -15,9 +15,9 @@ Design
   host memory in large chunks, so there is no host synchronization per time step.
 * **Lazy imports.** CuPy is only imported when its backend is used.
 
-The distributed (MPI) explicit solver uses :class:`guidedwavefem.numerics.PetscRK4`
+The distributed (MPI) explicit solver uses :class:`wavesimfem.numerics.PetscRK4`
 with PETSc operators; both implement the scheme of
-:func:`guidedwavefem.numerics.rk4_step`.
+:func:`wavesimfem.numerics.rk4_step`.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ import scipy.sparse as sp
 if TYPE_CHECKING:
     import dolfinx
 
-    from guidedwavefem.device import DeviceInfo
+    from wavesimfem.device import DeviceInfo
 
 CsrLike = sp.spmatrix | sp.sparray | tuple[np.ndarray, np.ndarray, np.ndarray]
 SnapshotCallback = Callable[[int, float, np.ndarray], None]

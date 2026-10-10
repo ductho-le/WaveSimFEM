@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from guidedwavefem.config import (
+from wavesimfem.config import (
     SECTION_KEYS,
     generate_template_config,
     load_config,

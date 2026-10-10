@@ -7,8 +7,8 @@ import pytest
 import yaml
 from matplotlib.text import Text
 
-from guidedwavefem.lamb import s0_wavenumber, separate_fundamentals, write_lamb_report
-from guidedwavefem.materials import a0_wavenumber, compute_rayleigh_speed
+from wavesimfem.lamb import s0_wavenumber, separate_fundamentals, write_lamb_report
+from wavesimfem.materials import a0_wavenumber, compute_rayleigh_speed
 
 
 def test_s0_thin_plate_and_rayleigh_limits():
@@ -100,7 +100,7 @@ def _report_archive(tmp_path, *, scale=1, zero=False, unresolved=False):
 
 
 def test_report_contains_sampling_and_reconstruction_evidence(tmp_path, monkeypatch):
-    monkeypatch.setattr("guidedwavefem.analysis._save", lambda *args: [])
+    monkeypatch.setattr("wavesimfem.analysis._save", lambda *args: [])
     archive, t, x = _report_archive(tmp_path)
     report = write_lamb_report(archive, formats=())
     assert report["schema_version"] == 2
@@ -135,7 +135,7 @@ def test_report_contains_sampling_and_reconstruction_evidence(tmp_path, monkeypa
 def test_report_distinguishes_missing_signal_and_unresolved_modes(
     tmp_path, monkeypatch, zero, unresolved
 ):
-    monkeypatch.setattr("guidedwavefem.analysis._save", lambda *args: [])
+    monkeypatch.setattr("wavesimfem.analysis._save", lambda *args: [])
     archive, _, _ = _report_archive(tmp_path, zero=zero, unresolved=unresolved)
     report = write_lamb_report(archive, formats=())
     assert report["warnings"]
@@ -158,7 +158,7 @@ def test_report_displays_both_directions_in_scale_appropriate_units(
         figures[base.rsplit("/", 1)[-1]] = fig
         return []
 
-    monkeypatch.setattr("guidedwavefem.analysis._save", capture)
+    monkeypatch.setattr("wavesimfem.analysis._save", capture)
     archive, _, _ = _report_archive(tmp_path, scale=scale)
     write_lamb_report(archive, formats=())
     spectrum = figures["modal_resolution"].axes[0]
@@ -176,7 +176,7 @@ def test_modal_figures_use_only_publication_panels(tmp_path, monkeypatch):
         figures.append(fig)
         return []
 
-    monkeypatch.setattr("guidedwavefem.analysis._save", capture)
+    monkeypatch.setattr("wavesimfem.analysis._save", capture)
     archive, _, _ = _report_archive(tmp_path)
     write_lamb_report(archive, formats=())
     assert len(figures) == 3

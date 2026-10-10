@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from guidedwavefem import analysis
+from wavesimfem import analysis
 
 
 def _travelling_archive(path, *, leftward=False, **metadata):

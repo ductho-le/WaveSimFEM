@@ -1,4 +1,4 @@
-name: gwfem
+name: wavesim
 channels:
   - conda-forge
 dependencies:

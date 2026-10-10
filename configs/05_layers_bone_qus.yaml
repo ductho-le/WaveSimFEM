@@ -1,15 +1,17 @@
 # Multilayered solid-fluid plate: bone marrow / cortical bone / soft tissue
 # (Biomedical quantitative ultrasound, QUS axial transmission)
 # Dispersion and attenuation depend on cortical thickness and anisotropic loss.
-# The bone axis is x and the radial direction is y. Top and bottom surfaces
-# are traction-free; normal loading and sensing are on the skin surface.
+# The bone axis is x and the radial direction is y. The bottom is pressure-release;
+# the top has prescribed Gaussian pressure, tending to zero away from the source.
+# Particle-velocity sensing is on that driven skin surface.
 # Lateral sponges truncate the waveguide.
 #
 # Application
 #   Cortical-property sensitivity in axial-transmission quantitative ultrasound.
 # Model and numerical scope
 #   Flat 2D plane-strain surrogate with anisotropic Kelvin-Voigt cortical bone.
-#   Fluid regions use small-shear displacement elements with tangential continuity.
+#   Fluids use inviscid pressure acoustics with normal coupling and tangential slip.
+#   Skin measurements are particle velocity [m/s], replacing legacy displacement.
 #   The sizing band is 0.1-1 MHz and the skin-surface receiver aperture is 60 mm.
 #   Q2 spacing gives approximately eight elements per band-edge acoustic wavelength;
 #   shorter guided modes require a dispersion-based resolution check. Establish
@@ -52,6 +54,7 @@ structure:
     - name: "Bone marrow"
       thickness: 1.0e-3         # [m]
       material_model: "fluid"
+      fluid_formulation: "acoustic"
       rho: 930.0                # [kg/m^3]
       c: 1480.0                 # [m/s]
 
@@ -66,6 +69,7 @@ structure:
     - name: "Soft tissue"
       thickness: 1.0e-3         # [m]
       material_model: "fluid"
+      fluid_formulation: "acoustic"
       rho: 1000.0               # [kg/m^3]
       c: 1500.0                 # [m/s]
 
@@ -73,14 +77,21 @@ absorbing_boundaries:
   alpha: null                  # Frequency-scaled lateral sponge; separate from material Cv
   beta: null
 
+acoustic_boundaries:
+  top: "rigid"                # Replaced by the prescribed-pressure source below
+  bottom: "pressure_release"
+  left: "rigid"                # Lateral sponges attenuate waves before these faces
+  right: "rigid"
+
 excitation:
+  source_kind: "acoustic_pressure"
+  source_boundary: "top"
+  source_region: "Soft tissue"
+  source_amplitude: 1.0e6      # [Pa] Compression-positive pressure pulse
   source_type: "ricker"
   f_center: 500.0e3             # [Hz]
-  traction_max: 1.0e6           # [Pa]
   excitation_width: 2.0e-3      # [m]
   source_x: null               # [m] Automatic source position inside the sensing region
-  source_fx: 0.0
-  source_fy: 1.0
 
 mesh:
   nx: 757                      # Full 140 mm domain; dx = 0.185 mm
@@ -91,6 +102,8 @@ mesh:
   min_wavelength: null          # Supply a bound from the multilayer dispersion solution
 
 sensors:
+  observable: "particle_velocity"
+  region: "Soft tissue"
   n_sensors: 241
   sensor_offset: 0.01           # [m]
   sensor_pitch: 0.25e-3         # [m]

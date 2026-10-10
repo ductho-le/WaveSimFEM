@@ -9,7 +9,7 @@ import math
 import numpy as np
 import pytest
 
-from guidedwavefem.config import (
+from wavesimfem.config import (
     ABSORB_ALPHA_REF,
     ABSORB_BETA_REF,
     LEGACY_DISPERSION_KEYS,
@@ -19,8 +19,8 @@ from guidedwavefem.config import (
     load_config,
     parse_and_resolve_config,
 )
-from guidedwavefem.materials import sizing_wavelength, structure_from_config
-from guidedwavefem.sources import DEFAULT_N_CYCLES
+from wavesimfem.materials import sizing_wavelength, structure_from_config
+from wavesimfem.sources import DEFAULT_N_CYCLES
 
 ALUMINUM = {"thickness": 1e-3, "rho": 2700.0, "E": 70e9, "nu": 0.33, "material_model": "isotropic"}
 

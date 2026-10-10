@@ -1,8 +1,8 @@
 # Aluminium plate immersed in water (bilateral fluid loading / immersion NDE)
 # Loading and sensing are at the upper plate-water interface, y = 1.5 mm.
 # Lateral sponges absorb guided waves; top and bottom sponges absorb radiation.
-# Fluids use shear-regularised displacement elements with full displacement
-# continuity, so leaky and Scholte interface waves are approximate.
+# Water uses scalar-pressure inviscid acoustics coupled to plate displacement
+# by normal traction and acceleration; tangential slip is allowed.
 #
 # Application
 #   Fluid-loading effects on plate dispersion in ultrasonic immersion inspection.
@@ -55,6 +55,7 @@ structure:
     thickness: 6.0e-3           # [m] Truncation depth
     absorb_depth: 4.0e-3        # [m] Sponge inside the truncation depth
     material_model: "fluid"
+    fluid_formulation: "acoustic"
     rho: 1000.0                 # [kg/m^3]
     c: 1480.0                   # [m/s]
 
@@ -63,6 +64,7 @@ structure:
     thickness: 6.0e-3           # [m] Truncation height
     absorb_depth: 4.0e-3        # [m]
     material_model: "fluid"
+    fluid_formulation: "acoustic"
     rho: 1000.0                 # [kg/m^3]
     c: 1480.0                   # [m/s]
 
@@ -71,6 +73,10 @@ absorbing_boundaries:
   beta: null
 
 excitation:
+  source_kind: "traction"
+  source_boundary: "interface"
+  source_y: 1.5e-3             # [m] Upper plate-water interface
+  source_region: "Aluminium plate"
   source_type: "ricker"
   f_center: 500.0e3             # [Hz]
   traction_max: 1.0e6           # [Pa]
@@ -88,6 +94,8 @@ mesh:
   min_wavelength: null          # Replace with a validated guided/interface-mode bound
 
 sensors:
+  observable: "displacement"
+  region: "Aluminium plate"   # Select the solid side of the interface
   n_sensors: 241
   sensor_offset: 0.01           # [m]
   sensor_pitch: 0.25e-3         # [m]

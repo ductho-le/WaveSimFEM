@@ -7,9 +7,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from guidedwavefem import __version__
-from guidedwavefem.cli import main
-from guidedwavefem.reporting import logger
+from wavesimfem import __version__
+from wavesimfem.cli import main
+from wavesimfem.reporting import logger
 
 CONFIG_DIR = Path(__file__).resolve().parents[1] / "configs"
 CONFIG_01 = CONFIG_DIR / "01_plate_aluminum_lamb.yaml"
@@ -72,7 +72,7 @@ def test_cli_generate_config(tmp_path):
 
 
 def test_generated_template_is_valid(tmp_path):
-    from guidedwavefem.config import parse_and_resolve_config
+    from wavesimfem.config import parse_and_resolve_config
 
     out_yaml = tmp_path / "template.yaml"
     main(["--generate-config", str(out_yaml)])
@@ -125,7 +125,7 @@ def test_cli_invalid_device_rejected(capsys):
         main(["-c", str(CONFIG_01), "--dry-run", "--device", "gpu0"])
     assert exc_info.value.code == 2
     err = capsys.readouterr().err
-    assert "gwfem: error: invalid configuration" in err and "Invalid device" in err
+    assert "wavesim: error: invalid configuration" in err and "Invalid device" in err
     assert "Traceback" not in err
 
 

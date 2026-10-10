@@ -9,9 +9,9 @@ import numpy as np
 import pytest
 import yaml
 
-from guidedwavefem.config import flatten_config
-from guidedwavefem.materials import compute_rayleigh_speed
-from guidedwavefem.structure_analysis import reference_dispersion, structure_profile
+from wavesimfem.config import flatten_config
+from wavesimfem.materials import compute_rayleigh_speed
+from wavesimfem.structure_analysis import reference_dispersion, structure_profile
 
 CONFIGS = Path(__file__).resolve().parents[1] / "configs"
 EXAMPLES = [
@@ -107,7 +107,13 @@ def test_fluid_loaded_plate_guides_are_radiation_thresholds_not_free_lamb():
     assert not profile["lamb_applicable"]
     assert len([r for r in profile["references"] if r["kind"] == "acoustic_radiation"]) == 2
     assert len(profile["sensor_regions"]) == 2  # interface belongs to both regions
-    assert any("tangential continuity" in s for s in profile["exclusions"])
+    assert profile["has_acoustic"] and not profile["has_legacy_fluid"]
+    assert not any("tangential continuity" in s for s in profile["exclusions"])
+
+    for side in ("substrate", "superstrate"):
+        config["structure"][side]["fluid_formulation"] = "regularized_elastic"
+    legacy = _profile(config)
+    assert any("tangential continuity" in s for s in legacy["exclusions"])
 
 
 def test_anisotropic_axial_reference_uses_christoffel_eigenvalues():

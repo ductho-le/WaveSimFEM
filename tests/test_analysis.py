@@ -8,7 +8,7 @@ import matplotlib
 import numpy as np
 import pytest
 
-from guidedwavefem import analysis
+from wavesimfem import analysis
 
 
 def _archive(path, n_t=256, n_x=16):

@@ -8,7 +8,7 @@ import pytest
 import scipy.sparse as sp
 from mpi4py import MPI
 
-from guidedwavefem.device import (
+from wavesimfem.device import (
     CPU_DEVICE,
     DeviceInfo,
     DeviceUnavailableError,
@@ -16,8 +16,8 @@ from guidedwavefem.device import (
     normalize_device_request,
     select_device,
 )
-from guidedwavefem.numerics import rk4_step
-from guidedwavefem.solvers_gpu import (
+from wavesimfem.numerics import rk4_step
+from wavesimfem.solvers_gpu import (
     build_sensor_interpolation_matrix,
     integrate_explicit_rk4,
     make_backend,
@@ -56,7 +56,7 @@ def test_normalize_device_request(raw, expected):
 
 
 def test_explicit_unavailable_gpu_request_raises(monkeypatch):
-    import guidedwavefem.device as device_mod
+    import wavesimfem.device as device_mod
 
     monkeypatch.setattr(device_mod, "detect_available_devices", lambda: [CPU_DEVICE])
     with pytest.raises(DeviceUnavailableError):

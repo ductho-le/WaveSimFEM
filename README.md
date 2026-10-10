@@ -1,14 +1,14 @@
-# GuidedWaveFEM
+# WaveSimFEM
 
 **An open-source GPU-accelerated finite element framework for wave simulation and synthetic-data generation in layered media**
 
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![DOLFINx 0.10.0](https://img.shields.io/badge/DOLFINx-0.10.0-orange.svg)](https://fenicsproject.org/)
 [![MPI / PETSc](https://img.shields.io/badge/MPI-PETSc-green.svg)](https://petsc.org/)
-[![CI](https://github.com/ductho-le/GuidedWaveFEM/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/ductho-le/GuidedWaveFEM/actions/workflows/tests.yml)
+[![CI](https://github.com/ductho-le/WaveSimFEM/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/ductho-le/WaveSimFEM/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-**GuidedWaveFEM** is a Python framework for transient wave simulation and synthetic-data generation in two-dimensional layered media. It combines DOLFINx finite element assembly with distributed PETSc solvers and a single-device CuPy CUDA engine, carrying physical parameters and acquisition settings through to archived receiver measurements and frequency–wavenumber representations.
+**WaveSimFEM** is a Python framework for transient wave simulation and synthetic-data generation in two-dimensional layered media. It combines DOLFINx finite element assembly with distributed PETSc solvers and a single-device CuPy CUDA engine, carrying physical parameters and acquisition settings through to archived receiver measurements and frequency–wavenumber representations.
 
 The framework supports guided- and surface-wave studies in metallic and composite plates, layered ground, and biomedical and immersed structures across ultrasonic and seismic scales. Its common simulation-to-data workflow provides reusable infrastructure for parameter studies, acquisition design, inverse problems, and labeled training collections for machine-learning and deep-learning applications.
 
@@ -36,19 +36,29 @@ The framework supports guided- and surface-wave studies in metallic and composit
 | Model configuration | Validated YAML, TOML, or JSON inputs for geometry, materials, excitation, receivers, numerical controls, and output |
 | Finite element model | Interface-conforming quadrilateral meshes and shared DOLFINx/UFL assembly of mass, stiffness, and damping operators |
 | Transient integration | Lumped-mass explicit RK4 on SciPy, CuPy, or distributed PETSc; consistent-mass implicit Newmark on PETSc |
-| Receiver acquisition | Both in-plane displacement components evaluated by finite element interpolation at specified coordinates, including off-node positions |
+| Receiver acquisition | Solid displacement or velocity, fluid pressure or particle velocity, evaluated at specified coordinates with explicit units and material-side selection |
 | Analysis | Waveforms, B-scans, frequency–wavenumber spectra, structure-specific diagnostics, and optional mode or packet reports |
 | Reproducible data | Receiver archives with resolved inputs, acquisition geometry, realized time grids, backend and precision metadata, and source hashes |
 
-The CUDA engine retains sparse operators and evolving state on the device. It evaluates stiffness and damping through a combined sparse block, using one internal-force product per RK4 stage, and buffers receiver samples before transferring them to host storage. Mesh generation, finite element assembly, and spectral post-processing run on the CPU.
+The elastic CUDA engine retains sparse operators and evolving state on the device. It evaluates stiffness and damping through a combined sparse block, using one internal-force product per RK4 stage, and buffers receiver samples before transferring them to host storage. The coupled acoustic engine also advances its fields on the selected device, but uploads forcing each stage and updates host field mirrors each step for acquisition. Mesh generation, finite element assembly, and spectral post-processing run on the CPU.
 
 ## Physical model
 
-GuidedWaveFEM solves **linear, two-dimensional plane-strain elastodynamics** in flat, layered structures. The propagation and depth/thickness coordinates are `x1` and `x2`; the recorded components are `u1` and `u2`, named `x` and `y` in the API and archives. The model is invariant in the third direction and assumes perfectly bonded solid interfaces.
+WaveSimFEM solves **linear, two-dimensional plane-strain elastodynamics coupled to pressure acoustics** in flat, layered structures. The propagation and depth/thickness coordinates are `x1` and `x2`; solid displacement components `u1` and `u2` are named `x` and `y` in the API and archives. Pressure and velocity observables have their own field names and physical units. The model is invariant in the third direction and assumes perfectly bonded solid interfaces.
 
-Supported structures are free single or multilayer plates, truncated halfspaces, plates on substrates, and plates between lower and upper halfspaces. Materials may be isotropic elastic, anisotropic elastic, or Kelvin–Voigt viscoelastic. Anisotropic stiffness and any Kelvin–Voigt viscosity are supplied in the simulation axes; three-dimensional material orientations must permit decoupling of in-plane and out-of-plane motion. Excitation is a Gaussian distributed traction with a Ricker pulse or Hann-windowed tone burst. Graded mass- and stiffness-proportional sponge damping truncates the domain.
+Supported structures are free single or multilayer plates, truncated halfspaces, plates on substrates, and plates between lower and upper halfspaces. Solid materials may be isotropic elastic, anisotropic elastic, or Kelvin–Voigt viscoelastic. Anisotropic stiffness and any Kelvin–Voigt viscosity are supplied in the simulation axes; three-dimensional material orientations must permit decoupling of in-plane and out-of-plane motion. Solid excitation uses distributed traction; acoustic excitation supports prescribed pressure, normal acceleration, and volume forcing, with Ricker or Hann-windowed tone-burst waveforms. Graded mass- and stiffness-proportional sponge damping truncates the domain.
 
-Fluid regions use a **weak-shear elastic surrogate** with artificial shear stiffness and continuous tangential displacement at solid–fluid interfaces. Quantitative interface-wave phase and leaky-wave attenuation require mesh and regularization studies against an independent inviscid acoustic reference. The bone and immersed-plate examples demonstrate this surrogate within the shared workflow. Curved or three-dimensional geometries, out-of-plane polarization, nonlinear response, local defects, and detailed transducer coupling are outside the current model.
+Fluid regions solve **linear inviscid pressure acoustics** by default:
+
+\[
+\frac{1}{K}\frac{\partial^2 p}{\partial t^2}
+-\nabla\cdot\left(\frac{1}{\rho}\nabla p\right)=q,
+\qquad K=\rho c^2.
+\]
+
+Pressure is compression-positive. At solid–fluid interfaces, pressure applies normal traction and solid normal acceleration drives the fluid; tangential slip is allowed. Separate pressure and displacement fields occupy only their material regions. Acoustic materials have no artificial shear modulus or shear-wave speed. Rigid, pressure-release, and first-order radiation conditions are available on exterior fluid boundaries, alongside numerical sponges. The finite element and time discretizations still require convergence checks.
+
+For reproducibility and comparisons, the previous displacement approximation remains available through an explicit `fluid_formulation: regularized_elastic` on each fluid region. It retains artificial shear and tangential displacement continuity. See the [fluid migration and source guide](configs/README.md#fluid-formulation-and-migration) for inputs, source units, receiver fields, and archive compatibility. Curved or three-dimensional geometries, out-of-plane polarization, mean flow, nonlinear response, and detailed transducer coupling are outside the current model.
 
 ## Installation
 
@@ -57,18 +67,18 @@ Fluid regions use a **weak-shear elastic surrogate** with artificial shear stiff
 The supplied Conda environment supports Linux and macOS and specifies Python 3.11/3.12, DOLFINx 0.10.0, PETSc/petsc4py 3.24, MPI, and the scientific Python dependencies.
 
 ```bash
-git clone https://github.com/ductho-le/GuidedWaveFEM.git
-cd GuidedWaveFEM
+git clone https://github.com/ductho-le/WaveSimFEM.git
+cd WaveSimFEM
 conda env create -f environment.yml
-conda activate gwfem
+conda activate wavesim
 python -m pip install --no-deps -e .
 ```
 
 Check the installed command:
 
 ```bash
-gwfem --version
-gwfem --help
+wavesim --version
+wavesim --help
 ```
 
 > [!IMPORTANT]
@@ -86,12 +96,12 @@ The extra installs `cupy-cuda12x`. Each CUDA simulation uses one process and one
 
 ## Quick start
 
-Run these commands from the repository root with the `gwfem` environment active.
+Run these commands from the repository root with the `wavesim` environment active.
 
 ### Inspect the model
 
 ```bash
-gwfem -c configs/01_plate_aluminum_lamb.yaml --dry-run
+wavesim -c configs/01_plate_aluminum_lamb.yaml --dry-run
 ```
 
 Preflight reports element spacing, estimated degrees of freedom, duration, step count, receiver-history size, and memory without constructing the finite element model. The supplied examples are research-scale configurations; use these estimates to plan a run.
@@ -99,7 +109,7 @@ Preflight reports element spacing, estimated degrees of freedom, duration, step 
 ### Simulate and archive receiver data
 
 ```bash
-gwfem -c configs/01_plate_aluminum_lamb.yaml --device cpu --no-postprocess
+wavesim -c configs/01_plate_aluminum_lamb.yaml --device cpu --no-postprocess
 ```
 
 This writes the aluminum-plate measurements and resolved run configuration to `results_01_plate_aluminum_lamb/`.
@@ -107,14 +117,14 @@ This writes the aluminum-plate measurements and resolved run configuration to `r
 ### Analyze the saved record
 
 ```bash
-gwfem --postprocess results_01_plate_aluminum_lamb/sensor_data.npz
+wavesim --postprocess results_01_plate_aluminum_lamb/sensor_data.npz
 ```
 
 Standalone post-processing uses the archived physical model and generates waveforms, B-scans, frequency–wavenumber spectra, and the default structure report. A plotting configuration selects optional reports such as Lamb reconstruction. Without a plotting configuration, it uses built-in fonts and requires no LaTeX installation.
 
 Omit `--no-postprocess` to simulate and plot in one invocation. Example 01 sets `output.usetex: true`; change that setting to `false` for built-in rendering, or provide `latex`, `dvipng`, and Ghostscript. The reference template and Examples 02–06 already use `usetex: false`.
 
-`python -m guidedwavefem` can replace `gwfem` in these commands.
+`python -m wavesimfem` can replace `wavesim` in these commands.
 
 ## CPU and GPU execution
 
@@ -122,22 +132,30 @@ Select an execution path while retaining the same physical and acquisition confi
 
 ```bash
 # Single NVIDIA GPU, explicit RK4
-gwfem -c configs/01_plate_aluminum_lamb.yaml --device cuda --no-postprocess
+wavesim -c configs/01_plate_aluminum_lamb.yaml --device cuda --no-postprocess
 
 # Four CPU processes, distributed PETSc RK4
-mpiexec -n 4 gwfem -c configs/01_plate_aluminum_lamb.yaml --device cpu --no-postprocess
+mpiexec -n 4 wavesim -c configs/01_plate_aluminum_lamb.yaml --device cpu --no-postprocess
 
 # Four CPU processes, consistent-mass Newmark
-mpiexec -n 4 gwfem -c configs/01_plate_aluminum_lamb.yaml --solver implicit --device cpu --no-postprocess
+mpiexec -n 4 wavesim -c configs/01_plate_aluminum_lamb.yaml --solver implicit --device cpu --no-postprocess
 ```
 
 | Device request | Single-process explicit | Distributed explicit | Implicit |
 | :--- | :--- | :--- | :--- |
 | `auto` | CuPy CUDA when available; otherwise SciPy CPU | PETSc CPU | PETSc CPU |
 | `cpu` | SciPy CPU | PETSc CPU | PETSc CPU |
-| `cuda` or `cuda:N` | Requested GPU; error if unavailable | Unsupported; raises an error | Ignored with a warning; PETSc CPU |
+| `cuda` or `cuda:N` | Requested GPU; error if unavailable | Unsupported; raises an error | Acoustic: error; elastic: warning and PETSc CPU |
 
 The examples explicitly select `cpu`. Use `--device auto` for automatic selection or `--device cuda:1` to choose a specific GPU. Distributed multi-GPU integration is outside the current execution model; independent cases can run on separate devices through external campaign scripts.
+
+Coupled acoustic runs support single-process SciPy/CuPy RK4 in single or double
+precision and PETSc RK4/Newmark in double precision. The acoustic CUDA path has
+parity tests, but has not been exercised on CUDA hardware in the current local
+verification environment. CPU and MPI results establish the available backend
+checks; GPU-specific tests skip when CUDA is unavailable.
+Implicit and distributed acoustic runs reject single precision and explicit CUDA
+requests before assembly; they do not silently change the requested backend.
 
 Double precision is the default. `--precision single` enables FP32 in the single-process SciPy/CuPy engine; PETSc paths use FP64. Assess precision over the complete observation window because phase differences can accumulate with propagation distance and step count.
 
@@ -149,7 +167,7 @@ sh tools/run_cpu4.sh -c configs/template.yaml --no-postprocess
 
 ## Example models
 
-The six application configurations use Q2 quadrilateral elements and explicit RK4. They include material references, source and receiver settings, exact element counts, and output options.
+The application configurations use Q2 quadrilateral elements and explicit RK4. They include material references, source and receiver settings, exact element counts, and output options.
 
 | Configuration | Structure | Application | Excitation |
 | :--- | :--- | :--- | :--- |
@@ -159,6 +177,8 @@ The six application configurations use Q2 quadrilateral elements and explicit RK
 | [04 · Soil over bedrock](configs/04_plate_on_halfspace_soil_bedrock.yaml) | 10 m soil layer on a truncated substrate | Seismic surface-wave analysis | 15 Hz Ricker |
 | [05 · Cortical bone](configs/05_layers_bone_qus.yaml) | Marrow / viscoelastic bone / tissue stack | Axial-transmission ultrasound | 500 kHz Ricker |
 | [06 · Immersed plate](configs/06_plate_in_halfspaces_immersed_water.yaml) | 1.5 mm aluminum plate between water regions | Fluid-loaded guided waves | 500 kHz Ricker |
+| [07 · Acoustic water channel](configs/07_fluid_acoustic.yaml) | Pure fluid with rigid and radiation boundaries | Pressure propagation | 250 kHz Ricker |
+| [08 · Coupled plate and water](configs/08_fluid_solid_acoustic.yaml) | Aluminum plate on a water half-space | Fluid pressure array (40 mm) from interface traction | 200 kHz Ricker |
 
 These inputs are starting points for application studies. Establish resolution, recording-window, and boundary requirements for the observables of interest before using them in a data-generation campaign. See the [example guide](configs/README.md) for material conventions and acquisition details, and the [annotated reference configuration](configs/template.yaml) for the complete parameter guide.
 
@@ -167,8 +187,8 @@ These inputs are starting points for application studies. Establish resolution, 
 Copy the closest example or the annotated reference configuration. The CLI can also generate a starter file:
 
 ```bash
-gwfem --generate-config my_waveguide.yaml
-gwfem -c my_waveguide.yaml --dry-run
+wavesim --generate-config my_waveguide.yaml
+wavesim -c my_waveguide.yaml --dry-run
 ```
 
 YAML, TOML, and JSON share the same validated schema. Settings resolve in the order **built-in defaults → configuration file → CLI overrides**. Unknown, duplicated, or incompatible fields produce an input error.
@@ -179,9 +199,10 @@ YAML, TOML, and JSON share the same validated schema. Settings resolve in the or
 | `geometry` | Observation-region length and lateral sponge widths |
 | `mesh` | Exact element counts, polynomial degree, and frequency/wavelength sizing inputs |
 | `solver` | Integration scheme, device, precision, step controls, and duration |
-| `excitation` | Pulse type, center frequency, traction scale, Gaussian width, position, and direction |
-| `sensors` | Receiver count, pitch, source offset, height, and storage rate |
+| `excitation` | Pulse type, field-specific source kind and amplitude, Gaussian width, region, boundary, and direction |
+| `sensors` | Observable, material side, receiver count, pitch, source offset, height, and storage rate |
 | `absorbing_boundaries` | Peak mass- and stiffness-proportional sponge damping |
+| `acoustic_boundaries` | Rigid, pressure-release, or first-order radiation on exterior fluid faces |
 | `postprocess` | Spectral display limits and structure, mode, or packet reports |
 | `output` | Destination, figure formats, history storage, compression, and field snapshots |
 
@@ -198,13 +219,13 @@ Choose the following controls for each study:
 Common overrides include:
 
 ```bash
-gwfem -c my_waveguide.yaml --output results_my_waveguide
-gwfem -c my_waveguide.yaml --duration 2e-4 --cfl 0.4
-gwfem -c my_waveguide.yaml --f-max "2 MHz" --k-max "3 rad/mm"
-gwfem -c my_waveguide.yaml --no-postprocess
+wavesim -c my_waveguide.yaml --output results_my_waveguide
+wavesim -c my_waveguide.yaml --duration 2e-4 --cfl 0.4
+wavesim -c my_waveguide.yaml --f-max "2 MHz" --k-max "3 rad/mm"
+wavesim -c my_waveguide.yaml --no-postprocess
 ```
 
-Use `-q` for warnings only, `-v` for diagnostic logging, and `gwfem --help` for all options. Migration notes for older mesh and parameter conventions are in [CHANGELOG.md](CHANGELOG.md).
+Use `-q` for warnings only, `-v` for diagnostic logging, and `wavesim --help` for all options. Migration notes for older mesh and parameter conventions are in [CHANGELOG.md](CHANGELOG.md).
 
 ## Outputs and post-processing
 
@@ -212,14 +233,14 @@ Use `-q` for warnings only, `-v` for diagnostic logging, and `gwfem --help` for 
 
 | Output | Contents |
 | :--- | :--- |
-| `sensor_data.npz` | Stored times, receiver coordinates, both displacement components, model metadata, run identifier, and embedded resolved configuration |
+| `sensor_data.npz` | Stored times, receiver coordinates, selected field (displacement, velocity, pressure, or particle velocity), units, model metadata, run identifier, and resolved configuration |
 | `simulation_config.yaml` | Resolved inputs and runtime provenance: mesh, realized step and sampling, backend, precision, package/runtime versions, and source hashes |
 | `quick_results.png` | Optional waveform and B-scan overview |
 | `full_analysis.*` | Receiver waveforms, B-scan, and component-resolved frequency–wavenumber spectra |
 | `wave_physics/` | Structure-specific figures, qualified measurements, spectral arrays, and interpretation notes |
 | `lamb_modes/` | Optional A0/S0 reconstructions, residual signals, figures, and separation diagnostics |
 | `characterisation/` | Optional packet reports, per-receiver measurements, fit diagnostics, and interpretation notes |
-| `guided_wave.bp` | Optional full-field displacement snapshots for ParaView when `output.write_vtx: true` |
+| `guided_wave.bp` | Optional elastic displacement snapshots for ParaView when `output.write_vtx: true`; acoustic runs write separate `solid_displacement.bp` and `acoustic_pressure.bp` fields when present |
 
 Receiver histories have shape **`(number of stored times, number of receivers)`**. Load the measured components with NumPy:
 
@@ -236,6 +257,11 @@ with np.load("results_01_plate_aluminum_lamb/sensor_data.npz", allow_pickle=Fals
 print(run_id, times.shape, receiver_x.shape, u1.shape, u2.shape)
 ```
 
+For schema-2 acoustic records, inspect `sensor_observable` and `sensor_units`.
+Pressure is stored in `sensor_data_pressure` [Pa]; solid or fluid velocity
+components use `sensor_data_vx` and `sensor_data_vy` [m/s]. Only displacement
+records use `sensor_data_x` and `sensor_data_y` [m]. Older archives remain readable.
+
 Use the saved time array: storage intervals are integer multiples of the integration step, so the realized sampling rate can differ from the requested rate. The configuration embedded in the archive is authoritative if an interrupted output update leaves the YAML sidecar out of sync.
 
 ### Reprocess an existing record
@@ -243,7 +269,7 @@ Use the saved time array: storage intervals are integer multiples of the integra
 Change plotting settings without repeating the finite element solve:
 
 ```bash
-gwfem --postprocess results_01_plate_aluminum_lamb/sensor_data.npz \
+wavesim --postprocess results_01_plate_aluminum_lamb/sensor_data.npz \
     --output reprocessed_figures --f-max "2 MHz"
 ```
 
@@ -261,7 +287,7 @@ output:
 Save it as `plot_settings.yaml`, then run:
 
 ```bash
-gwfem -c plot_settings.yaml \
+wavesim -c plot_settings.yaml \
     --postprocess results_01_plate_aluminum_lamb/sensor_data.npz
 ```
 
@@ -275,13 +301,13 @@ Lamb reconstruction is a spectral filter of the tapered input. Its residual incl
 
 Enable packet reports through `postprocess.wave_characterisation.enabled` and select a band and time window containing the packet of interest. The analysis screens weak, incomplete, ambiguous, or insufficiently resolved signals and records exclusion reasons. Fitted velocity is an apparent packet velocity; fitted decay can include interference, radiation, geometric effects, and numerical error as well as material loss. Report directories contain README files describing methods, qualifications, and provenance.
 
-Frequency–wavenumber maps show displacement spectral power. Finite duration and receiver aperture set physical resolution; zero padding only provides denser spectral bins. Figures use a common 190 mm width and 10-point text, with PNG, PDF, SVG, and EPS export options. Built-in serif fonts and mathtext require no external LaTeX installation.
+Frequency–wavenumber maps show the selected observable's spectral power. Finite duration and receiver aperture set physical resolution; zero padding only provides denser spectral bins. Figures use a common 190 mm width and 10-point text, with PNG, PDF, SVG, and EPS export options. Built-in serif fonts and mathtext require no external LaTeX installation.
 
 ## Synthetic-data campaigns
 
 A synthetic example consists of a complete physical and acquisition configuration and its recorded measurement. Retaining geometry, constitutive properties, source settings, and receiver sampling with each archive preserves their association with candidate learning targets. Waveforms can be reused to produce different spectral or preprocessing representations without another forward solve.
 
-Build campaigns by scripting repeated CLI invocations or calling `guidedwavefem.run_simulation`. The framework supplies forward simulation, receiver extraction, archiving, and analysis; campaign code supplies parameter sampling, scheduling, label definitions, dataset assembly, and ML/DL training. Assign a unique output directory to every case. Independent CUDA cases can run on separate devices, each with one process and one GPU.
+Build campaigns by scripting repeated CLI invocations or calling `wavesimfem.run_simulation`. The framework supplies forward simulation, receiver extraction, archiving, and analysis; campaign code supplies parameter sampling, scheduling, label definitions, dataset assembly, and ML/DL training. Assign a unique output directory to every case. Independent CUDA cases can run on separate devices, each with one process and one GPU.
 
 For reproducible collections:
 
@@ -321,11 +347,19 @@ The utility records simulation wall time and peak host memory, including setup, 
 
 The automated tests provide implementation and selected physics checks. Application-wide accuracy, speedup, dataset yield, and fluid-model validity require the corresponding reference and performance studies; the supplied configurations alone do not establish those results.
 
+The [acoustic validation report](docs/acoustic_validation.md) records analytical
+cavity, transmission, Scholte-wave, and loaded-plate comparisons, including a
+matched comparison with the legacy approximation. Reproduce its measured JSON:
+
+```bash
+python tools/verify_acoustics.py --case all --output docs/acoustic_validation_results.json
+```
+
 ## Development
 
 ```text
-GuidedWaveFEM/
-├── src/guidedwavefem/   # Configuration, FEM assembly, integration, acquisition, and analysis
+WaveSimFEM/
+├── src/wavesimfem/   # Configuration, FEM assembly, integration, acquisition, and analysis
 ├── configs/            # Annotated reference configuration and six application examples
 ├── tests/              # Unit, numerical, physics, backend, MPI, and CLI checks
 ├── tools/              # CPU launcher, benchmarking, refinement, and report previews
@@ -335,7 +369,7 @@ GuidedWaveFEM/
 └── CHANGELOG.md        # Version history and migration notes
 ```
 
-[`solvers.py`](src/guidedwavefem/solvers.py) handles finite element construction and PETSc integration. [`solvers_gpu.py`](src/guidedwavefem/solvers_gpu.py) provides the shared SciPy/CuPy RK4 engine. Configuration, material tensors, numerical bounds, storage, spectra, and report generation have separate modules under [`src/guidedwavefem/`](src/guidedwavefem/).
+[`solvers.py`](src/wavesimfem/solvers.py) handles finite element construction and PETSc integration. [`solvers_gpu.py`](src/wavesimfem/solvers_gpu.py) provides the shared SciPy/CuPy RK4 engine. Configuration, material tensors, numerical bounds, storage, spectra, and report generation have separate modules under [`src/wavesimfem/`](src/wavesimfem/).
 
 With the runtime environment active:
 
@@ -354,11 +388,11 @@ ruff format --check src tests tools
 Tests cover configuration validation, analytical wave references, integration accuracy, receiver interpolation, backend agreement, MPI collection, archive integrity, and post-processing. CUDA checks require suitable hardware. To require the CuPy backend instead of skipping unavailable-device checks:
 
 ```bash
-GWFEM_REQUIRE_CUDA_BACKENDS=cupy python -m pytest tests/test_backend_validation.py
+WAVESIM_REQUIRE_CUDA_BACKENDS=cupy python -m pytest tests/test_backend_validation.py
 ```
 
-Report issues through [GitHub Issues](https://github.com/ductho-le/GuidedWaveFEM/issues), including the configuration, command, package/environment versions, and error output.
+Report issues through [GitHub Issues](https://github.com/ductho-le/WaveSimFEM/issues), including the configuration, command, package/environment versions, and error output.
 
 ## Citation and license
 
-GuidedWaveFEM is distributed under the [MIT License](LICENSE), which permits reuse and modification. If you use the framework in research, cite the software using [`CITATION.cff`](CITATION.cff) and identify the version or commit associated with the reported simulations or dataset. Retain the study configurations, campaign scripts, and processing settings with your results.
+WaveSimFEM is distributed under the [MIT License](LICENSE), which permits reuse and modification. If you use the framework in research, cite the software using [`CITATION.cff`](CITATION.cff) and identify the version or commit associated with the reported simulations or dataset. Retain the study configurations, campaign scripts, and processing settings with your results.

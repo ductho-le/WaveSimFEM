@@ -21,6 +21,8 @@ SMOKE_GRIDS = {
     "04_plate_on_halfspace_soil_bedrock": (100, [34, 8]),
     "05_layers_bone_qus": (379, [6, 16, 6]),
     "06_plate_in_halfspaces_immersed_water": (379, [17, 6, 17]),
+    "07_fluid_acoustic": (50, [4]),
+    "08_fluid_solid_acoustic": (80, [8, 2]),
 }
 
 
@@ -38,7 +40,7 @@ def test_shipped_example_runs_end_to_end(tmp_path, config):
     cmd = [
         sys.executable,
         "-m",
-        "guidedwavefem",
+        "wavesimfem",
         "-c",
         str(smoke_config),
         "-q",
@@ -52,8 +54,19 @@ def test_shipped_example_runs_end_to_end(tmp_path, config):
     ]
     subprocess.run(cmd, check=True, timeout=600)
     with np.load(out / "sensor_data.npz") as data:
-        assert np.isfinite(data["sensor_data_y"]).all()
-        assert np.abs(data["sensor_data_y"]).max() > 0
+        observable = cfg.get("sensors", {}).get("observable", "displacement")
+        key, unit = {
+            "displacement": ("sensor_data_y", "m"),
+            "velocity": ("sensor_data_vy", "m/s"),
+            "pressure": ("sensor_data_pressure", "Pa"),
+            "particle_velocity": ("sensor_data_vy", "m/s"),
+        }[observable]
+        assert np.isfinite(data[key]).all()
+        assert np.abs(data[key]).max() > 0
+        if observable != "displacement":
+            assert str(data["sensor_observable"]) == observable
+            assert str(data["sensor_units"]) == unit
+            assert "sensor_data_y" not in data
         assert data["times"][-1] == pytest.approx(4.0 / f0)
         runtime = yaml.safe_load(str(data["simulation_config_yaml"]))["runtime"]
         assert runtime["nx"] == nx

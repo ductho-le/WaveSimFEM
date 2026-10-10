@@ -1,7 +1,8 @@
 """Structural geometry, constitutive models, mesh layout, and preflight estimation.
 
 Supports:
-  - Isotropic, anisotropic, Kelvin-Voigt viscoelastic, and regularized fluids
+  - Isotropic, anisotropic, Kelvin-Voigt viscoelastic, and acoustic fluids
+  - Explicitly selected legacy regularized-elastic fluids
   - Single plates, multilayer laminates, semi-infinite elastic halfspaces, and
     plate-substrate systems
   - A shared mesh/time layout used by both the preflight estimator and the solver
@@ -17,11 +18,11 @@ from typing import Any
 
 import numpy as np
 
-from guidedwavefem.numerics import RK4_STABILITY_RADIUS, sample_stride, time_grid, validate_tensor
-from guidedwavefem.reporting import format_banner_box, log, warn
-from guidedwavefem.sources import describe_source, source_duration
-from guidedwavefem.storage import HISTORY_CHUNK_BYTES
-from guidedwavefem.units import fmt_frequency, fmt_length, fmt_time
+from wavesimfem.numerics import RK4_STABILITY_RADIUS, sample_stride, time_grid, validate_tensor
+from wavesimfem.reporting import format_banner_box, log, warn
+from wavesimfem.sources import describe_source, source_duration
+from wavesimfem.storage import HISTORY_CHUNK_BYTES
+from wavesimfem.units import fmt_frequency, fmt_length, fmt_time
 
 STRUCTURE_MODES = (
     "1_layer",
@@ -45,6 +46,7 @@ REGION_KEYS = frozenset(
         "C",
         "Cv",
         "fluid_shear_reg",
+        "fluid_formulation",
         "absorb_depth",
         *_FLUID_SPEED_KEYS,
         *_FLUID_BULK_KEYS,
@@ -57,7 +59,9 @@ _MODEL_FIELDS: dict[str, frozenset[str]] = {
     "isotropic": frozenset({"E", "nu"}),
     "anisotropic": frozenset({"C"}),
     "viscoelastic": frozenset({"C", "Cv"}),
-    "fluid": frozenset({"E", "nu", "fluid_shear_reg", *_FLUID_SPEED_KEYS, *_FLUID_BULK_KEYS}),
+    "fluid": frozenset(
+        {"E", "nu", "fluid_formulation", "fluid_shear_reg", *_FLUID_SPEED_KEYS, *_FLUID_BULK_KEYS}
+    ),
 }
 _CONSTITUTIVE_FIELDS = frozenset().union(*_MODEL_FIELDS.values())
 
@@ -236,6 +240,8 @@ def _normalize_region(
         "is_halfspace": is_halfspace,
         "halfspace_type": halfspace_type,
         "is_fluid": model == "fluid",
+        "is_acoustic": False,
+        "is_legacy_fluid": False,
     }
 
     if model == "fluid":
@@ -272,26 +278,47 @@ def _normalize_region(
         else:
             raise ValueError(f"Fluid '{name}' requires a sound speed 'c' or bulk modulus 'K'")
 
-        fluid_shear_reg = float(item.get("fluid_shear_reg", DEFAULT_FLUID_SHEAR_REG))
-        if not np.isfinite(fluid_shear_reg) or not 0 < fluid_shear_reg <= 1e-2:
+        formulation = str(item.get("fluid_formulation", "acoustic")).lower().strip()
+        if formulation not in ("acoustic", "regularized_elastic"):
             raise ValueError(
-                f"Fluid '{name}' fluid_shear_reg must be in (0, 0.01], got {fluid_shear_reg}"
+                f"Fluid '{name}' fluid_formulation must be 'acoustic' or 'regularized_elastic'"
             )
-        mu = fluid_shear_reg * K_val
-        lmbda = K_val - (2.0 / 3.0) * mu
-        nu_eff = lmbda / (2.0 * (lmbda + mu))
+        if formulation == "acoustic" and "fluid_shear_reg" in item:
+            raise ValueError(
+                f"Fluid '{name}': fluid_shear_reg is unused by acoustic pressure physics; "
+                "remove it or explicitly set fluid_formulation: regularized_elastic"
+            )
         entry.update(
             c_fluid=c_sound,
+            c_L=c_sound,
             K=K_val,
-            fluid_shear_reg=fluid_shear_reg,
-            E=2.0 * mu * (1.0 + nu_eff),
-            nu=nu_eff,
-            mu=mu,
-            lmbda=lmbda,
-            c_L=float(np.sqrt((lmbda + 2 * mu) / rho)),
-            c_T=float(np.sqrt(mu / rho)),
             c_physical_min=c_sound,
+            fluid_formulation=formulation,
+            is_acoustic=formulation == "acoustic",
+            is_legacy_fluid=formulation == "regularized_elastic",
         )
+        if formulation == "regularized_elastic":
+            fluid_shear_reg = _region_float(
+                {"fluid_shear_reg": item.get("fluid_shear_reg", DEFAULT_FLUID_SHEAR_REG)},
+                "fluid_shear_reg",
+                name,
+            )
+            if not 0 < fluid_shear_reg <= 1e-2:
+                raise ValueError(
+                    f"Fluid '{name}' fluid_shear_reg must be in (0, 0.01], got {fluid_shear_reg}"
+                )
+            mu = fluid_shear_reg * K_val
+            lmbda = K_val - (2.0 / 3.0) * mu
+            nu_eff = lmbda / (2.0 * (lmbda + mu))
+            entry.update(
+                fluid_shear_reg=fluid_shear_reg,
+                E=2.0 * mu * (1.0 + nu_eff),
+                nu=nu_eff,
+                mu=mu,
+                lmbda=lmbda,
+                c_L=float(np.sqrt((lmbda + 2 * mu) / rho)),
+                c_T=float(np.sqrt(mu / rho)),
+            )
     elif model == "isotropic":
         E = _region_float(item, "E", name)
         nu = _region_float(item, "nu", name)
@@ -338,11 +365,12 @@ def _halfspace_absorb_depth(
     return absorb_depth
 
 
-def _speed_summary(regions: list[dict[str, Any]], prefix: str) -> dict[str, float]:
-    solids = [r for r in regions if not r.get("is_fluid", False)] or regions
+def _speed_summary(regions: list[dict[str, Any]], prefix: str) -> dict[str, float | None]:
+    solids = [r for r in regions if not r.get("is_fluid", False)]
+    shear_regions = solids or [r for r in regions if r.get("is_legacy_fluid", False)]
     return {
-        f"c_T_{prefix}min": min(r["c_T"] for r in solids),
-        f"c_T_{prefix}max": max(r["c_T"] for r in solids),
+        f"c_T_{prefix}min": min((r["c_T"] for r in shear_regions), default=None),
+        f"c_T_{prefix}max": max((r["c_T"] for r in shear_regions), default=None),
         f"c_L_{prefix}min": min(r["c_L"] for r in regions),
         f"c_L_{prefix}max": max(r["c_L"] for r in regions),
     }
@@ -396,14 +424,16 @@ def normalize_structure(
             **speeds,
             "c_wave_min": norm_hs["c_physical_min"],
             "has_fluid": norm_hs["is_fluid"],
-            "c_fluid_min": norm_hs["c_L"] if norm_hs["is_fluid"] else None,
+            "has_acoustic": norm_hs["is_acoustic"],
+            "has_legacy_fluid": norm_hs["is_legacy_fluid"],
+            "c_fluid_min": norm_hs.get("c_fluid"),
             "c_R": c_R,
-            "c_T_plate_min": norm_hs["c_T"],
-            "c_T_plate_max": norm_hs["c_T"],
+            "c_T_plate_min": norm_hs.get("c_T"),
+            "c_T_plate_max": norm_hs.get("c_T"),
             "c_L_plate_min": norm_hs["c_L"],
             "c_L_plate_max": norm_hs["c_L"],
             "c_L_plate_top": norm_hs["c_L"],
-            "c_T_plate_top": norm_hs["c_T"],
+            "c_T_plate_top": norm_hs.get("c_T"),
             "rho_plate_top": norm_hs["rho"],
         }
 
@@ -496,10 +526,12 @@ def normalize_structure(
         **_speed_summary(all_regions, ""),
         "c_wave_min": min(r["c_physical_min"] for r in all_regions),
         "has_fluid": any(r["is_fluid"] for r in all_regions),
-        "c_fluid_min": min((r["c_L"] for r in all_regions if r["is_fluid"]), default=None),
+        "has_acoustic": any(r["is_acoustic"] for r in all_regions),
+        "has_legacy_fluid": any(r["is_legacy_fluid"] for r in all_regions),
+        "c_fluid_min": min((r["c_fluid"] for r in all_regions if r["is_fluid"]), default=None),
         **_speed_summary(norm_plate_layers, "plate_"),
         "c_L_plate_top": top_plate["c_L"],
-        "c_T_plate_top": top_plate["c_T"],
+        "c_T_plate_top": top_plate.get("c_T"),
         "rho_plate_top": top_plate["rho"],
     }
 
@@ -807,7 +839,9 @@ def _tensor_row_sums(
 def element_operator_bounds(
     cfg: Mapping[str, Any], summary: Mapping[str, Any], layout: MeshLayout
 ) -> tuple[float, float]:
-    """Upper bounds of the assembled Gershgorin bounds ``B_K`` and ``B_C`` before meshing.
+    """Uncoupled element bounds ``B_K`` and ``B_C`` before meshing.
+
+    With acoustic regions these omit interface coupling and are advisory only.
 
     For row-sum lumping, ``Σ_j |Σ_e Aᵉ_ij| / Σ_e mᵉ_i ≤ max_e Σ_j |Aᵉ_ij| / mᵉ_i``,
     so element-level bounds of each region's (uniform) cell bound the solver's
@@ -828,16 +862,25 @@ def element_operator_bounds(
     regions = summary["all_regions"]
     for region, ny in zip(regions, layout.ny_per_region, strict=True):
         weights, shape, strain = _element_integrands(hx, region["thickness"] / ny, degree)
-        rho = float(region["rho"])
-        mass_rows = np.repeat(rho * np.einsum("q,qi,qj->i", weights, shape, shape), 2)
-        abs_mass_rows = np.repeat(
-            rho * np.einsum("q,qi,qj->i", weights, np.abs(shape), np.abs(shape)), 2
-        )
-        stiffness = _voigt_stiffness(region)
-        k_rows = _tensor_row_sums(weights, strain, stiffness, absolute_integrand=False)
+        if region.get("is_acoustic", False):
+            factor = 1.0 / float(region["K"])
+            mass_rows = factor * np.einsum("q,qi,qj->i", weights, shape, shape)
+            abs_mass_rows = factor * np.einsum("q,qi,qj->i", weights, np.abs(shape), np.abs(shape))
+            gradient = np.stack((strain[:, 0, 0::2], strain[:, 1, 1::2]), axis=1)
+            scalar_tensor = np.eye(2) / float(region["rho"])
+            k_rows = _tensor_row_sums(weights, gradient, scalar_tensor, absolute_integrand=False)
+            abs_k_rows = _tensor_row_sums(weights, gradient, scalar_tensor, absolute_integrand=True)
+        else:
+            rho = float(region["rho"])
+            mass_rows = np.repeat(rho * np.einsum("q,qi,qj->i", weights, shape, shape), 2)
+            abs_mass_rows = np.repeat(
+                rho * np.einsum("q,qi,qj->i", weights, np.abs(shape), np.abs(shape)), 2
+            )
+            stiffness = _voigt_stiffness(region)
+            k_rows = _tensor_row_sums(weights, strain, stiffness, absolute_integrand=False)
+            abs_k_rows = _tensor_row_sums(weights, strain, stiffness, absolute_integrand=True)
         bound_k = max(bound_k, float(np.max(k_rows / mass_rows)))
         indicator = 2.0 if region.get("is_halfspace") else 1.0
-        abs_k_rows = _tensor_row_sums(weights, strain, stiffness, absolute_integrand=True)
         damping_rows = indicator * (alpha * abs_mass_rows + beta * abs_k_rows)
         if region["material_model"] == "viscoelastic":  # exact: Cv is not indicator-weighted
             damping_rows = damping_rows + _tensor_row_sums(
@@ -852,8 +895,8 @@ def explicit_time_step_estimate(
 ) -> float:
     """Pre-assembly explicit step ``CFL · R / max(√B_K, B_C)`` from element bounds.
 
-    Never larger than the solver's step (the solver uses the sharper assembled
-    bounds), so the preflight step count is an upper estimate.
+    For elastic-only models this is a conservative certificate. Acoustic models
+    require a coupled assembled check; this estimate has no stability guarantee.
     """
     bound_k, bound_c = element_operator_bounds(cfg, summary, layout)
     return float(cfg["CFL"]) * RK4_STABILITY_RADIUS / max(np.sqrt(bound_k), bound_c)
@@ -887,13 +930,36 @@ def sampled_time_grid(
     return dt, n_steps, stride
 
 
+def restricted_field_dof_counts(
+    summary: Mapping[str, Any], layout: MeshLayout, degree: int
+) -> dict[str, int]:
+    """Exact unconstrained Q-degree field counts on the layered conforming mesh.
+
+    Adjacent regions with the same field share their interface nodes. Solid and
+    pressure fields have separate interface nodes; separated components retain
+    their own rows, without unused degrees of freedom in other material cells.
+    """
+    row_counts = {"displacement": 0, "pressure": 0}
+    previous_field = None
+    for region, ny in zip(summary["all_regions"], layout.ny_per_region, strict=True):
+        field = "pressure" if region.get("is_acoustic", False) else "displacement"
+        row_counts[field] += degree * ny + int(field != previous_field)
+        previous_field = field
+    nx_nodes = degree * layout.nx + 1
+    return {
+        "displacement": 2 * nx_nodes * row_counts["displacement"],
+        "pressure": nx_nodes * row_counts["pressure"],
+    }
+
+
 def preflight_estimate(cfg: dict[str, Any], rank: int = 0) -> dict[str, Any]:
     """Report the configured mesh and estimate time steps, DOFs, and memory."""
     summary = structure_from_config(cfg)
     layout = compute_mesh_layout(cfg, summary)
     degree = int(cfg.get("degree", 2))
     dim = 2
-    ndofs_est = dim * (degree * layout.nx + 1) * (degree * layout.ny + 1)
+    field_dofs = restricted_field_dof_counts(summary, layout, degree)
+    ndofs_est = sum(field_dofs.values())
 
     stype = str(cfg.get("solver_type", "explicit")).lower()
     requested_dt = float(cfg["dt"]) if cfg.get("dt") is not None else None
@@ -910,33 +976,57 @@ def preflight_estimate(cfg: dict[str, Any], rank: int = 0) -> dict[str, Any]:
     else:
         cfl = float(cfg["CFL"])
         conservative_dt = explicit_time_step_estimate(cfg, summary, layout)
-        element_dt_limit = conservative_dt / cfl
-        dt_status = "certified_by_element_bound"
-        if requested_dt is not None and requested_dt > element_dt_limit * (1 + 1e-12):
-            dt_status = "requires_assembled_check"
-            dt_est = conservative_dt
-            dt_note = f"conservative resource estimate, element bound, CFL={cfl}"
+        if summary["has_acoustic"]:
+            dt_status = "advisory_uncoupled_requires_assembled_check"
+            dt_est = requested_dt or conservative_dt
+            dt_note = "advisory uncoupled estimate; coupled assembly required"
             warnings.append(
-                f"Requested explicit dt={fmt_time(requested_dt)} exceeds the conservative "
-                f"element stability certificate ({fmt_time(element_dt_limit)}). Preflight "
-                "cannot certify this request; the assembled-operator check may reject it. "
-                f"Resource estimates use {fmt_time(conservative_dt)} before grid rounding. "
-                "Exceeding the conservative certificate alone does not prove instability."
+                "Acoustic preflight omits interface coupling and does not certify explicit "
+                "stability or a conservative step count. The assembled coupled operator "
+                "determines the actual timestep."
             )
-        elif requested_dt is not None:
-            dt_est, dt_note = requested_dt, "user maximum, certified by element bound"
         else:
-            dt_est, dt_note = conservative_dt, f"element bound, CFL={cfl}"
+            element_dt_limit = conservative_dt / cfl
+            dt_status = "certified_by_element_bound"
+            if requested_dt is not None and requested_dt > element_dt_limit * (1 + 1e-12):
+                dt_status = "requires_assembled_check"
+                dt_est = conservative_dt
+                dt_note = f"conservative resource estimate, element bound, CFL={cfl}"
+                warnings.append(
+                    f"Requested explicit dt={fmt_time(requested_dt)} exceeds the conservative "
+                    f"element stability certificate ({fmt_time(element_dt_limit)}). Preflight "
+                    "cannot certify this request; the assembled-operator check may reject it. "
+                    f"Resource estimates use {fmt_time(conservative_dt)} before grid rounding. "
+                    "Exceeding the conservative certificate alone does not prove instability."
+                )
+            elif requested_dt is not None:
+                dt_est, dt_note = requested_dt, "user maximum, certified by element bound"
+            else:
+                dt_est, dt_note = conservative_dt, f"element bound, CFL={cfl}"
     dt_val, nsteps_est, stride = sampled_time_grid(cfg, layout, dt_est)
 
     vec_mem_mb = ndofs_est * 8 / 1024**2
     nnz_per_row = ((2 * degree + 1) ** 2) * dim
     mat_mem_mb = ndofs_est * nnz_per_row * (8 + 4) / 1024**2
-    n_mats = 1 if stype == "implicit" else 2
+    n_mats = (
+        (5 if stype == "implicit" else 6)
+        if summary["has_acoustic"]
+        else (1 if stype == "implicit" else 2)
+    )
     total_mem_est_mb = vec_mem_mb * 10 + mat_mem_mb * (n_mats + 1)
     n_samples = nsteps_est // stride + 1
     # Float64 is conservative for single precision and matches PETSc histories.
-    history_size_mb = 2 * int(cfg["n_sensors"]) * n_samples * 8 / 1024**2
+    observable = cfg.get("sensor_observable", "auto")
+    if observable == "auto":
+        y = cfg.get("sensor_y")
+        if y is None:
+            y = summary["H_plate"] if summary["has_top_halfspace"] else summary["y_max"]
+        candidates = [r for r in summary["all_regions"] if r["y_bot"] <= y <= r["y_top"]]
+        if cfg.get("sensor_region") is not None:
+            candidates = [r for r in candidates if r["name"] == cfg["sensor_region"]]
+        observable = "displacement" if any(not r["is_acoustic"] for r in candidates) else "pressure"
+    n_components = 1 if observable == "pressure" else 2
+    history_size_mb = n_components * int(cfg["n_sensors"]) * n_samples * 8 / 1024**2
     timestamp_mem_mb = n_samples * 8 / 1024**2
     history_storage = str(cfg.get("history_storage", "memory"))
     history_disk_mb = 0.0
@@ -944,7 +1034,8 @@ def preflight_estimate(cfg: dict[str, Any], rank: int = 0) -> dict[str, Any]:
         history_mem_mb = 0.0  # measurement payload is mapped; OS page cache is separate
         history_disk_mb = 2 * history_size_mb  # rank-local and root gathered scratch histories
         chunk_mb = min(
-            history_size_mb, max(HISTORY_CHUNK_BYTES, 2 * int(cfg["n_sensors"]) * 8) / 1024**2
+            history_size_mb,
+            max(HISTORY_CHUNK_BYTES, n_components * int(cfg["n_sensors"]) * 8) / 1024**2,
         )
         transfer_mem_mb = 2 * chunk_mb  # device ring and temporary host copy
         collection_mem_mb = 2 * chunk_mb  # bounded send and receive buffers
@@ -970,6 +1061,8 @@ def preflight_estimate(cfg: dict[str, Any], rank: int = 0) -> dict[str, Any]:
         "ny_per_region": layout.ny_per_region,
         "total_elements": layout.nx * layout.ny,
         "ndofs_est": ndofs_est,
+        "field_dofs_est": field_dofs,
+        "sensor_components_est": n_components,
         "duration": layout.duration,
         "duration_basis": duration_basis,
         "warnings": warnings,

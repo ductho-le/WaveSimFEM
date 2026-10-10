@@ -95,9 +95,9 @@ def _run(args, MPI):
     import numpy as np
     import yaml
 
-    from guidedwavefem import load_config, run_simulation, set_verbosity
-    from guidedwavefem.config import flatten_config
-    from guidedwavefem.parallel import THREAD_ENV_VARS
+    from wavesimfem import load_config, run_simulation, set_verbosity
+    from wavesimfem.config import flatten_config
+    from wavesimfem.parallel import THREAD_ENV_VARS
 
     comm = MPI.COMM_WORLD
     hosts = comm.allgather(socket.gethostname())
@@ -169,12 +169,12 @@ def _run(args, MPI):
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
-    from guidedwavefem.parallel import limit_threads_per_rank
+    from wavesimfem.parallel import limit_threads_per_rank
 
     limit_threads_per_rank()
     from mpi4py import MPI
 
-    from guidedwavefem.solvers import mpi_fail_fast
+    from wavesimfem.solvers import mpi_fail_fast
 
     return mpi_fail_fast(_run)(args, MPI)
 

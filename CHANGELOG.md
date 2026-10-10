@@ -3,7 +3,7 @@
 All notable changes are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.4.0] — 2026-10-10 — acoustic fluids
 
 ### Breaking changes
 
@@ -19,6 +19,65 @@ All notable changes are documented here. Versions follow
 - Preflight reports actual cell dimensions (`h_x`, `h_y_per_region`) in place
   of automatically selected `h_target` and `lambda_min`. `mesh.max_frequency`
   continues to control the analysis/sampling band and implicit accuracy.
+- `material_model: fluid` now defaults to `fluid_formulation: acoustic`:
+  inviscid scalar-pressure acoustics coupled to solid displacement by normal
+  traction and normal acceleration, with tangential slip. Acoustic fluids reject
+  `fluid_shear_reg`; reproduce earlier runs with
+  `fluid_formulation: regularized_elastic`. Archives written by acoustic or
+  field-aware runs use `schema_version: 2` with explicit `sensor_observable`,
+  `sensor_units`, and observable-specific keys (`sensor_data_pressure`,
+  `sensor_data_vx`/`sensor_data_vy`). Older archives keep their legacy-fluid
+  interpretation.
+
+### Added
+
+- Acoustic sources `acoustic_pressure` [Pa], `acoustic_normal_acceleration`
+  [m/s²] and `acoustic_volume` [s⁻²]; `source_boundary`, `source_y` and
+  `source_region` selection; `acoustic_boundaries` (rigid, pressure release,
+  first-order radiation); `sensors.observable` (displacement, velocity,
+  pressure, particle velocity) and `sensors.region`.
+- Coupled PETSc RK4 and Newmark integrators (serial and MPI) and a serial
+  SciPy/CuPy RK4 backend, with a coupling-inclusive explicit stability bound.
+- Independent continuum benchmarks (`tools/verify_acoustics.py`,
+  `docs/acoustic_validation.md`) and examples 07 (pure fluid) and 08
+  (plate loaded by a sponge-terminated water half-space, 81 pressure receivers
+  over a 40 mm aperture for f-k analysis).
+- `SeparableForcing`: loads expressed as fixed vectors times scalar time
+  coefficients. Every coupled integrator accepts it; the array RK4 uploads the
+  vectors once and forms stage loads on its device.
+
+### Performance
+
+- Coupled RK4 (PETSc and array) reuses the end-of-step acceleration as the next
+  first-stage derivative: four instead of five operator evaluations per step,
+  with collective PETSc state checks guarding against external edits.
+- The array RK4 downloads its host mirrors lazily (unsampled steps perform no
+  device-to-host transfer), accumulates stages in place, and keeps separable
+  source terms on the device. Measured CPU loop throughput: example 07
+  2714 → 4195 steps/s, former example 08 1031 → 1500 steps/s (single runs).
+  CUDA behaviour follows the same code path but has not been benchmarked.
+- Fluid energy diagnostics are quadratic forms with matrices assembled once
+  instead of two UFL functional assemblies per recorded sample.
+
+### Robustness
+
+- Field-aware runs share the elastic device policy (`_resolve_device`):
+  implicit runs warn and ignore accelerator/single-precision requests, MPI
+  explicit runs reject non-CPU devices before assembly, and `solve_acoustic`
+  rejects an array-engine `DeviceInfo` on PETSc paths.
+- `build_acoustic_problem` is decomposed into documented helpers (mesh context,
+  interface coupling, sponge profile, field forms, pressure constraints, source
+  location/forms, Dirichlet lifting, sensor layout) with unchanged results.
+
+### Fixed
+
+- The field-aware/acoustic path now uses the documented Gaussian footprint
+  `exp(-(x - x0)² / (2σ²))`, `σ = excitation_width / 3`, identical to the
+  elastic solver. It previously used `exp(-(x - x0)² / σ²)`, so a source was
+  narrower by √2 with √2 less resultant load; selecting only `sensors.region`
+  on a solid changed receiver amplitudes by about 27%.
+- A `source_y` that does not apply to the resolved `top`, `bottom`, `left` or
+  `right` source boundary is rejected instead of silently ignored.
 
 ### Changed
 
@@ -27,7 +86,7 @@ All notable changes are documented here. Versions follow
   anisotropic plies use plane-strain tensors reconstructed from published
   three-dimensional constants and explicit RK4 integration. Update the example
   catalogue, structure-report references, and serial/MPI smoke configurations.
-- Rename the CLI launcher executable to `gwfem` for consistent and concise
+- Rename the CLI launcher executable to `wavesim` for consistent and concise
   simulation invocation.
 - Standardize all figure exports at 190 mm width with 10-point text,
   including ticks, legends and colourbars. Compact panel layouts replace figure
@@ -119,8 +178,8 @@ All notable changes are documented here. Versions follow
   before meshing (`materials.element_operator_bounds`), so it is a guaranteed
   lower estimate of the solver step instead of a wave-speed heuristic.
 - BLAS/OpenMP oversubscription under MPI: `guided-waves` and `python -m
-  guidedwavefem` cap threads per rank at `cpus // ranks_per_node` unless the user
-  set them (`guidedwavefem.parallel`); the setting is shown in the run banner.
+  wavesimfem` cap threads per rank at `cpus // ranks_per_node` unless the user
+  set them (`wavesimfem.parallel`); the setting is shown in the run banner.
 - White strip in dispersion maps at the plot-limit edges (frequency/wavenumber
   masks now include the boundary bins).
 - Fluid-layer detection in the analysis used an absolute `c_T < 50 m/s`
@@ -142,7 +201,7 @@ All notable changes are documented here. Versions follow
 - Hann-windowed N-cycle tone burst excitation (`excitation.source_type:
   tone_burst`, `excitation.n_cycles`) next to the Ricker wavelet; the source type
   is recorded in the archive and shown in the preflight and quick-look figure.
-- Scale awareness (`guidedwavefem.units`): logs, the preflight box, and figures
+- Scale awareness (`wavesimfem.units`): logs, the preflight box, and figures
   pick units from the data (s/ms/μs, m/mm, Hz/kHz/MHz, rad/m or rad/mm), so the
   same tool serves seismic and ultrasonic problems; `parse_quantity` parses
   `"40 Hz"`-style inputs. The band-pass filter no longer has a fixed 100 Hz floor.
@@ -154,7 +213,7 @@ All notable changes are documented here. Versions follow
   history, periodic non-finite detection; verified against the PETSc engine.
 - Config keys `output.compress_output`, `output.figure_formats`, `output.usetex`;
   `substrate`/`superstrate` aliases; "did you mean" suggestions.
-- `logging`-based console output (`guidedwavefem` logger), `-q/--quiet`,
+- `logging`-based console output (`wavesimfem` logger), `-q/--quiet`,
   `-v/--verbose`, `--version`, `set_verbosity()`.
 - Runtime provenance records package version, engine, device, and precision.
 - Tests: configuration schema, figures, engine-vs-reference RK4, MPI `Gatherv`,
@@ -169,7 +228,7 @@ All notable changes are documented here. Versions follow
   vector kernels; sensors are interpolated and gathered only at sample steps;
   explicitly stored zeros are dropped from the damping matrix, so its SpMV
   scales with the sponge volume.
-- Lazy package exports: `import guidedwavefem` no longer imports DOLFINx/MPI.
+- Lazy package exports: `import wavesimfem` no longer imports DOLFINx/MPI.
 - Vectorized `operator_bound` (≈100× faster on large meshes); sensor histories
   are collected with `Gatherv` instead of pickled object gathers.
 - Packaging: SPDX license metadata, classifiers, URLs, `dev` extra, `py.typed`,
@@ -208,7 +267,7 @@ All notable changes are documented here. Versions follow
 - Check PETSc convergence and fail fast on MPI runtime exceptions with detailed process failure diagnostics.
 - Make `--no-postprocess` disable all plotting and honor archived plot limits.
 - Add installable CLI, pinned FEM API versions, regression tests and CI.
-- Reorganize codebase into a modular Python package (`src/guidedwavefem/`) with dedicated modules for configuration, materials, numerics, solvers, analysis, and CLI.
+- Reorganize codebase into a modular Python package (`src/wavesimfem/`) with dedicated modules for configuration, materials, numerics, solvers, analysis, and CLI.
 
 Numerical results intentionally differ from 0.1: integrator, sensor interpolation,
 automatic mesh-sizing frequency, default implicit sponge damping and FFT windows

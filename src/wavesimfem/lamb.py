@@ -14,8 +14,8 @@ import yaml
 from scipy.optimize import brentq
 from scipy.signal.windows import tukey
 
-from guidedwavefem.materials import a0_wavenumber, compute_rayleigh_speed, structure_from_config
-from guidedwavefem.storage import atomic_output
+from wavesimfem.materials import a0_wavenumber, compute_rayleigh_speed, structure_from_config
+from wavesimfem.storage import atomic_output
 
 
 def s0_wavenumber(frequency, thickness, c_l, c_t):
@@ -242,8 +242,8 @@ def write_lamb_report(archive_path, output_dir=None, *, formats=("png", "pdf"), 
     """
     import matplotlib
 
-    from guidedwavefem.analysis import _PLOT_LOCK, _figure, _label, _rc, _save, resolve_usetex
-    from guidedwavefem.units import (
+    from wavesimfem.analysis import _PLOT_LOCK, _figure, _label, _rc, _save, resolve_usetex
+    from wavesimfem.units import (
         displacement_unit,
         frequency_unit,
         length_unit,

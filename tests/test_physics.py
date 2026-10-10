@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from guidedwavefem import run_simulation
+from wavesimfem import run_simulation
 
 E, NU, RHO, H = 70e9, 0.33, 2700.0, 1e-3
 
@@ -85,7 +85,7 @@ def _rayleigh_run(tmp_path, **output):
 def test_rayleigh_speed_and_sponge_reflection(tmp_path):
     """Surface waves on a truncated halfspace travel at the closed-form Rayleigh
     speed, and the lateral/bottom sponges return only a small residual."""
-    from guidedwavefem import compute_rayleigh_speed
+    from wavesimfem import compute_rayleigh_speed
 
     mu = STEEL["E"] / (2 * (1 + STEEL["nu"]))
     c_r = compute_rayleigh_speed(np.sqrt(mu / STEEL["rho"]), nu=STEEL["nu"])

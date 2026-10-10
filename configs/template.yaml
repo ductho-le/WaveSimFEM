@@ -1,4 +1,4 @@
-# GuidedWaveFEM parameter reference and runnable starting configuration
+# WaveSimFEM parameter reference and runnable starting configuration
 #
 # Application
 #   Reference configuration for A0/S0 dispersion in a free 1 mm aluminium plate.
@@ -174,14 +174,18 @@ structure:
   # make explicit integration much more expensive than implicit integration.
   # Fluid: use exactly ONE of c, K, or the pair E+nu to specify bulk response.
   #   material_model: fluid
+  #   fluid_formulation: acoustic # Default: scalar pressure, zero shear, normal coupling
   #   c: 1480.0                 # Sound speed [m/s], > 0; K = rho*c^2
   #   K: 2.1904e9               # Alternative bulk modulus [Pa], > 0; omit c
   #   E: 6.5712e6               # Alternative E+nu: K = E/(3*(1-2*nu)); omit c/K
   #   nu: 0.499
-  #   fluid_shear_reg: 1.0e-8    # Optional mu/K ratio; default 1e-8, (0, 0.01]
-  # Keep the small default regularisation unless studying sensitivity. This is
-  # a displacement-based, small-shear fluid with tangential continuity, not a
-  # mixed inviscid acoustic formulation. Interface-wave predictions are approximate.
+  # Acoustic fluids allow tangential slip and have no shear-wave speed. E+nu, when
+  # provided, define K only. Source/sensor observables must match the physical field.
+  # To reproduce the old displacement approximation, explicitly set BOTH:
+  #   fluid_formulation: regularized_elastic
+  #   fluid_shear_reg: 1.0e-8    # Artificial mu/K; default 1e-8, valid (0, 0.01]
+  # Legacy fluids retain tangential displacement continuity and numerical shear.
+  # fluid_shear_reg is rejected for the acoustic formulation.
   # Sound-speed aliases: c_sound, c_fluid, speed. K aliases: bulk_modulus, bulk_mod.
   # Supply only one spelling and one bulk-response representation.
 
@@ -196,7 +200,24 @@ absorbing_boundaries:
   alpha: null
   beta: null
 
+acoustic_boundaries:
+  # Exterior fluid faces: rigid (zero normal acceleration), pressure_release
+  # (p = 0), or radiation (local first-order outgoing condition, exact at normal
+  # incidence). Internal material interfaces are coupled automatically.
+  top: rigid
+  bottom: rigid
+  left: rigid
+  right: rigid
+
 excitation:
+  # traction acts on solids. Acoustic amplitudes use source_amplitude in SI units:
+  # acoustic_pressure [Pa], acoustic_normal_acceleration [m/s^2] (positive inward),
+  # acoustic_volume [s^-2] in (1/K)*p_tt - div((1/rho)*grad(p)) = q.
+  source_kind: traction
+  source_amplitude: null       # Required for acoustic source kinds; omit for traction
+  source_boundary: auto        # auto | top | bottom | left | right | interface
+  source_y: null               # [m] Required for interface traction
+  source_region: null          # Required acoustic_volume region or selected interface side
   # ricker (default): broadband dispersion maps; tone_burst: Hann-windowed sine
   # for selective excitation and individual packet tracking.
   source_type: ricker
@@ -213,6 +234,7 @@ excitation:
   excitation_width: 2.0e-3      # Active case: 2 mm load footprint
   # Load centre x [m] in [0, Lx]. Keep its footprint outside the lateral sponge.
   # null: absorb_length + max(min(max(lambda_ref,width), sensing_length/8), width/2).
+  # For left/right boundary sources, resolves instead to 0/Lx; explicit x must agree.
   source_x: null
   # Traction components in global x/y (defaults 0/1); both cannot be zero.
   # Normal loading favours flexural motion; tangential loading favours extensional
@@ -253,6 +275,10 @@ mesh:
   min_wavelength: null
 
 sensors:
+  # auto chooses solid displacement, or pressure in fluid. Specify a region at
+  # interfaces to select a side, especially for discontinuous particle velocity.
+  observable: auto             # auto | displacement | velocity | pressure | particle_velocity
+  region: null                 # Material region name
   # lambda_ref below is the centre-frequency sizing wavelength; lambda_band is
   # its counterpart at max_frequency. Both include min_wavelength when supplied;
   # the free isotropic plate estimate also accounts for A0.
@@ -263,6 +289,7 @@ sensors:
   # First receiver x = source_x + sensor_offset. null chooses
   # min(2*lambda_ref, sensing_length/4). Increase to avoid source near-field effects.
   # Signed offsets are allowed; ensure the entire array lies inside the domain.
+  # For a right-boundary source, automatic offsets place the array to its left.
   sensor_offset: 0.01
   # Positive receiver spacing [m]; null = min(lambda_ref/8, lambda_band/4,
   # sensing_length/100). For shortest wavelength lambda_min, pitch < lambda_min/2
@@ -315,7 +342,7 @@ postprocess:
   # New files should use f_min/f_max/k_min/k_max with explicit unit strings instead.
 
 output:
-  # Directory path; null = results_guided_waves_{solver}. Choose a unique path
+  # Directory path; null = results_wavesim_{solver}. Choose a unique path
   # per case/resolution so runs do not replace one another's outputs.
   output_dir: results_template
   # Default false. Enable full-field ADIOS2 VTX (.bp) snapshots for ParaView;

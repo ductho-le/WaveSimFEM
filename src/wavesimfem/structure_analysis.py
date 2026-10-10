@@ -1,7 +1,7 @@
 """Structure-specific interpretation and reference curves for receiver reports.
 
 References are physical context, not automatic identifications of measured peaks.
-Free-plate Rayleigh--Lamb curves reuse :mod:`guidedwavefem.lamb`; layered and
+Free-plate Rayleigh--Lamb curves reuse :mod:`wavesimfem.lamb`; layered and
 fluid-loaded structures require independent dispersion solutions. Source URLs are
 included in each serializable profile so exported reports retain their provenance.
 """
@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 import yaml
 
-from guidedwavefem.materials import (
+from wavesimfem.materials import (
     a0_wavenumber,
     canonicalize_mode,
     compute_rayleigh_speed,
@@ -101,6 +101,7 @@ def _region(region: Mapping[str, Any]) -> dict[str, Any]:
         "is_halfspace": bool(region["is_halfspace"]),
         "halfspace_type": region["halfspace_type"],
         "is_fluid": bool(region["is_fluid"]),
+        "fluid_formulation": region.get("fluid_formulation"),
         "absorb_depth_m": _number(region, "absorb_depth", positive=True),
         "c_L_m_s": float(region["c_L"]) if model == "isotropic" else None,
         "c_T_m_s": float(region["c_T"]) if model == "isotropic" else None,
@@ -111,7 +112,8 @@ def _region(region: Mapping[str, Any]) -> dict[str, Any]:
         result["c_R_m_s"] = compute_rayleigh_speed(region["c_T"], c_L=region["c_L"])
     elif model == "fluid":
         # The artificial shear branch is not an acoustic propagation reference.
-        result["numerical_shear_speed_m_s"] = float(region["c_T"])
+        if region.get("fluid_formulation") == "regularized_elastic":
+            result["numerical_shear_speed_m_s"] = float(region["c_T"])
     else:
         # In the solver these are Kelvin-tensor sizing bounds, not P/S speeds.
         result["sizing_c_L_m_s"] = float(region["c_L"])
@@ -131,6 +133,7 @@ def _legacy_regions(data: Mapping[str, Any], mode: str) -> list[dict[str, Any]]:
     names, thicknesses, models, roles = [
         vector("all_regions_" + key) for key in ("names", "thicknesses", "models", "roles")
     ]
+    formulations = vector("fluid_formulations")
     if not names:
         names, thicknesses, models = [
             vector("layers_" + key) for key in ("names", "thicknesses", "models")
@@ -168,6 +171,13 @@ def _legacy_regions(data: Mapping[str, Any], mode: str) -> list[dict[str, Any]]:
                 if halfspace
                 else None,
                 "is_fluid": model == "fluid",
+                "fluid_formulation": (
+                    formulations[i]
+                    if i < len(formulations)
+                    else "regularized_elastic"
+                    if model == "fluid"
+                    else None
+                ),
                 "absorb_depth_m": None,
                 "c_L_m_s": None,
                 "c_T_m_s": None,
@@ -180,6 +190,8 @@ def _legacy_regions(data: Mapping[str, Any], mode: str) -> list[dict[str, Any]]:
     target = next((r for r in reversed(regions) if not r["is_halfspace"]), regions[-1])
     if _scalar(data, "is_fluid_top", False) or target["is_fluid"]:
         target.update(is_fluid=True, material_model="fluid")
+        if target.get("fluid_formulation") is None:
+            target["fluid_formulation"] = "regularized_elastic"
         target["c_fluid_m_s"] = _number(data, "c_L", positive=True)
     elif target["material_model"] == "isotropic":
         target["c_L_m_s"] = _number(data, "c_L", positive=True)
@@ -268,6 +280,21 @@ def _identity(mode: str, regions: list[dict[str, Any]], exact: bool) -> tuple[st
     return "layered_plate", "Layered plate · guided P-SV waves", ["Guided / quasi-Lamb waves"]
 
 
+def _archived_fluid_formulation(item: Mapping[str, Any]) -> dict[str, Any]:
+    """Mark a fluid from an older archive as the elastic approximation."""
+    item = dict(item)
+    model = str(item.get("material_model", "")).strip().lower()
+    fluid = model in ("fluid", "acoustic_fluid", "water", "acoustic") or (
+        not model
+        and any(
+            k in item for k in ("c", "c_sound", "c_fluid", "speed", "K", "bulk_modulus", "bulk_mod")
+        )
+    )
+    if fluid:
+        item.setdefault("fluid_formulation", "regularized_elastic")
+    return item
+
+
 def structure_profile(data: Mapping[str, Any]) -> dict[str, Any]:
     """Return JSON-safe physics context from an NPZ archive or metadata mapping.
 
@@ -277,6 +304,16 @@ def structure_profile(data: Mapping[str, Any]) -> dict[str, Any]:
     """
     cfg = _configuration(data)
     if cfg is not None:
+        # Archives written before pressure support used regularized elasticity,
+        # even when their material was called "acoustic". Preserve that physics
+        # rather than reinterpreting old configuration under the new default.
+        if int(_scalar(data, "schema_version", 1)) < 2:
+            for key in ("single_layer", "halfspace", "bottom_halfspace", "top_halfspace"):
+                item = cfg.get(key)
+                if isinstance(item, Mapping):
+                    cfg[key] = _archived_fluid_formulation(item)
+            if isinstance(cfg.get("layers"), list):
+                cfg["layers"] = [_archived_fluid_formulation(item) for item in cfg["layers"]]
         summary = structure_from_config(cfg)
         mode = summary["structure_mode"]
         regions = [_region(r) for r in summary["all_regions"]]
@@ -296,6 +333,9 @@ def structure_profile(data: Mapping[str, Any]) -> dict[str, Any]:
         and regions[0]["material_model"] == "isotropic"
     )
     family, title, waves = _identity(mode, regions, exact)
+    has_legacy_fluid = any(r.get("fluid_formulation") == "regularized_elastic" for r in regions)
+    if has_legacy_fluid:
+        title += " · legacy fluid approximation"
     interpretations = [
         "Spectral ridges and component ratios describe measured motion; mode identity needs a matching dispersion solution."
     ]
@@ -332,16 +372,14 @@ def structure_profile(data: Mapping[str, Any]) -> dict[str, Any]:
         ]
     elif family in ("fluid_halfspace", "acoustic_waveguide"):
         interpretations += [
-            "Interpret longitudinal acoustic propagation using the physical sound speed; displacement components depend on propagation direction."
+            "Interpret longitudinal acoustic propagation using the physical sound speed and the archived pressure or motion observable."
         ]
-        exclusions.append(
-            "A fluid has no physical shear or Rayleigh branch; its small numerical shear stiffness is regularization."
-        )
+        exclusions.append("An inviscid acoustic fluid has no physical shear or Rayleigh branch.")
     else:
         interpretations += [
             "Track coupled guided branches and dispersion without assigning homogeneous-plate A/S symmetry labels."
         ]
-    if any(r["is_fluid"] for r in regions) and not all(r["is_fluid"] for r in regions):
+    if any(r.get("fluid_formulation") == "regularized_elastic" for r in regions):
         exclusions.append(
             "Regularized-fluid displacement coupling enforces tangential continuity; quantitative interface-wave and leakage predictions require independent validation."
         )
@@ -439,6 +477,10 @@ def structure_profile(data: Mapping[str, Any]) -> dict[str, Any]:
         "structure_mode": mode,
         "provenance": "archived_config" if cfg is not None else "legacy",
         "regions": regions,
+        "has_acoustic": any(r.get("fluid_formulation") == "acoustic" for r in regions),
+        "has_legacy_fluid": has_legacy_fluid,
+        "sensor_observable": str(_scalar(data, "sensor_observable", "displacement")),
+        "sensor_units": str(_scalar(data, "sensor_units", "m")),
         "wave_families": waves,
         "interpretation": interpretations,
         "exclusions": exclusions,
@@ -482,7 +524,7 @@ def reference_dispersion(profile: Mapping[str, Any], frequencies_hz: Any) -> lis
             }
         )
     if profile["lamb_applicable"]:
-        from guidedwavefem.lamb import s0_wavenumber
+        from wavesimfem.lamb import s0_wavenumber
 
         plate = profile["homogeneous_plate"]
         args = (plate["thickness_m"], plate["c_L_m_s"], plate["c_T_m_s"])

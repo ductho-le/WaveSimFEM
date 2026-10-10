@@ -1,7 +1,7 @@
 # Simulation configurations
 
 This directory contains application examples and a complete parameter reference
-for GuidedWaveFEM. Each YAML file documents the physical model, numerical scope,
+for WaveSimFEM. Each YAML file documents the physical model, numerical scope,
 units, and execution command. Use the closest application as a starting point,
 then establish convergence for the quantities required by your study.
 
@@ -16,9 +16,11 @@ then establish convergence for the quantities required by your study.
 | [`04_plate_on_halfspace_soil_bedrock.yaml`](04_plate_on_halfspace_soil_bedrock.yaml) | 10 m soil layer over bedrock; seismic surface-wave analysis | Ricker, 15 Hz | 30 Hz |
 | [`05_layers_bone_qus.yaml`](05_layers_bone_qus.yaml) | Marrow / cortical bone / tissue; axial-transmission ultrasound | Ricker, 500 kHz | 1 MHz |
 | [`06_plate_in_halfspaces_immersed_water.yaml`](06_plate_in_halfspaces_immersed_water.yaml) | Aluminium plate between water regions; immersion loading | Ricker, 500 kHz | 1 MHz |
+| [`07_fluid_acoustic.yaml`](07_fluid_acoustic.yaml) | Water channel; scalar pressure and outgoing radiation | Ricker, 250 kHz | 500 kHz |
+| [`08_fluid_solid_acoustic.yaml`](08_fluid_solid_acoustic.yaml) | Aluminium on a sponge-terminated water half-space; interface traction and an 81-receiver fluid pressure array | Ricker, 200 kHz | 500 kHz |
 
 The examples cover all supported structure modes and the isotropic, anisotropic,
-viscoelastic, and fluid material models. All six use explicit RK4 integration;
+viscoelastic, and fluid material models. The examples use explicit RK4 integration;
 implicit Newmark integration is available through the solver setting or CLI.
 Material properties are
 representative application inputs; calibrate them to the specimen or site when
@@ -31,14 +33,14 @@ from the repository root:
 
 ```sh
 # Inspect the configuration and estimate resources without running the solver.
-gwfem -c configs/template.yaml --dry-run
+wavesim -c configs/template.yaml --dry-run
 
 # Run with four CPU processes.
 sh tools/run_cpu4.sh -c configs/template.yaml
 
 # Create a separate configuration for a new study.
 cp configs/template.yaml my_case.yaml
-gwfem -c my_case.yaml --dry-run
+wavesim -c my_case.yaml --dry-run
 ```
 
 Set a unique `output.output_dir` for each case and resolution. The output archive
@@ -51,7 +53,7 @@ recording times used for a result.
 `tools/run_cpu4.sh` launches four MPI ranks, sets numerical-library thread pools
 to one thread per rank, and selects CPU/double precision. It uses the active
 environment's Python and MPI. Rank count is a launch parameter; it is not a YAML
-input. A direct `gwfem -c ...` invocation uses a single process unless
+input. A direct `wavesim -c ...` invocation uses a single process unless
 started under MPI.
 
 ```sh
@@ -124,9 +126,94 @@ depends on wavelength, incidence angle, and sponge dimensions.
 - **Viscoelastic:** provide both `C` and `Cv` in the same order. Kelvin-Voigt loss
   grows with frequency. Example 05 uses anisotropic elastic and viscous tensors
   for its cortical-bone layer; example 02 is purely elastic.
-- **Fluid:** the displacement formulation uses small shear regularisation and
-  full tangential continuity. Validate quantitative interface-wave dispersion
-  and leakage against an appropriate fluid-loaded reference solution.
+- **Fluid:** scalar pressure satisfies the density-weighted acoustic wave equation
+  with `K = rho*c^2`. Solid interfaces transfer normal traction and normal
+  acceleration, with tangential slip. Specify one of `c`, `K`, or `E` plus `nu`
+  (the latter pair determines bulk modulus only). No shear speed is assigned.
+
+### Fluid formulation and migration
+
+`material_model: fluid` now defaults to `fluid_formulation: acoustic`. This changes
+the equations for existing fluid input files. Remove `fluid_shear_reg` to use
+pressure acoustics. To reproduce a prior run or compare with the old approximation,
+select the legacy formulation explicitly in **each** fluid region:
+
+```yaml
+material_model: fluid
+rho: 1000.0
+c: 1480.0
+fluid_formulation: regularized_elastic
+fluid_shear_reg: 1.0e-8       # Artificial shear modulus / bulk modulus
+```
+
+The legacy model retains displacement degrees of freedom, artificial shear and
+tangential displacement continuity. Agreement is expected for converged, mainly
+longitudinal waves such as normal-incidence transmission. Interface and oblique
+waves also require independent inviscid reference solutions; matching the legacy
+model alone cannot establish acoustic correctness.
+
+Acoustic pressure sources need an explicit `source_kind` and `source_amplitude`.
+The amplitude multiplies the configured Ricker pulse or tone burst:
+
+| `excitation.source_kind` | Amplitude input | Meaning |
+| :-- | :-- | :-- |
+| `traction` | `traction_max` [Pa] | Applied solid traction, with direction `source_fx`, `source_fy` |
+| `acoustic_pressure` | `source_amplitude` [Pa] | Prescribed compression-positive pressure on an exterior fluid face |
+| `acoustic_normal_acceleration` | `source_amplitude` [m/s²] | Boundary acceleration, positive into the fluid |
+| `acoustic_volume` | `source_amplitude` [s⁻²] | Right-hand side of `(1/K) p_tt - div((1/rho) grad(p)) = q` |
+
+Acoustic Ricker sources use a smooth causal turn-on during the first `0.25/f_center`
+seconds so that pressure and its first two time derivatives start at zero,
+consistent with the default resting fields. The pulse beyond that interval and
+Hann-windowed tone bursts retain their configured waveforms.
+
+For a volume source, `source_region` must name a fluid region. Here `q` is the
+time derivative of a volumetric injection rate per unit volume, in the absence
+of fluid body forces. Boundary sources use `source_boundary: top`, `bottom`,
+`left`, or `right`. A solid interface traction uses `source_boundary: interface`,
+`source_y`, and a solid `source_region`. Lateral sources resolve `source_x` to
+`0` or the total domain length; contradictory coordinates are rejected. The
+automatic receiver array for a right source lies to its left in increasing x.
+`source_y` applies only to `interface` loads; a value contradicting a `top` or
+`bottom` face, or any value with a lateral face, is rejected.
+
+Spatial distributions use the same Gaussian as the traction footprint,
+`exp(-(x - source_x)² / (2σ²))` with `σ = excitation_width / 3`, on `top`,
+`bottom` and `interface` loads; lateral faces are loaded uniformly over the
+selected region's height. A volume source is this Gaussian in `x` and uniform
+through the thickness of its `source_region`. An `acoustic_pressure` source
+prescribes pressure on **every** node of the driven fluid face: away from the
+footprint the prescribed value tends to zero, so the rest of that face behaves
+as pressure release rather than rigid. Normal-acceleration faces stay rigid
+outside the footprint.
+
+`acoustic_boundaries` maps `top`, `bottom`, `left`, and `right` to `rigid`
+(the default), `pressure_release`, or `radiation`. These apply only to exterior
+fluid faces. Radiation is a local first-order outgoing condition, exact for
+normal incidence in a homogeneous medium; vary domain size for oblique waves.
+`geometry.absorb_length: 0` is supported for acoustic cavities or radiation tests.
+Sponges add numerical damping and are separate from physical material losses.
+
+Set `sensors.observable` to `pressure` [Pa] or `particle_velocity` [m/s] in fluids,
+or `displacement` [m] or `velocity` [m/s] in solids. `auto` selects displacement
+on a solid side and pressure in a fluid. At an interface, use `sensors.region`
+to select the material side, particularly for particle velocity. Pressure
+archives use `sensor_data_pressure`; vector velocity uses `sensor_data_vx` and
+`sensor_data_vy`. Schema 2 stores the observable and units explicitly. Older
+displacement archives remain readable and retain legacy-fluid interpretation;
+pressure is never reinterpreted as displacement. Scalar pressure reports omit
+vector polarization diagnostics.
+
+Example 05 applies pressure at the skin surface and records fluid particle
+velocity. Its bottom is pressure-release and its top has prescribed Gaussian
+pressure, tending to zero away from the source. Pressure receivers on those
+faces would simply measure the prescribed boundary value. Example 06 applies
+traction to the plate and selects solid displacement
+on the plate side of the upper interface.
+
+See examples [07](07_fluid_acoustic.yaml) and [08](08_fluid_solid_acoustic.yaml)
+for runnable pure-fluid and coupled inputs, and the
+[implementation notes](../docs/acoustics_design.md) for equations and validation.
 
 ### Excitation
 
@@ -175,7 +262,7 @@ material attenuation. No automated velocity or loss estimate is inferred from
 these reconstructed signals.
 
 ```sh
-gwfem -c configs/01_plate_aluminum_lamb.yaml \
+wavesim -c configs/01_plate_aluminum_lamb.yaml \
     --postprocess results_01_plate_aluminum_lamb/sensor_data.npz
 ```
 
@@ -275,7 +362,7 @@ Figure explanations and provenance are written to accompanying README files.
 Replot an existing archive without rerunning the simulation:
 
 ```sh
-gwfem --postprocess results_03_halfspace_steel_rayleigh/sensor_data.npz \
+wavesim --postprocess results_03_halfspace_steel_rayleigh/sensor_data.npz \
     --f-min "0.5 MHz" --f-max "1.5 MHz"
 ```
 
@@ -338,7 +425,7 @@ An omitted or disabled report leaves standard dispersion processing unchanged.
 Use the same settings when analysing an existing archive:
 
 ```sh
-gwfem -c my_case.yaml --postprocess results_case/sensor_data.npz
+wavesim -c my_case.yaml --postprocess results_case/sensor_data.npz
 ```
 
 The `characterisation/` subdirectory contains four figure families:

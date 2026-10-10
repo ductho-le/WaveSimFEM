@@ -6,7 +6,7 @@ Pipeline
    tags, constitutive laws, sponge damping, load and sensors.
 2. :func:`solve_implicit` or :func:`solve_explicit` — time integration.
    The explicit solver runs either the single-process array engine
-   (CPU/CUDA, :mod:`guidedwavefem.solvers_gpu`) or the distributed PETSc engine.
+   (CPU/CUDA, :mod:`wavesimfem.solvers_gpu`) or the distributed PETSc engine.
 3. :func:`run_simulation` — orchestration, provenance, and output files.
 """
 
@@ -25,7 +25,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import dolfinx
 import dolfinx.fem.petsc
@@ -42,10 +42,13 @@ from dolfinx.mesh import (
 from mpi4py import MPI
 from petsc4py import PETSc
 
-from guidedwavefem.analysis import plot_quick_overview
-from guidedwavefem.config import dump_config, parse_and_resolve_config
-from guidedwavefem.device import CPU_DEVICE, DeviceInfo, select_device
-from guidedwavefem.materials import (
+if TYPE_CHECKING:
+    from wavesimfem.acoustics import AcousticProblem, AcousticSolveResult
+
+from wavesimfem.analysis import plot_quick_overview
+from wavesimfem.config import dump_config, parse_and_resolve_config
+from wavesimfem.device import CPU_DEVICE, DeviceInfo, select_device
+from wavesimfem.materials import (
     MeshLayout,
     compute_mesh_layout,
     implicit_time_step,
@@ -53,27 +56,27 @@ from guidedwavefem.materials import (
     sampled_time_grid,
     structure_from_config,
 )
-from guidedwavefem.numerics import (
+from wavesimfem.numerics import (
     RK4_STABILITY_RADIUS,
     PetscRK4,
     PointSensors,
     operator_bound,
 )
-from guidedwavefem.parallel import describe_thread_state
-from guidedwavefem.reporting import format_banner_box, log, print_structure_table, warn
-from guidedwavefem.solvers_gpu import (
+from wavesimfem.parallel import describe_thread_state
+from wavesimfem.reporting import format_banner_box, log, print_structure_table, warn
+from wavesimfem.solvers_gpu import (
     build_sensor_interpolation_matrix,
     integrate_explicit_rk4,
     make_backend,
 )
-from guidedwavefem.sources import describe_source, ricker, source_signal
-from guidedwavefem.storage import (
+from wavesimfem.sources import describe_source, ricker, source_signal
+from wavesimfem.storage import (
     HISTORY_CHUNK_BYTES,
     HistoryStore,
     all_finite_history,
     atomic_output,
 )
-from guidedwavefem.units import fmt_length, fmt_time
+from wavesimfem.units import fmt_length, fmt_time
 
 __all__ = [
     "build_problem",
@@ -224,9 +227,27 @@ def _create_layered_mesh(summary: dict[str, Any], layout: MeshLayout) -> tuple[A
     return domain, cell_tags
 
 
-def build_problem(cfg: dict[str, Any], summary: dict[str, Any] | None = None) -> WaveProblem:
+def _uses_field_layout(cfg: dict[str, Any], summary: dict[str, Any]) -> bool:
+    """Use field-aware acquisition when requested, also for a pure elastic mesh."""
+    return bool(
+        summary.get("has_acoustic")
+        or cfg.get("sensor_observable", "auto") not in ("auto", "displacement")
+        or cfg.get("source_boundary", "auto") != "auto"
+        or cfg.get("source_region") is not None
+        or cfg.get("sensor_region") is not None
+        or cfg.get("source_y") is not None
+    )
+
+
+def build_problem(
+    cfg: dict[str, Any], summary: dict[str, Any] | None = None
+) -> WaveProblem | AcousticProblem:
     """Assemble mesh, function space, variational forms, load, and sensors."""
     summary = summary or structure_from_config(cfg)
+    if _uses_field_layout(cfg, summary):
+        from wavesimfem.acoustics import build_acoustic_problem
+
+        return build_acoustic_problem(cfg, summary)
     layout = compute_mesh_layout(cfg, summary)
     regions = summary["all_regions"]
     has_top_hs = summary["has_top_halfspace"]
@@ -484,7 +505,9 @@ def _fallback_bjacobi(solver: Any, ndofs_global: int) -> str:
     return f"GMRES + BJacobi (parallel, {ndofs_global} DOFs; MUMPS unavailable)"
 
 
-def solve_implicit(problem: WaveProblem, history_store: HistoryStore | None = None) -> SolveResult:
+def solve_implicit(
+    problem: WaveProblem | AcousticProblem, history_store: HistoryStore | None = None
+) -> SolveResult | AcousticSolveResult:
     """Unconditionally stable Newmark-β with a once-factorized effective matrix.
 
     With constant ``M``, ``C`` (sponge + Kelvin-Voigt) and ``K``, each step solves
@@ -493,7 +516,13 @@ def solve_implicit(problem: WaveProblem, history_store: HistoryStore | None = No
         p = c₁ uⁿ + c₂ vⁿ - c₃ aⁿ,   q = vⁿ + c₄ aⁿ - c₅ p,
 
     so the right-hand side costs two SpMVs; nothing is re-assembled in the loop.
+    Field-aware problems use the coupled operator described in
+    :mod:`wavesimfem.acoustic_time` and return named physical ``histories``.
     """
+    if hasattr(problem, "operators"):
+        from wavesimfem.acoustics import solve_acoustic
+
+        return solve_acoustic(problem, solver_type="implicit", history_store=history_store)
     cfg = problem.cfg
     V, u_, du = problem.V, problem.test_fn, problem.trial_fn
     beta_val, gamma_val = cfg["beta_val"], cfg["gamma_val"]
@@ -663,19 +692,27 @@ def solve_implicit(problem: WaveProblem, history_store: HistoryStore | None = No
 # Explicit lumped-mass RK4
 # ---------------------------------------------------------------------------
 def solve_explicit(
-    problem: WaveProblem,
+    problem: WaveProblem | AcousticProblem,
     device: DeviceInfo | None = None,
     history_store: HistoryStore | None = None,
-) -> SolveResult:
+) -> SolveResult | AcousticSolveResult:
     """Explicit RK4 with row-sum lumped mass and a rigorous Gershgorin step limit.
 
     The limit ``Δt ≤ R / max(√B_K, B_C)`` with ``R = RK4_STABILITY_RADIUS``
-    follows from the half-disk argument in :mod:`guidedwavefem.numerics`; the
+    follows from the half-disk argument in :mod:`wavesimfem.numerics`; the
     configured ``CFL`` is the safety fraction of that limit.
 
     ``device`` selects the single-process array engine; it must be ``None`` for
     distributed runs, which use PETSc operators on every rank.
+    Field-aware problems use the coupling-inclusive spectral bound in
+    :mod:`wavesimfem.acoustic_time` and return named physical ``histories``.
     """
+    if hasattr(problem, "operators"):
+        from wavesimfem.acoustics import solve_acoustic
+
+        return solve_acoustic(
+            problem, solver_type="explicit", device=device, history_store=history_store
+        )
     cfg = problem.cfg
     V, u_, du = problem.V, problem.test_fn, problem.trial_fn
     n_owned_dofs = problem.n_owned_dofs
@@ -881,7 +918,7 @@ def _publish_results(cfg: dict[str, Any], archive: dict[str, Any], out_dir: str)
     """
     saved_npz = os.path.join(out_dir, "sensor_data.npz")
     saved_cfg = os.path.join(out_dir, "simulation_config.yaml")
-    with tempfile.TemporaryDirectory(prefix=".gwfem-output-", dir=out_dir) as staging:
+    with tempfile.TemporaryDirectory(prefix=".wavesim-output-", dir=out_dir) as staging:
         staged_cfg = os.path.join(staging, "simulation_config.yaml")
         staged_npz = os.path.join(staging, "sensor_data.npz")
         dump_config(cfg, staged_cfg)
@@ -917,7 +954,7 @@ def _material_fields(region: dict[str, Any]) -> dict[str, Any]:
     return fields
 
 
-def _archive_fields(problem: WaveProblem) -> dict[str, Any]:
+def _archive_fields(problem: WaveProblem | AcousticProblem) -> dict[str, Any]:
     """Metadata stored next to the sensor histories in ``sensor_data.npz``."""
     cfg, s = problem.cfg, problem.summary
     plate, regions = s["plate_layers"], s["all_regions"]
@@ -955,6 +992,11 @@ def _archive_fields(problem: WaveProblem) -> dict[str, Any]:
         "all_regions_thicknesses": np.array([r["thickness"] for r in regions]),
         "all_regions_roles": np.array([r["role"] for r in regions], dtype="U"),
         "all_regions_models": np.array([r["material_model"] for r in regions], dtype="U"),
+        "fluid_formulations": np.array(
+            [r.get("fluid_formulation", "") for r in regions], dtype="U"
+        ),
+        "has_acoustic": s.get("has_acoustic", False),
+        "has_legacy_fluid": s.get("has_legacy_fluid", s["has_fluid"]),
         "has_bottom_halfspace": s["has_bottom_halfspace"],
         "has_top_halfspace": s["has_top_halfspace"],
         "y_min": s["y_min"],
@@ -970,6 +1012,8 @@ def _archive_fields(problem: WaveProblem) -> dict[str, Any]:
         "disp_k_max": cfg["disp_k_max"],
         "config_source": str(cfg.get("_config_source", "")),
     }
+    if fields["c_T"] is None:
+        del fields["c_T"]
     if s.get("c_fluid_min") is not None:
         fields["c_fluid"] = s["c_fluid_min"]
     if n_plate == 1:
@@ -987,14 +1031,16 @@ def _archive_fields(problem: WaveProblem) -> dict[str, Any]:
     return fields
 
 
-def _runtime_record(problem: WaveProblem, result: SolveResult) -> dict[str, Any]:
+def _runtime_record(
+    problem: WaveProblem | AcousticProblem, result: SolveResult | AcousticSolveResult
+) -> dict[str, Any]:
     source_hashes = {
         p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(PACKAGE_DIR.glob("*.py"))
     }
-    from guidedwavefem import __version__
+    from wavesimfem import __version__
 
     return {
-        "guidedwavefem": __version__,
+        "wavesimfem": __version__,
         "dt": result.dt,
         "steps": result.n_steps,
         "duration": result.n_steps * result.dt,
@@ -1016,25 +1062,38 @@ def _runtime_record(problem: WaveProblem, result: SolveResult) -> dict[str, Any]
     }
 
 
-def _resolve_device(cfg: dict[str, Any], stype: str) -> DeviceInfo | None:
-    """Validate the device request against solver type and MPI size."""
+def _resolve_device(
+    cfg: dict[str, Any], stype: str, *, size: int | None = None, quiet: bool = False
+) -> DeviceInfo | None:
+    """Validate the device request against solver type and MPI size.
+
+    Shared by the elastic and field-aware solvers. ``None`` selects the PETSc
+    CPU engine (implicit, or distributed explicit); otherwise the resolved
+    single-process array device is returned. ``quiet`` suppresses the
+    ignored-option warnings and device log for callers that already reported
+    them; invalid requests always raise.
+    """
     requested, precision = cfg["device"], cfg["precision"]
+    size = nprocs if size is None else size
+    loud = rank == 0 and not quiet
     if stype == "implicit":
-        if requested not in ("auto", "cpu") and rank == 0:
+        if requested not in ("auto", "cpu") and loud:
             warn(f"device '{requested}' is ignored by the implicit solver (PETSc CPU).")
-        if precision != "double" and rank == 0:
+        if precision != "double" and loud:
             warn("precision 'single' is ignored by the implicit solver (float64).")
         return None
-    if nprocs > 1:
+    if size > 1:
         if requested not in ("auto", "cpu"):
             raise ValueError(
                 f"device '{requested}' requires a single-process run; distributed explicit "
                 "runs use the PETSc CPU engine (set device: auto or cpu)."
             )
-        if precision != "double" and rank == 0:
+        if precision != "double" and loud:
             warn("precision 'single' is ignored by the distributed PETSc engine (float64).")
         return None
-    return select_device(requested, log_func=log) if requested != "cpu" else CPU_DEVICE
+    if requested == "cpu":
+        return CPU_DEVICE
+    return select_device(requested, log_func=None if quiet else log)
 
 
 @mpi_fail_fast
@@ -1064,17 +1123,21 @@ def run_simulation(
         cfg = parse_and_resolve_config(args=args, custom_cfg=cfg)
 
     stype = cfg["solver_type"]
-    out_dir = cfg["output_dir"] or f"results_guided_waves_{stype}"
+    out_dir = cfg["output_dir"] or f"results_wavesim_{stype}"
     cfg["output_dir"] = out_dir
+    summary = structure_from_config(cfg)
+    if _uses_field_layout(cfg, summary):
+        from wavesimfem.acoustics import run_acoustic_simulation
+
+        return run_acoustic_simulation(cfg, summary)
     device = _resolve_device(cfg, stype)
     wall_t0 = pytime.perf_counter()
 
-    summary = structure_from_config(cfg)
     if rank == 0:
         log(
             format_banner_box(
                 [
-                    f"GuidedWaveFEM solver: {stype.upper()}",
+                    f"WaveSimFEM solver: {stype.upper()}",
                     f"MPI ranks: {nprocs}",
                     f"Threads: {describe_thread_state(nprocs)}",
                     f"Mode: {summary['structure_mode']}",

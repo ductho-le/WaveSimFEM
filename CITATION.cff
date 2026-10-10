@@ -1,24 +1,25 @@
 cff-version: 1.2.0
-message: "If you use GuidedWaveFEM in academic research or industrial applications, please cite it as below."
-title: "GuidedWaveFEM: Unified Guided & Surface Wave Finite Element Framework"
+message: "If you use WaveSimFEM in academic research or industrial applications, please cite it as below."
+title: "WaveSimFEM: Unified Guided & Surface Wave Finite Element Framework"
 type: software
 abstract: >-
-  GuidedWaveFEM is an MPI-parallel finite element framework built on DOLFINx and
+  WaveSimFEM is an MPI-parallel finite element framework built on DOLFINx and
   PETSc for simulating elastic guided and surface waves (Lamb, Rayleigh, leaky and
-  interface waves) in layered plates and halfspaces with isotropic, anisotropic,
-  viscoelastic and regularized fluid layers. It provides a rigorously stable
-  lumped-mass explicit RK4 solver, an implicit Newmark solver, absorbing sponge
+  interface waves) in layered plates and halfspaces with isotropic, anisotropic
+  and viscoelastic solids coupled to inviscid acoustic (pressure) fluids. It
+  provides rigorously stable explicit RK4 solvers, including a coupling-inclusive
+  bound for fluid-solid systems, implicit Newmark solvers, absorbing sponge
   layers, exact point sensors and 2D FFT dispersion analysis from seismic to
   ultrasonic scales.
 authors:
   - family-names: "Le"
     given-names: "Ductho"
-version: 0.3.0
-date-released: 2026-10-03
+version: 0.4.0
+date-released: 2026-10-10
 license: MIT
-repository-code: "https://github.com/ductho-le/GuidedWaveFEM"
+repository-code: "https://github.com/ductho-le/WaveSimFEM"
 keywords:
-  - "gwfem"
+  - "wavesim"
   - "guided-waves"
   - "finite-element-method"
   - "ultrasonics"

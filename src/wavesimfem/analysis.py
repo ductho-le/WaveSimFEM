@@ -26,17 +26,17 @@ from matplotlib.ticker import MaxNLocator
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from scipy.signal import butter, sosfiltfilt
 
-from guidedwavefem.materials import compute_rayleigh_speed
-from guidedwavefem.numerics import dispersion_spectrum
-from guidedwavefem.reporting import log, warn
-from guidedwavefem.sources import describe_source, source_delay, source_duration, source_signal
-from guidedwavefem.storage import atomic_output
-from guidedwavefem.units import (
+from wavesimfem.materials import compute_rayleigh_speed
+from wavesimfem.numerics import dispersion_spectrum
+from wavesimfem.reporting import log, warn
+from wavesimfem.sources import describe_source, source_delay, source_duration, source_signal
+from wavesimfem.storage import atomic_output
+from wavesimfem.units import (
     Unit,
-    displacement_unit,
     fmt_frequency,
     frequency_unit,
     length_unit,
+    observable_unit,
     parse_quantity,
     time_unit,
     wavenumber_unit,
@@ -101,6 +101,15 @@ _BASE_RC = {
 }
 
 TRACE_COLORS = ("#167D9A", "#D97732", "#7356A6")
+
+
+# Vertical-component axis labels for each archived physical observable.
+_AMPLITUDE_LABELS = {
+    "displacement": "Displacement $u_2$",
+    "pressure": "Pressure $p$",
+    "velocity": "Velocity $v_2$",
+    "particle_velocity": "Particle velocity $v_2$",
+}
 
 
 def _figure(height_mm: float, **kwargs) -> Figure:
@@ -289,6 +298,7 @@ def plot_quick_overview(
     n_cycles: int | None = None,
     *,
     usetex: bool | str = False,
+    observable: str = "displacement",
 ) -> str:
     """Compact acquisition diagnostic with a shared physical amplitude scale."""
     times, sensor_x, values = [np.asarray(v, dtype=float) for v in (times, sensor_x, sensor_data_y)]
@@ -309,7 +319,8 @@ def plot_quick_overview(
     fs = 1 / (times[1] - times[0])
     filtered, band = bandpass_filter(values, fs, f_center)
     tu, xu = time_unit(np.max(np.abs(times))), length_unit(np.max(np.abs(offsets)))
-    uu = displacement_unit(np.max(np.abs(filtered)))
+    uu = observable_unit(np.max(np.abs(filtered)), observable)
+    amplitude_label = _AMPLITUDE_LABELS[observable]
     td, xd, ud = tu(times), xu(offsets), uu(filtered)
     with _PLOT_LOCK, matplotlib.rc_context(_rc(resolve_usetex(usetex))):
         fig = _figure(135, layout="constrained")
@@ -336,7 +347,7 @@ def plot_quick_overview(
             trace_ax.plot(td, ud[:, j], color=color, label=f"{xd[j]:.3g} {xu.tex}")
         trace_ax.set(
             xlabel=_label("Time", tu),
-            ylabel=_label("Displacement $u_2$", uu),
+            ylabel=_label(amplitude_label, uu),
             title="(b) Receiver signals",
         )
         trace_ax.legend(title="Source offset", title_fontsize=10, loc="upper right")
@@ -363,7 +374,7 @@ def plot_quick_overview(
         fig.colorbar(
             image,
             ax=scan_ax,
-            label=_label("Displacement $u_2$", uu),
+            label=_label(amplitude_label, uu),
             extend="neither",
             pad=0.02,
         )
@@ -469,21 +480,31 @@ def plot_full_analysis(
 
     times = np.asarray(data["times"], dtype=float)
     sensor_x = np.asarray(data["sensor_x"], dtype=float)
-    sensor_data_y = np.asarray(data["sensor_data_y"], dtype=float)
-    sensor_data_x = (
-        np.asarray(data["sensor_data_x"], dtype=float) if "sensor_data_x" in data else None
-    )
+    observable = str(data.get("sensor_observable", "displacement"))
+    keys = {
+        "displacement": ("sensor_data_x", "sensor_data_y"),
+        "pressure": (None, "sensor_data_pressure"),
+        "velocity": ("sensor_data_vx", "sensor_data_vy"),
+        "particle_velocity": ("sensor_data_vx", "sensor_data_vy"),
+    }
+    if observable not in keys:
+        raise ValueError(f"Unsupported sensor observable {observable!r}")
+    key_x, key_y = keys[observable]
+    sensor_data_y = np.asarray(data[key_y], dtype=float)
+    sensor_data_x = np.asarray(data[key_x], dtype=float) if key_x in data else None
     f_center = float(data["f_center"])
     c_L = float(data["c_L"])
-    c_T = float(data["c_T"])
+    c_T = float(data["c_T"]) if "c_T" in data else None
     st_mode = str(data["structure_mode"]) if "structure_mode" in data else ""
     c_R = float(data["c_R"]) if "c_R" in data and np.isfinite(data["c_R"]) else None
     is_fluid_top = (
-        bool(data["is_fluid_top"]) if "is_fluid_top" in data else c_T < FLUID_SHEAR_RATIO * c_L
+        bool(data["is_fluid_top"])
+        if "is_fluid_top" in data
+        else c_T is None or c_T < FLUID_SHEAR_RATIO * c_L
     )
     has_fluid = bool(data["has_fluid"]) if "has_fluid" in data else is_fluid_top
     c_fluid = float(data["c_fluid"]) if "c_fluid" in data else (c_L if is_fluid_top else None)
-    if c_R is None and st_mode == "halfspace" and "E" in data and "nu" in data:
+    if c_R is None and c_T is not None and st_mode == "halfspace" and "E" in data and "nu" in data:
         c_R = compute_rayleigh_speed(c_T, c_L=c_L)
     source_type = str(data["source_type"]) if "source_type" in data else "ricker"
     n_cycles = int(data["n_cycles"]) if "n_cycles" in data and int(data["n_cycles"]) > 0 else None
@@ -503,7 +524,7 @@ def plot_full_analysis(
         if values is not None and (
             values.shape != (len(times), len(sensor_x)) or not np.isfinite(values).all()
         ):
-            raise ValueError("Invalid displacement history shape or nonfinite values")
+            raise ValueError("Invalid observable history shape or nonfinite values")
     if not np.isfinite(f_center) or f_center <= 0:
         raise ValueError("f_center must be finite and positive")
 
@@ -514,8 +535,10 @@ def plot_full_analysis(
         probe_x = sensor_x - sensor_x[0] + float(data.get("sensor_offset", sensor_x[0]))
     if not np.isfinite(probe_x).all():
         raise ValueError("Source position and receiver offsets must be finite")
-    if not np.isfinite([c_L, c_T]).all() or c_L <= 0 or c_T < 0:
-        raise ValueError("Wave speeds must be finite with c_L > 0 and c_T >= 0")
+    if not np.isfinite(c_L) or c_L <= 0 or (c_T is not None and (not np.isfinite(c_T) or c_T < 0)):
+        raise ValueError("Wave speeds must be finite and physical")
+    if not is_fluid_top and c_T is None:
+        raise ValueError("A solid top layer requires an archived shear speed")
     c_ref = (c_fluid or c_L) if is_fluid_top else c_T
     limits = _resolve_limits(
         data,
@@ -540,7 +563,7 @@ def plot_full_analysis(
     log(f"\n{'=' * 58}")
     log(">> Generating publication 2x2 analysis figure...")
     log(f"{'=' * 58}")
-    log("  Computing forward-propagating 2D FFT dispersion (u1 and u2 separated)...")
+    log(f"  Computing forward-propagating 2D FFT dispersion ({observable})...")
     leftward = bool(np.all(probe_x <= 0) and np.any(probe_x < 0))
     direction = "-x" if leftward else "+x"
     fft_positions = -sensor_x[::-1] if leftward else sensor_x
@@ -560,7 +583,11 @@ def plot_full_analysis(
     t_u = time_unit(times[-1])
     f_u = frequency_unit(limits["f_max"])
     k_u = wavenumber_unit(length_unit(2.0 * np.pi / limits["k_max"]))
-    u_u = displacement_unit(float(np.max(np.abs(dy))))
+    u_u = observable_unit(float(np.max(np.abs(dy))), observable)
+    amplitude_label = _AMPLITUDE_LABELS[observable]
+    symbol_x, symbol_y = ("u_1", "u_2") if observable == "displacement" else ("v_1", "v_2")
+    if observable == "pressure":
+        symbol_y = "p"
 
     # Extents come from bin edges, never from the requested plot limits.
     sel_f, sel_k = f_u(freqs[f_mask]), k_u(wavenumbers[k_mask])
@@ -615,7 +642,7 @@ def plot_full_analysis(
                 label=rf"$x = {probe_d[idx]:.4g}$ {x_u.tex}",
             )
         ax1.set_xlabel(_label("Time", t_u))
-        ax1.set_ylabel(_label("Displacement $u_2$", u_u))
+        ax1.set_ylabel(_label(amplitude_label, u_u))
         ax1.set_title(_title("(a) Receiver signals", tex))
         ax1.legend(loc="upper right")
         _line_axes(ax1)
@@ -674,7 +701,7 @@ def plot_full_analysis(
         ax2.yaxis.set_major_locator(MaxNLocator(nbins=6))
         ax2.set_xlabel(_label("Time", t_u))
         ax2.set_ylabel(_label("Offset from source", x_u))
-        ax2.set_title(_title("(b) B-scan ($u_2$)", tex))
+        ax2.set_title(_title(f"(b) B-scan (${symbol_y}$)", tex))
         if ax2.get_legend_handles_labels()[0]:
             ax2.legend(
                 loc="lower right",
@@ -689,7 +716,7 @@ def plot_full_analysis(
             cax=make_axes_locatable(ax2).append_axes("right", size="3.5%", pad=0.04),
             extend="neither",
         )
-        cb2.set_label(_label("$u_2$", u_u))
+        cb2.set_label(_label(f"${symbol_y}$", u_u))
 
         disp_lines = []
         if is_fluid_top:
@@ -734,12 +761,30 @@ def plot_full_analysis(
             return im
 
         ax3 = fig.add_subplot(gs[1, 0])
-        _dispersion_axes(ax3, fk_db_u1, "(c) Dispersion ($u_1$)")
-        ax3.set_ylabel(_label("Frequency", f_u))
+        if observable == "pressure":
+            tapered = (dy - dy.mean(axis=0)) * np.hanning(len(times))[:, None]
+            temporal_power = np.mean(
+                np.abs(np.fft.rfft(tapered, n=2 * len(times), axis=0)) ** 2, axis=1
+            )
+            peak = float(temporal_power.max())
+            relative = temporal_power / peak if peak > 0 else np.zeros_like(temporal_power)
+            temporal_freqs = np.fft.rfftfreq(2 * len(times), d=1 / fs)
+            ax3.plot(
+                f_u(temporal_freqs), 10 * np.log10(np.maximum(relative, 1e-30)), color="#167D9A"
+            )
+            ax3.set_xlim(f_lo, f_hi)
+            ax3.set_ylim(-60, 1)
+            ax3.set_xlabel(_label("Frequency", f_u))
+            ax3.set_ylabel("Relative power [dB]")
+            ax3.set_title(_title("(c) Pressure spectrum", tex))
+            ax3.grid(True)
+        else:
+            _dispersion_axes(ax3, fk_db_u1, f"(c) Dispersion (${symbol_x}$)")
+            ax3.set_ylabel(_label("Frequency", f_u))
         make_axes_locatable(ax3).append_axes("right", size="3.5%", pad=0.04).axis("off")
 
-        ax4 = fig.add_subplot(gs[1, 1], sharey=ax3)
-        im4 = _dispersion_axes(ax4, fk_db_u2, "(d) Dispersion ($u_2$)")
+        ax4 = fig.add_subplot(gs[1, 1], sharey=None if observable == "pressure" else ax3)
+        im4 = _dispersion_axes(ax4, fk_db_u2, f"(d) Dispersion (${symbol_y}$)")
         cb4 = fig.colorbar(
             im4, cax=make_axes_locatable(ax4).append_axes("right", size="3.5%", pad=0.04)
         )
@@ -753,14 +798,21 @@ def plot_full_analysis(
                 f"Archive: `{Path(sensor_data_filepath).resolve()}`.\n\n"
                 f"{n_sensors} receivers; {len(times)} samples; source {fmt_frequency(f_center)}. "
                 f"Propagation: {direction}.\n\n"
-                "(a) Selected vertical receiver signals. (b) Vertical B-scan with reference "
-                "arrival-time guides. (c,d) Horizontal and vertical displacement dispersion.\n\n"
-                f"Zero-phase{_band_text(filter_band)}. Hann taper; 2x zero-padding interpolates "
+                f"Observable: {observable}, units {data.get('sensor_units', 'm')}. "
+                "(a) Selected receiver signals. (b) B-scan with reference "
+                "arrival-time guides. "
+                + (
+                    "(c) Mean temporal pressure FFT power across receivers, normalized by its peak. "
+                    "(d) Pressure dispersion.\n\n"
+                    if observable == "pressure"
+                    else "(c,d) Available vector components and dispersion.\n\n"
+                )
+                + f"Zero-phase{_band_text(filter_band)}. Hann taper; 2x zero-padding interpolates "
                 f"only. Unpadded DFT spacing: {fs / len(times):.6g} Hz and "
                 f"{2 * np.pi / (n_sensors * s_pitch):.6g} rad/m.\n\n"
                 "Bulk-speed guides refer to the archived top layer where layered; they are "
                 "not a layered-system dispersion solution. Each dispersion component has its "
-                "own peak power reference. Flat-ended displacement colourbars saturate beyond "
+                "own peak power reference. Flat-ended amplitude colourbars saturate beyond "
                 f"the robust display limits of +/-{vmax:.6g} {u_u.label}; "
                 "recorded amplitudes are unchanged. "
                 "Absent components are blank; zero signals remain at the spectral floor.\n\n"

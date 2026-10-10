@@ -12,7 +12,7 @@ import pytest
 from scipy.integrate import trapezoid
 from scipy.optimize import brentq
 
-from guidedwavefem import run_simulation
+from wavesimfem import run_simulation
 
 E, NU, RHO, H, FREQUENCY = 70e9, 0.33, 2700.0, 1e-3, 100e3
 

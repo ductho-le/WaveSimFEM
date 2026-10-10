@@ -5,7 +5,7 @@ import json
 import numpy as np
 import pytest
 
-from guidedwavefem.characterisation import measure_packets, validate_options, write_characterisation
+from wavesimfem.characterisation import measure_packets, validate_options, write_characterisation
 
 
 def packet():
@@ -227,12 +227,12 @@ def test_report_zero_and_seismic_records_render_finite_metrics(tmp_path):
 def test_packet_figures_have_only_panel_content_and_fixed_width(tmp_path, monkeypatch):
     import matplotlib
 
-    from guidedwavefem.analysis import _rc
-    from guidedwavefem.characterisation_plots import render_characterisation
+    from wavesimfem.analysis import _rc
+    from wavesimfem.characterisation_plots import render_characterisation
 
     captured = []
     monkeypatch.setattr(
-        "guidedwavefem.characterisation_plots._save",
+        "wavesimfem.characterisation_plots._save",
         lambda fig, *_args: captured.append(fig) or [],
     )
     report, arrays = measure_packets(*packet())

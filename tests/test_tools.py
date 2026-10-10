@@ -17,16 +17,16 @@ _spec.loader.exec_module(clean_junk)
 
 JUNK = [
     "__pycache__/x.cpython-311.pyc",
-    "src/guidedwavefem/__pycache__/cli.cpython-311.pyc",
+    "src/wavesimfem/__pycache__/cli.cpython-311.pyc",
     "stray.pyc",
     ".pytest_cache/v/cache/nodeids",
     "tests/.ruff_cache/0.16.9/abc",
     ".mypy_cache/3.11/x.json",
     "notebooks/.ipynb_checkpoints/a-checkpoint.ipynb",
     "htmlcov/index.html",
-    "src/guidedwavefem.egg-info/PKG-INFO",
+    "src/wavesimfem.egg-info/PKG-INFO",
     "build/lib/x.py",
-    "dist/guidedwavefem-0.3.0.tar.gz",
+    "dist/wavesimfem-0.3.0.tar.gz",
     ".DS_Store",
     "configs/.DS_Store",
     "configs/._01_single_layer_aluminum.yaml",
@@ -38,7 +38,7 @@ JUNK = [
     "coverage.xml",
 ]
 KEEP = [
-    "src/guidedwavefem/cli.py",
+    "src/wavesimfem/cli.py",
     "configs/01_single_layer_aluminum.yaml",
     "README.md",
     "tools/clean_junk.py",
@@ -79,7 +79,7 @@ def test_forbid_junk_regex_blocks_junk(path):
 
 
 @pytest.mark.parametrize(
-    "path", ["src/guidedwavefem/cli.py", "configs/README.md", "tools/clean_junk.py", "LICENSE"]
+    "path", ["src/wavesimfem/cli.py", "configs/README.md", "tools/clean_junk.py", "LICENSE"]
 )
 def test_forbid_junk_regex_allows_sources(path):
     assert not _forbid_regex().search(path)
@@ -93,7 +93,7 @@ def test_cleaner_removes_junk_and_keeps_everything_else(tmp_path, capsys):
         assert not (tmp_path / rel).exists(), rel
     for rel in KEEP:
         assert (tmp_path / rel).exists(), rel
-    assert not (tmp_path / "src" / "guidedwavefem" / "__pycache__").exists()
+    assert not (tmp_path / "src" / "wavesimfem" / "__pycache__").exists()
 
 
 def test_cleaner_dry_run_deletes_nothing(tmp_path, capsys):

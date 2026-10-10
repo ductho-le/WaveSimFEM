@@ -4,17 +4,17 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 
-from guidedwavefem.config import load_config, parse_and_resolve_config
-from guidedwavefem.materials import (
+from wavesimfem.config import load_config, parse_and_resolve_config
+from wavesimfem.materials import (
     a0_wavenumber,
     compute_mesh_layout,
     normalize_structure,
     preflight_estimate,
     structure_from_config,
 )
-from guidedwavefem.parallel import limit_threads_per_rank
-from guidedwavefem.solvers_gpu import _NumpyLikeBackend, integrate_explicit_rk4
-from guidedwavefem.units import parse_quantity
+from wavesimfem.parallel import limit_threads_per_rank
+from wavesimfem.solvers_gpu import _NumpyLikeBackend, integrate_explicit_rk4
+from wavesimfem.units import parse_quantity
 
 
 def plate_config(**updates):
@@ -228,7 +228,7 @@ def test_thin_coating_load_resultant():
     from mpi4py import MPI
     from scipy.special import erf
 
-    from guidedwavefem.solvers import build_problem
+    from wavesimfem.solvers import build_problem
 
     solid = dict(rho=2700.0, E=70e9, nu=0.33)
     cfg = plate_config(

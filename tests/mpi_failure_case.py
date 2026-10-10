@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from guidedwavefem import cli
+from wavesimfem import cli
 
 case = sys.argv[1]
 if case == "config":
@@ -22,7 +22,7 @@ elif case in ("help", "version"):
 elif case.startswith("gather_"):
     import numpy as np
 
-    from guidedwavefem.numerics import PointSensors
+    from wavesimfem.numerics import PointSensors
 
     probes = object.__new__(PointSensors)
     probes.comm = cli.comm

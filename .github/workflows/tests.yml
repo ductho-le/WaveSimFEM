@@ -69,8 +69,8 @@ jobs:
           python -m pytest -q
       - name: CLI smoke test
         run: |
-          gwfem --version
-          for example in configs/*.yaml; do gwfem -c "$example" --dry-run -q; done
+          wavesim --version
+          for example in configs/*.yaml; do wavesim -c "$example" --dry-run -q; done
       - name: Example smoke runs (2 MPI ranks, shortened)
         run: |
           python - <<'PY'
@@ -87,9 +87,9 @@ jobs:
               cfg["mesh"].update(nx=nx, ny_per_region=rows, min_frequency=None)
               (destination / filename).write_text(yaml.safe_dump(cfg))
           PY
-          mpiexec -n 2 gwfem -c "$RUNNER_TEMP/03_halfspace_steel_rayleigh.yaml" -q \
+          mpiexec -n 2 wavesim -c "$RUNNER_TEMP/03_halfspace_steel_rayleigh.yaml" -q \
             --duration 4e-6 --max-frequency 5e5 --no-postprocess --output "$RUNNER_TEMP/ex03"
-          mpiexec -n 2 gwfem -c "$RUNNER_TEMP/02_plate_cfrp.yaml" -q \
+          mpiexec -n 2 wavesim -c "$RUNNER_TEMP/02_plate_cfrp.yaml" -q \
             --duration 8e-6 --max-frequency 5e5 --no-postprocess --output "$RUNNER_TEMP/ex02"
           test -s "$RUNNER_TEMP/ex03/sensor_data.npz" && test -s "$RUNNER_TEMP/ex02/sensor_data.npz"
 
@@ -124,4 +124,4 @@ jobs:
       - name: Install wheel and verify metadata
         run: |
           python -m pip install dist/*.whl
-          python -c "import guidedwavefem as g; print(g.__version__); assert g.__version__ != '0.0.0+unknown'"
+          python -c "import wavesimfem as g; print(g.__version__); assert g.__version__ != '0.0.0+unknown'"

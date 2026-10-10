@@ -10,8 +10,8 @@ import numpy as np
 import pytest
 import yaml
 
-from guidedwavefem import wave_reports
-from guidedwavefem.units import displacement_unit, length_unit
+from wavesimfem import wave_reports
+from wavesimfem.units import displacement_unit, length_unit
 
 CONFIGS = Path(__file__).resolve().parents[1] / "configs"
 
