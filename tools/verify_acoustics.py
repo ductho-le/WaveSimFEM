@@ -11,12 +11,17 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 import scipy.linalg as la
 import scipy.sparse as sp
 import scipy.sparse.linalg as sla
+
+if str(Path(__file__).resolve().parent) not in sys.path:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from acoustic_reference import (
     elastic_parameters,
     fluid_impedance_coefficients,
@@ -641,8 +646,11 @@ def main():
             result[name] = run()
             print(json.dumps({name: result[name]}, indent=2), flush=True)
     if args.output:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+        from wavesimfem.storage import atomic_output
+
+        with atomic_output(args.output) as stream:
+            json.dump(result, stream, indent=2, allow_nan=False)
+            stream.write("\n")
 
 
 if __name__ == "__main__":

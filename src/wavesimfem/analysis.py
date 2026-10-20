@@ -26,7 +26,7 @@ from matplotlib.ticker import MaxNLocator
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 from scipy.signal import butter, sosfiltfilt
 
-from wavesimfem.materials import compute_rayleigh_speed
+from wavesimfem.materials import FLUID_SHEAR_RATIO, compute_rayleigh_speed
 from wavesimfem.numerics import dispersion_spectrum
 from wavesimfem.reporting import log, warn
 from wavesimfem.sources import describe_source, source_delay, source_duration, source_signal
@@ -138,12 +138,6 @@ _LIMIT_KEYS = {
     "k_min": ("disp_k_min", "k_min_disp", 1e3),
     "k_max": ("disp_k_max", "k_max_disp", 1e3),
 }
-
-#: Legacy archives without ``is_fluid_top``: a top region with ``c_T < ratio · c_L``
-#: is a regularized fluid (its shear speed is ~1e-4 c_L). Scale-free, so very soft
-#: solids (e.g. soils with Vs < 50 m/s, whose c_T/c_L stays above ~0.05) are not
-#: misclassified.
-FLUID_SHEAR_RATIO = 0.01
 
 
 def latex_available() -> bool:
@@ -379,7 +373,7 @@ def plot_quick_overview(
             pad=0.02,
         )
         extension = os.path.splitext(output_path)[1].lower().lstrip(".") or "png"
-        _save(fig, os.path.splitext(output_path)[0], [extension], 300)
+        paths = _save(fig, os.path.splitext(output_path)[0], [extension], 300)
         notes = Path(output_path).with_suffix("").with_name(Path(output_path).stem + "_README.md")
         with atomic_output(notes) as stream:
             stream.write(
@@ -394,8 +388,8 @@ def plot_quick_overview(
                 "Empty fields indicate no recorded dynamic signal.\n\n"
                 "Export: 190 mm width, 10-point LaTeX text, 300 dpi raster.\n"
             )
-    log(f"  Quick visualisation saved: {output_path}")
-    return output_path
+    log(f"  Quick visualisation saved: {paths[0]}")
+    return paths[0]
 
 
 def _resolve_limits(
@@ -496,18 +490,37 @@ def plot_full_analysis(
     c_L = float(data["c_L"])
     c_T = float(data["c_T"]) if "c_T" in data else None
     st_mode = str(data["structure_mode"]) if "structure_mode" in data else ""
-    c_R = float(data["c_R"]) if "c_R" in data and np.isfinite(data["c_R"]) else None
+    c_R = (
+        float(data["c_R"])
+        if "c_R" in data and np.isfinite(data["c_R"]) and float(data["c_R"]) > 0
+        else None
+    )
     is_fluid_top = (
         bool(data["is_fluid_top"])
         if "is_fluid_top" in data
         else c_T is None or c_T < FLUID_SHEAR_RATIO * c_L
     )
     has_fluid = bool(data["has_fluid"]) if "has_fluid" in data else is_fluid_top
-    c_fluid = float(data["c_fluid"]) if "c_fluid" in data else (c_L if is_fluid_top else None)
-    if c_R is None and c_T is not None and st_mode == "halfspace" and "E" in data and "nu" in data:
+    c_fluid = (
+        float(data["c_fluid"])
+        if "c_fluid" in data and np.isfinite(data["c_fluid"]) and float(data["c_fluid"]) > 0
+        else (c_L if is_fluid_top else None)
+    )
+    if (
+        c_R is None
+        and c_T is not None
+        and c_T > 0
+        and st_mode == "halfspace"
+        and "E" in data
+        and "nu" in data
+    ):
         c_R = compute_rayleigh_speed(c_T, c_L=c_L)
     source_type = str(data["source_type"]) if "source_type" in data else "ricker"
-    n_cycles = int(data["n_cycles"]) if "n_cycles" in data and int(data["n_cycles"]) > 0 else None
+    n_cycles = (
+        int(data["n_cycles"])
+        if "n_cycles" in data and np.isfinite(data["n_cycles"]) and int(data["n_cycles"]) > 0
+        else None
+    )
 
     # Validate before indexing/filtering. Coordinates carry physical units.
     if times.ndim != 1 or sensor_x.ndim != 1 or len(times) < 32 or len(sensor_x) < 3:
@@ -537,8 +550,8 @@ def plot_full_analysis(
         raise ValueError("Source position and receiver offsets must be finite")
     if not np.isfinite(c_L) or c_L <= 0 or (c_T is not None and (not np.isfinite(c_T) or c_T < 0)):
         raise ValueError("Wave speeds must be finite and physical")
-    if not is_fluid_top and c_T is None:
-        raise ValueError("A solid top layer requires an archived shear speed")
+    if not is_fluid_top and (c_T is None or c_T <= 0):
+        raise ValueError("A solid top layer requires a positive archived shear speed")
     c_ref = (c_fluid or c_L) if is_fluid_top else c_T
     limits = _resolve_limits(
         data,

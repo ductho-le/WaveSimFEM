@@ -49,6 +49,8 @@ from wavesimfem.analysis import plot_quick_overview
 from wavesimfem.config import dump_config, parse_and_resolve_config
 from wavesimfem.device import CPU_DEVICE, DeviceInfo, select_device
 from wavesimfem.materials import (
+    AUTO_SAMPLES_PER_MESH_PERIOD,
+    MIN_POSTPROCESS_SAMPLES,
     MeshLayout,
     compute_mesh_layout,
     implicit_time_step,
@@ -79,6 +81,8 @@ from wavesimfem.storage import (
 from wavesimfem.units import fmt_length, fmt_time
 
 __all__ = [
+    "AUTO_SAMPLES_PER_MESH_PERIOD",
+    "MIN_POSTPROCESS_SAMPLES",
     "build_problem",
     "mpi_fail_fast",
     "ricker",
@@ -95,14 +99,8 @@ comm = MPI.COMM_WORLD
 rank = comm.rank
 nprocs = comm.size
 
-#: Minimum number of time samples required by the FFT post-processing.
-MIN_POSTPROCESS_SAMPLES = 32
 #: Global DOF count above which the implicit solver switches to CG + GAMG.
 ITERATIVE_DOF_THRESHOLD = 500_000
-#: Default sensor sampling rate in multiples of the analysis maximum frequency
-#: (``sensors.sample_rate: null``). Sensor histories are decimated to this rate
-#: instead of being stored at every (much finer) solver step.
-AUTO_SAMPLES_PER_MESH_PERIOD = 20
 
 
 def mpi_fail_fast(function: Callable[..., Any]) -> Callable[..., Any]:
@@ -271,6 +269,8 @@ def build_problem(
     profile = ufl.exp(-((x[0] - cfg["source_x"]) ** 2) / (2.0 * sigma_x**2))
     fx, fy = cfg["source_fx"], cfg["source_fy"]
     norm = float(np.hypot(fx, fy))
+    if not np.isfinite(norm) or norm <= 0.0:
+        raise ValueError("source_fx and source_fy must not both be zero")
     traction = traction_amplitude * profile * ufl.as_vector([fx / norm, fy / norm])
     # Use actual vertical cell spacing, not relative coordinate magnitude.
     tol_geom = min(layout.h_y_per_region) * 1e-4
@@ -333,9 +333,11 @@ def build_problem(
 
     # --- 5th-order sponge (ALID) indicator --------------------------------------
     L_abs = cfg["absorb_length"]
-    x_right = layout.plate_length - L_abs
-    indicator = ufl.conditional(ufl.gt(x[0], x_right), ((x[0] - x_right) / L_abs) ** 5, 0.0)
-    indicator += ufl.conditional(ufl.lt(x[0], L_abs), ((L_abs - x[0]) / L_abs) ** 5, 0.0)
+    indicator = ufl.as_ufl(0.0)
+    if L_abs > 0:
+        x_right = layout.plate_length - L_abs
+        indicator += ufl.conditional(ufl.gt(x[0], x_right), ((x[0] - x_right) / L_abs) ** 5, 0.0)
+        indicator += ufl.conditional(ufl.lt(x[0], L_abs), ((L_abs - x[0]) / L_abs) ** 5, 0.0)
     if summary["has_bottom_halfspace"]:
         depth = summary["bottom_halfspace"]["absorb_depth"]
         y_end = summary["y_min"] + depth
@@ -1242,5 +1244,5 @@ def run_simulation(
                     n_cycles=cfg.get("n_cycles"),
                     usetex=cfg["usetex"],
                 )
-        comm.Barrier()
-        return saved_npz, out_dir
+    comm.Barrier()
+    return saved_npz, out_dir

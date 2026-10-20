@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -23,7 +24,7 @@ def validate_options(value):
     """Validate report settings without importing plotting or FEM dependencies."""
     if value is None:
         return None
-    if not isinstance(value, dict):
+    if not isinstance(value, Mapping):
         raise ValueError("wave_characterisation must be a mapping or null")
     defaults = dict(
         enabled=False,
@@ -35,9 +36,10 @@ def validate_options(value):
     unknown = set(value) - set(defaults)
     if unknown:
         raise ValueError(f"Unknown wave_characterisation settings: {sorted(unknown)}")
-    options = defaults | value
-    if not isinstance(options["enabled"], bool):
+    options = defaults | dict(value)
+    if not isinstance(options["enabled"], (bool, np.bool_)):
         raise ValueError("wave_characterisation.enabled must be boolean")
+    options["enabled"] = bool(options["enabled"])
     if options["component"] not in ("x", "y", "pressure"):
         raise ValueError("wave_characterisation.component must be x, y or pressure")
     for key in ("frequency_band", "time_window"):
@@ -47,10 +49,14 @@ def validate_options(value):
         if not isinstance(pair, (list, tuple)) or len(pair) != 2:
             raise ValueError(f"{key} must contain two increasing bounds")
         try:
-            pair = [
-                parse_quantity(v, "frequency") if key == "frequency_band" else float(v)
-                for v in pair
-            ]
+            parsed = []
+            for v in pair:
+                if isinstance(v, (bool, np.bool_)):
+                    raise ValueError(f"expected a {key} bound, got a boolean")
+                parsed.append(
+                    parse_quantity(v, "frequency") if key == "frequency_band" else float(v)
+                )
+            pair = parsed
         except (ValueError, TypeError) as exc:
             raise ValueError(f"Invalid {key}: {exc}") from exc
         if not np.isfinite(pair).all() or pair[0] < 0 or pair[1] <= pair[0]:
@@ -58,11 +64,12 @@ def validate_options(value):
         options[key] = pair
     threshold = options["min_relative_amplitude"]
     if (
-        isinstance(threshold, bool)
-        or not isinstance(threshold, (int, float))
-        or not 0 < threshold < 1
+        isinstance(threshold, (bool, np.bool_))
+        or not isinstance(threshold, (int, float, np.integer, np.floating))
+        or not 0 < float(threshold) < 1
     ):
         raise ValueError("min_relative_amplitude must lie strictly between zero and one")
+    options["min_relative_amplitude"] = float(threshold)
     return options
 
 
@@ -76,14 +83,14 @@ def _peak_measurements(t, envelope):
         return peak, amplitude, None, fwhm
     if 0 < peak < len(t) - 1:
         local = envelope[peak - 1 : peak + 2]
-        if np.all(local > 0):
+        if np.all(local > 0.1 * amplitude):
             left, center, right = np.log(local)
             curvature = left - 2 * center + right
             if curvature < 0:
                 offset = np.clip(0.5 * (left - right) / curvature, -0.5, 0.5)
                 arrival += float(offset * (t[1] - t[0]))
                 amplitude *= float(np.exp(0.25 * (right - left) * offset))
-        half = amplitude / 2
+        half = min(amplitude, float(envelope[peak])) / 2
         before = np.flatnonzero(envelope[:peak] <= half)
         after = np.flatnonzero(envelope[peak + 1 :] <= half)
         if len(before) and len(after):
@@ -220,6 +227,7 @@ def measure_packets(times, positions, ux, uy, options=None):
         valid_receivers=int(valid.sum()),
         fit_status="insufficient_receivers",
         fit_diagnostics=diagnostics,
+        amplitude_fit_diagnostics=None,
         velocity=None,
         apparent_attenuation=None,
         notes=[
@@ -288,7 +296,7 @@ def measure_packets(times, positions, ux, uy, options=None):
                 summary["notes"].append(
                     "Peak amplitudes do not support an exponential spatial trend (R² < 0.8); apparent attenuation is unavailable."
                 )
-            elif fit.slope > 0:
+            elif fit.slope > 0 and log_range > 0.01:
                 summary["notes"].append(
                     "Amplitude grows along the fitted propagation direction; negative attenuation denotes apparent gain."
                 )
@@ -330,8 +338,12 @@ def write_characterisation(
 
     with np.load(archive_path, allow_pickle=False) as archive:
         observable = (
-            str(archive["sensor_observable"]) if "sensor_observable" in archive else "displacement"
+            str(np.asarray(archive["sensor_observable"]).item())
+            if "sensor_observable" in archive
+            else "displacement"
         )
+        if observable not in ("displacement", "pressure", "velocity", "particle_velocity"):
+            raise ValueError(f"Unsupported sensor observable {observable!r}")
         vector_keys = (
             ("sensor_data_x", "sensor_data_y")
             if observable == "displacement"
@@ -346,6 +358,10 @@ def write_characterisation(
         if missing:
             raise ValueError(f"Characterisation archive is missing {sorted(missing)}")
         if observable == "pressure":
+            if options and options.get("component") in ("x", "y"):
+                raise ValueError(
+                    "Pressure archives do not contain horizontal/vertical motion components"
+                )
             options = {**(options or {}), "component": "pressure"}
             signal = archive["sensor_data_pressure"]
             report, arrays = measure_packets(

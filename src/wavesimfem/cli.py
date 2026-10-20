@@ -169,10 +169,24 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif args.verbose:
         set_verbosity("DEBUG")
 
+    if args.postprocess and args.no_postprocess:
+        _exit_with_error(
+            "--postprocess and --no-postprocess cannot be used together",
+            EXIT_USAGE,
+        )
+
     # Fast template generation path
     if args.generate_config:
         if rank == 0:
-            generate_template_config(args.generate_config)
+            try:
+                generate_template_config(args.generate_config)
+            except OSError as exc:
+                _exit_with_error(
+                    f"cannot write template configuration: {exc}",
+                    EXIT_USAGE,
+                    exc=exc,
+                    verbose=args.verbose,
+                )
             log(f"Template configuration file created: {args.generate_config}")
         comm.Barrier()
         return
@@ -202,7 +216,12 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     # Preflight dry-run path
     if args.dry_run:
-        preflight_estimate(cfg, rank=rank)
+        try:
+            preflight_estimate(cfg, rank=rank)
+        except (ValueError, TypeError) as exc:
+            _exit_with_error(
+                f"invalid configuration: {exc}", EXIT_USAGE, exc=exc, verbose=args.verbose
+            )
         if rank == 0:
             log("\n  Dry run complete: preflight estimation finished successfully.")
             log("  Exiting without mesh generation or FEM assembly.\n")
@@ -220,51 +239,58 @@ def main(argv: Sequence[str] | None = None) -> None:
             sensor_data_file, out_dir = run_simulation(args, cfg=cfg)
         except DeviceUnavailableError as exc:
             _exit_with_error(str(exc), EXIT_DEVICE_UNAVAILABLE, exc=exc, verbose=args.verbose)
+        except (OSError, ValueError, TypeError) as exc:
+            _exit_with_error(str(exc), EXIT_USAGE, exc=exc, verbose=args.verbose)
 
     # Step 2: Signal Processing (Rank 0 only)
     if rank == 0:
-        if cfg["run_postprocess"] and not args.no_postprocess:
-            from wavesimfem.analysis import plot_full_analysis
+        if (args.postprocess or cfg["run_postprocess"]) and not args.no_postprocess:
+            try:
+                from wavesimfem.analysis import plot_full_analysis
 
-            # SI limits (Hz, rad/m); None falls back to the archive's stored limits.
-            limits = {name: cfg[f"disp_{name}"] for name in ("f_min", "f_max", "k_min", "k_max")}
-            plot_full_analysis(
-                sensor_data_file,
-                output_dir=out_dir,
-                **limits,
-                formats=cfg["figure_formats"],
-                usetex=cfg["usetex"],
-            )
-            if cfg["structure_analysis"]:
-                from wavesimfem.wave_reports import write_structure_report
-
-                write_structure_report(
+                # SI limits (Hz, rad/m); None falls back to the archive's stored limits.
+                limits = {
+                    name: cfg[f"disp_{name}"] for name in ("f_min", "f_max", "k_min", "k_max")
+                }
+                plot_full_analysis(
                     sensor_data_file,
                     output_dir=out_dir,
                     **limits,
                     formats=cfg["figure_formats"],
                     usetex=cfg["usetex"],
                 )
-            characterisation = cfg.get("wave_characterisation")
-            if cfg.get("lamb_modes"):
-                from wavesimfem.lamb import write_lamb_report
+                if cfg["structure_analysis"]:
+                    from wavesimfem.wave_reports import write_structure_report
 
-                write_lamb_report(
-                    sensor_data_file,
-                    output_dir=out_dir,
-                    formats=cfg["figure_formats"],
-                    usetex=cfg["usetex"],
-                )
-            if characterisation and characterisation["enabled"]:
-                from wavesimfem.characterisation import write_characterisation
+                    write_structure_report(
+                        sensor_data_file,
+                        output_dir=out_dir,
+                        **limits,
+                        formats=cfg["figure_formats"],
+                        usetex=cfg["usetex"],
+                    )
+                characterisation = cfg.get("wave_characterisation")
+                if cfg.get("lamb_modes"):
+                    from wavesimfem.lamb import write_lamb_report
 
-                write_characterisation(
-                    sensor_data_file,
-                    output_dir=out_dir,
-                    options=characterisation,
-                    formats=cfg["figure_formats"],
-                    usetex=cfg["usetex"],
-                )
+                    write_lamb_report(
+                        sensor_data_file,
+                        output_dir=out_dir,
+                        formats=cfg["figure_formats"],
+                        usetex=cfg["usetex"],
+                    )
+                if characterisation and characterisation["enabled"]:
+                    from wavesimfem.characterisation import write_characterisation
+
+                    write_characterisation(
+                        sensor_data_file,
+                        output_dir=out_dir,
+                        options=characterisation,
+                        formats=cfg["figure_formats"],
+                        usetex=cfg["usetex"],
+                    )
+            except (OSError, ValueError, TypeError) as exc:
+                _exit_with_error(str(exc), EXIT_USAGE, exc=exc, verbose=args.verbose)
 
         log(f"\n{'═' * 58}")
         log("  All tasks completed successfully!")
@@ -275,4 +301,6 @@ def main(argv: Sequence[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    from wavesimfem._launcher import main as _launcher_main
+
+    _launcher_main()

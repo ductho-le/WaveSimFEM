@@ -61,7 +61,7 @@ jobs:
       - name: Serial test suite (with coverage)
         run: python -m pytest --cov --cov-report=term --cov-report=xml
       - name: Distributed tests (2 MPI ranks)
-        run: mpiexec -n 2 python -m pytest -q -p no:cacheprovider tests/test_numerics.py -k "exact_point or gather"
+        run: mpiexec -n 2 python -m pytest -q -p no:cacheprovider tests/test_numerics.py tests/test_acoustic_time.py -k "exact_point or gather or distributed"
       - name: Test extracted source distribution
         run: |
           python -m build --sdist --outdir "$RUNNER_TEMP/release"

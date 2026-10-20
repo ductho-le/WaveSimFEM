@@ -50,6 +50,8 @@ class HistoryStore:
         if mode not in ("memory", "disk"):
             raise ValueError("history storage must be 'memory' or 'disk'")
         self.mode = mode
+        if mode == "disk" and directory is not None:
+            Path(directory).mkdir(parents=True, exist_ok=True)
         self._scratch = (
             tempfile.TemporaryDirectory(prefix=".wavesim-history-", dir=directory)
             if mode == "disk"
@@ -68,6 +70,7 @@ class HistoryStore:
         self._maps.clear()
         if self._scratch is not None:
             self._scratch.cleanup()
+            self._scratch = None
 
     def zeros(self, shape: tuple[int, int], dtype: Any = np.float64) -> np.ndarray:
         if self._scratch is None or 0 in shape:
@@ -83,7 +86,8 @@ def all_finite_history(array: np.ndarray, chunk_bytes: int = HISTORY_CHUNK_BYTES
     """Check recorded values without allocating a full-history boolean array."""
     if not array.size:
         return True
-    rows = max(1, chunk_bytes // (array.shape[1] * array.dtype.itemsize))
+    row_width = int(np.prod(array.shape[1:])) or 1
+    rows = max(1, chunk_bytes // (row_width * array.dtype.itemsize))
     return all(
         np.isfinite(array[first : first + rows]).all() for first in range(0, len(array), rows)
     )

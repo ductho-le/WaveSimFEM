@@ -309,7 +309,10 @@ def load_config(config_path: str) -> dict[str, Any]:
                 raise ValueError(f"Invalid YAML in {config_path}: {exc}") from exc
     elif ext == ".toml":
         with open(config_path, "rb") as f:
-            data = tomllib.load(f)
+            try:
+                data = tomllib.load(f)
+            except tomllib.TOMLDecodeError as exc:
+                raise ValueError(f"Invalid TOML in {config_path}: {exc}") from exc
     elif ext == ".json":
         with open(config_path, encoding="utf-8") as f:
             try:
@@ -420,7 +423,7 @@ def flatten_config(cfg_in: Mapping[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 def _float(cfg: dict[str, Any], key: str, *, positive: bool = False, nonneg: bool = False) -> float:
     value = cfg[key]
-    if isinstance(value, bool):
+    if isinstance(value, (bool, np.bool_)):
         raise ValueError(f"'{key}' must be a number, got a boolean")
     try:
         out = float(value)
@@ -438,7 +441,9 @@ def _float(cfg: dict[str, Any], key: str, *, positive: bool = False, nonneg: boo
 
 def _int(cfg: dict[str, Any], key: str, minimum: int) -> int:
     value = cfg[key]
-    if isinstance(value, bool) or not isinstance(value, (int, float, np.integer, np.floating)):
+    if isinstance(value, (bool, np.bool_)) or not isinstance(
+        value, (int, float, np.integer, np.floating)
+    ):
         raise ValueError(f"'{key}' must be an integer >= {minimum}, got {value!r}")
     if not np.isfinite(value) or int(value) != value or value < minimum:
         raise ValueError(f"'{key}' must be an integer >= {minimum}, got {value!r}")
@@ -614,7 +619,12 @@ def _validate_acoustic_options(cfg: dict[str, Any], summary: dict[str, Any]) -> 
     unknown = set(boundaries) - set(sides)
     if unknown:
         raise ValueError(f"Unknown acoustic boundary side(s): {sorted(unknown)}")
-    resolved = {side: str(boundaries.get(side, "rigid")).strip().lower() for side in sides}
+    resolved = {
+        side: str(boundaries.get(side) if boundaries.get(side) is not None else "rigid")
+        .strip()
+        .lower()
+        for side in sides
+    }
     if any(value not in ("rigid", "pressure_release", "radiation") for value in resolved.values()):
         raise ValueError("Acoustic boundary types must be rigid, pressure_release or radiation")
     cfg["acoustic_boundaries"] = resolved
@@ -686,9 +696,12 @@ def _resolve_layout_defaults(cfg: dict[str, Any], summary: Mapping[str, Any]) ->
         if cfg["n_sensors"] is None:
             span = last - cfg["absorb_length"]
             count = int(np.floor(span / cfg["sensor_pitch"] * (1.0 + 1e-9))) + 1
+            count = min(count, MAX_AUTO_SENSORS)
+            while count > 2 and last - (count - 1) * cfg["sensor_pitch"] < 0.0:
+                count -= 1
             if count < 3:
                 raise ValueError("The automatic sensor array does not fit in the sensing region")
-            cfg["n_sensors"] = min(count, MAX_AUTO_SENSORS)
+            cfg["n_sensors"] = count
         count = _int(cfg, "n_sensors", 2)
         cfg["sensor_offset"] = last - (count - 1) * cfg["sensor_pitch"] - cfg["source_x"]
     elif cfg["sensor_offset"] is None:
@@ -698,12 +711,15 @@ def _resolve_layout_defaults(cfg: dict[str, Any], summary: Mapping[str, Any]) ->
         first = cfg["source_x"] + cfg["sensor_offset"]
         span = cfg["absorb_length"] + sensing - first
         count = int(np.floor(span / cfg["sensor_pitch"] * (1.0 + 1e-9))) + 1 if span > 0 else 0
+        count = min(count, MAX_AUTO_SENSORS)
+        while count > 2 and first + (count - 1) * cfg["sensor_pitch"] > length:
+            count -= 1
         if count < 3:
             raise ValueError(
                 "The automatic sensor array does not fit in the sensing region; set "
                 "sensors.n_sensors / sensor_offset / sensor_pitch or enlarge sensing_length"
             )
-        cfg["n_sensors"] = min(count, MAX_AUTO_SENSORS)
+        cfg["n_sensors"] = count
 
 
 def _validate_simulation(cfg: dict[str, Any], source: str) -> None:
@@ -736,9 +752,9 @@ def _validate_simulation(cfg: dict[str, Any], source: str) -> None:
     ):
         if cfg.get(key) is not None:
             _float(cfg, key, positive=True)
-    if (cfg.get("min_frequency") or cfg["f_center"] / 5) >= (
-        cfg.get("max_frequency") or 3 * cfg["f_center"]
-    ):
+    max_freq = cfg.get("max_frequency") or 3 * cfg["f_center"]
+    min_freq = cfg.get("min_frequency") or min(cfg["f_center"] / 5, 0.5 * max_freq)
+    if min_freq >= max_freq:
         raise ValueError("min_frequency must be less than max_frequency")
     if cfg.get("sensor_sample_rate") is not None:
         try:
@@ -841,6 +857,8 @@ def parse_and_resolve_config(
     Precedence: CLI overrides > configuration file/dictionary > :data:`DEFAULTS`.
     """
     if custom_cfg is not None:
+        if not isinstance(custom_cfg, Mapping):
+            raise TypeError("Configuration must be a mapping")
         raw_cfg = custom_cfg
         config_source = str(custom_cfg.get("_config_source", "Supplied Dictionary"))
     elif config_path is not None:
@@ -894,8 +912,9 @@ def parse_and_resolve_config(
     from wavesimfem.characterisation import validate_options
 
     resolved["wave_characterisation"] = validate_options(resolved["wave_characterisation"])
-    if not isinstance(resolved["lamb_modes"], bool):
+    if not isinstance(resolved["lamb_modes"], (bool, np.bool_)):
         raise ValueError("postprocess.lamb_modes must be boolean")
+    resolved["lamb_modes"] = bool(resolved["lamb_modes"])
     if validate_simulation:
         _validate_simulation(resolved, config_source)
     return resolved
@@ -994,6 +1013,8 @@ sensors:
 
 postprocess:
   structure_analysis: true     # Physics-aware multi-panel reports selected from archived structure
+  lamb_modes: false             # Exact Rayleigh-Lamb dispersion report (free isotropic plates only)
+  wave_characterisation: null   # Optional arrival/velocity/attenuation characterisation mapping
   run_postprocess: true         # 2D FFT dispersion analysis and figures
   # Plot limits: SI numbers (Hz, rad/m) or strings with units ("2 MHz", "3 rad/mm").
   f_min: null                   # null = 0
@@ -1015,6 +1036,5 @@ output:
 
 def generate_template_config(output_path: str) -> None:
     """Write the annotated YAML template configuration."""
-    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
+    with atomic_output(output_path) as f:
         f.write(TEMPLATE_CONFIG)

@@ -76,7 +76,11 @@ def normalize_device_request(requested: object) -> str:
     req = str(requested).strip().lower() if requested is not None else "auto"
     if not _DEVICE_RE.match(req):
         raise ValueError(f"Invalid device '{requested}'. Choose from: {DEVICE_CHOICES_HELP}.")
-    return "cuda:0" if req == "cuda" else req
+    if req == "cuda":
+        return "cuda:0"
+    if req.startswith("cuda:"):
+        return f"cuda:{int(req.split(':', 1)[1])}"
+    return req
 
 
 def is_cupy_available() -> bool:
@@ -153,7 +157,11 @@ def select_device(
         return matches[0]
 
     available = ", ".join(d.device for d in avail)
-    hint = " Install CuPy (pip install cupy-cuda12x) with a compatible CUDA driver."
+    hint = (
+        ""
+        if any(d.is_gpu for d in avail)
+        else " Install CuPy (pip install cupy-cuda12x) with a compatible CUDA driver."
+    )
     raise DeviceUnavailableError(
         f"Requested device '{req}' is not available (available: {available}).{hint}"
     )

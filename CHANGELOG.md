@@ -38,8 +38,7 @@ All notable changes are documented here. Versions follow
   pressure, particle velocity) and `sensors.region`.
 - Coupled PETSc RK4 and Newmark integrators (serial and MPI) and a serial
   SciPy/CuPy RK4 backend, with a coupling-inclusive explicit stability bound.
-- Independent continuum benchmarks (`tools/verify_acoustics.py`,
-  `docs/acoustic_validation.md`) and examples 07 (pure fluid) and 08
+- Independent continuum benchmarks (`tools/verify_acoustics.py`) and examples 07 (pure fluid) and 08
   (plate loaded by a sponge-terminated water half-space, 81 pressure receivers
   over a 40 mm aperture for f-k analysis).
 - `SeparableForcing`: loads expressed as fixed vectors times scalar time
@@ -101,7 +100,7 @@ All notable changes are documented here. Versions follow
   references and distinct diagnostics, with JSON/CSV/NPZ measurement exports.
 - Phase-velocity imaging screens weak, aliased and ambiguous peaks; polarization
   requires coherent components. Spatial decay uses untapered Fourier amplitudes
-  to avoid arrival-dependent window bias. Six explicitly synthetic structure
+  to avoid arrival-dependent window bias. Eight explicitly synthetic structure
   previews are available through `tools/preview_structure_reports.py`.
 - Post-processing figures share consistent typography, physical units and
   annotated amplitude scales. Dispersion handles arrays left of the source,
@@ -177,7 +176,7 @@ All notable changes are documented here. Versions follow
 - Preflight explicit step now evaluates the same Gershgorin bound per element
   before meshing (`materials.element_operator_bounds`), so it is a guaranteed
   lower estimate of the solver step instead of a wave-speed heuristic.
-- BLAS/OpenMP oversubscription under MPI: `guided-waves` and `python -m
+- BLAS/OpenMP oversubscription under MPI: `wavesim` and `python -m
   wavesimfem` cap threads per rank at `cpus // ranks_per_node` unless the user
   set them (`wavesimfem.parallel`); the setting is shown in the run banner.
 - White strip in dispersion maps at the plot-limit edges (frequency/wavenumber
@@ -194,7 +193,7 @@ All notable changes are documented here. Versions follow
 - `--dry-run` without `-c` now errors instead of crashing; postprocess-only runs
   honor the plot limits stored in the archive.
 - Invalid or missing configuration files and missing sensor archives now produce a
-  one-line `guided-waves: error:` message with exit code 2 instead of a traceback
+  one-line `wavesim: error:` message with exit code 2 instead of a traceback
   (`-v` re-raises for debugging).
 
 ### Added

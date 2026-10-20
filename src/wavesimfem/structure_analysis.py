@@ -15,6 +15,7 @@ import numpy as np
 import yaml
 
 from wavesimfem.materials import (
+    FLUID_SHEAR_RATIO,
     a0_wavenumber,
     canonicalize_mode,
     compute_rayleigh_speed,
@@ -188,16 +189,31 @@ def _legacy_regions(data: Mapping[str, Any], mode: str) -> list[dict[str, Any]]:
         y = top
     # Scalar speeds refer to the top finite layer, or the sole halfspace.
     target = next((r for r in reversed(regions) if not r["is_halfspace"]), regions[-1])
-    if _scalar(data, "is_fluid_top", False) or target["is_fluid"]:
+    c_l_val = _number(data, "c_L", positive=True)
+    c_t_val = _number(data, "c_T", positive=True)
+    is_legacy_fluid = bool(
+        _scalar(data, "is_fluid_top", False)
+        or target["is_fluid"]
+        or (
+            c_l_val is not None
+            and "c_T" in data
+            and (c_t_val is None or c_t_val < FLUID_SHEAR_RATIO * c_l_val)
+        )
+    )
+    if is_legacy_fluid:
         target.update(is_fluid=True, material_model="fluid")
         if target.get("fluid_formulation") is None:
             target["fluid_formulation"] = "regularized_elastic"
-        target["c_fluid_m_s"] = _number(data, "c_L", positive=True)
+        target["c_fluid_m_s"] = _number(data, "c_fluid", positive=True) or c_l_val
     elif target["material_model"] == "isotropic":
-        target["c_L_m_s"] = _number(data, "c_L", positive=True)
-        target["c_T_m_s"] = _number(data, "c_T", positive=True)
+        target["c_L_m_s"] = c_l_val
+        target["c_T_m_s"] = c_t_val
         if mode == "halfspace":
-            target["c_R_m_s"] = _number(data, "c_R", positive=True)
+            target["c_R_m_s"] = _number(data, "c_R", positive=True) or (
+                compute_rayleigh_speed(c_t_val, c_L=c_l_val)
+                if c_l_val is not None and c_t_val is not None
+                else None
+            )
     target["density_kg_m3"] = _number(data, "rho", positive=True)
     return regions
 
@@ -271,7 +287,7 @@ def _identity(mode: str, regions: list[dict[str, Any]], exact: bool) -> tuple[st
             "Viscoelastic plate · guided P-SV waves",
             ["Viscoelastic guided waves"],
         )
-    if len(regions) == 1 and models.intersection({"anisotropic", "viscoelastic"}):
+    if len(regions) == 1 and "anisotropic" in models:
         return (
             "anisotropic_plate",
             "Anisotropic plate · guided P-SV waves",

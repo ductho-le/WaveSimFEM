@@ -22,6 +22,7 @@ from wavesimfem.materials import a0_wavenumber
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("results_postprocess_preview"))
+    parser.add_argument("--usetex", action="store_true", help="Render text with external LaTeX")
     args = parser.parse_args()
     destination = args.output
     destination.mkdir(parents=True, exist_ok=True)
@@ -46,7 +47,9 @@ def main():
         n_cycles=5,
         provenance="Analytical Gaussian packet: speed 1800 m/s, amplitude decay 5 Np/m",
     )
-    plot_full_analysis(str(packet_path), str(destination), formats=("png", "pdf"), usetex=True)
+    plot_full_analysis(
+        str(packet_path), str(destination), formats=("png", "pdf"), usetex=args.usetex
+    )
     plot_quick_overview(
         times,
         positions,
@@ -56,8 +59,9 @@ def main():
         str(destination / "quick_overview.png"),
         source_type="tone_burst",
         n_cycles=5,
+        usetex=args.usetex,
     )
-    write_characterisation(packet_path, destination, formats=("png", "pdf"))
+    write_characterisation(packet_path, destination, formats=("png", "pdf"), usetex=args.usetex)
 
     # Superpose independently evaluated plate branches over a Gaussian frequency band.
     # The inverse transform makes dispersive packets instead of a monochromatic image.
@@ -93,7 +97,7 @@ def main():
         simulation_config_yaml=yaml.safe_dump(cfg),
         provenance="Analytical Rayleigh-Lamb A0/S0 packet superposition; not a FEM solve",
     )
-    write_lamb_report(lamb_path, destination, formats=("png", "pdf"))
+    write_lamb_report(lamb_path, destination, formats=("png", "pdf"), usetex=args.usetex)
     print(f"Synthetic verification previews saved to {destination.resolve()}")
 
 

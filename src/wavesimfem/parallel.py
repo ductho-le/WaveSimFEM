@@ -48,7 +48,7 @@ _WORLD_SIZE_VARS: tuple[str, ...] = (
     "SLURM_STEP_NUM_TASKS",
 )
 
-_LEADING_INT = re.compile(r"\s*(\d+)")
+_LEADING_INT = re.compile(r"\s*(\d+)\s*")
 
 
 @dataclass(frozen=True)
@@ -73,7 +73,7 @@ class ThreadPolicy:
 def _leading_int(value: str | None) -> int | None:
     if not value:
         return None
-    match = _LEADING_INT.match(value)
+    match = _LEADING_INT.fullmatch(value)
     return int(match.group(1)) if match else None
 
 

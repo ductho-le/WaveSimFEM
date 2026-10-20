@@ -249,21 +249,38 @@ class _CoupledState:
         ):
             for name in names:
                 setattr(self, name, self._vector(matrix))
-        initial = initial or {}
         allowed = {"u", "v", "p", "pdot", "pressure_integral"}
-        if set(initial) - allowed:
-            raise ValueError(f"Unknown acoustic initial fields: {sorted(set(initial) - allowed)}")
-        for name, values in initial.items():
-            target = getattr(self, name)
-            if isinstance(values, PETSc.Vec):
-                values.copy(target)
-            else:
-                array = np.asarray(values, dtype=PETSc.ScalarType)
+        error: str | None = None
+        try:
+            if initial is None:
+                initial = {}
+            if not isinstance(initial, Mapping):
+                raise ValueError("Acoustic initial fields must be a mapping")
+            unknown = set(initial) - allowed
+            if unknown:
+                raise ValueError(f"Unknown acoustic initial fields: {sorted(map(str, unknown))}")
+            for name, values in initial.items():
+                target = getattr(self, name)
+                if isinstance(values, PETSc.Vec):
+                    if (
+                        values.getSize() != target.getSize()
+                        or values.getOwnershipRange() != target.getOwnershipRange()
+                    ):
+                        raise ValueError(f"Initial {name} must match its field distribution")
+                    array = values.array_r
+                else:
+                    array = np.asarray(values, dtype=PETSc.ScalarType)
                 if array.shape != target.array.shape:
                     raise ValueError(f"Initial {name} must contain its owned field entries")
                 if not np.all(np.isfinite(array)):
                     raise ValueError(f"Initial {name} contains non-finite entries")
                 target.array[:] = array
+        except (ValueError, TypeError, OverflowError, PETSc.Error) as exc:
+            error = f"Invalid acoustic initial state: {exc}"
+        errors = [e for e in ops.Ms.comm.tompi4py().allgather(error) if e is not None]
+        if errors:
+            self.destroy()
+            raise ValueError(errors[0])
 
     def _vector(self, matrix: Any) -> Any:
         vector = matrix.createVecLeft()
@@ -506,6 +523,9 @@ class CoupledArrayRK4(_CoupledState):
                 return None
             indptr, indices, values = matrix.getValuesCSR()
             host = sparse.csr_matrix((values, indices, indptr), shape=matrix.getSize(), copy=True)
+            host.eliminate_zeros()
+            if host.nnz == 0 and matrix in (ops.Ds, ops.Dp):
+                return None
             host = sparse.diags(left) @ host @ sparse.diags(right)
             if not np.isfinite(host.data).all():
                 raise ValueError("Mass-normalized acoustic operator contains non-finite values")

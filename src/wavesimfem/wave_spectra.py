@@ -225,11 +225,17 @@ def phase_velocity_spectrum(
             # Peaks in the complete physically admissible interval, including
             # its boundaries, prevent a clipped second branch being hidden.
             local = coherence[row, allowed]
+            local_index = int(np.argmax(local))
             peaks, _ = find_peaks(local, prominence=0.08)
             peaks = list(peaks)
-            if local[0] > local[1]:
+            if local[0] > local[1] and (
+                local_index == 0 or local[0] - float(np.min(local[: local_index + 1])) >= 0.08
+            ):
                 peaks.append(0)
-            if local[-1] > local[-2]:
+            if local[-1] > local[-2] and (
+                local_index == len(local) - 1
+                or local[-1] - float(np.min(local[local_index:])) >= 0.08
+            ):
                 peaks.append(len(local) - 1)
             strong = [p for p in peaks if local[p] >= 0.5 * peak_coherence[row]]
             if len(strong) > 1:

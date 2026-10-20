@@ -118,9 +118,10 @@ def test_tone_burst_spectrum_is_centred_on_f0():
     assert freqs[np.argmax(spectrum)] == pytest.approx(F0, rel=0.02)
 
 
-def test_tone_burst_rejects_zero_cycles():
+@pytest.mark.parametrize("n_cycles", [0, -1, True, np.bool_(True), 1.5, np.nan, np.inf, "3"])
+def test_tone_burst_rejects_invalid_cycles(n_cycles):
     with pytest.raises(ValueError, match="n_cycles"):
-        sources.tone_burst(0.0, F0, 0)
+        sources.tone_burst(0.0, F0, n_cycles)
 
 
 def test_scalar_input_returns_float():

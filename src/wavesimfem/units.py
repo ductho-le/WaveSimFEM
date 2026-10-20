@@ -158,7 +158,7 @@ def parse_quantity(value: object, kind: QuantityKind) -> float:
         For booleans, non-finite values, malformed strings, or unknown units.
     """
     units = _PARSE_UNITS[kind]
-    if isinstance(value, bool):
+    if isinstance(value, (bool, np.bool_)):
         raise ValueError(f"expected a {kind}, got a boolean")
     if isinstance(value, (int, float, np.integer, np.floating)):
         out = float(value)

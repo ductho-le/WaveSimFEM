@@ -32,6 +32,7 @@ STRUCTURE_MODES = (
     "plate_in_halfspaces",
 )
 MATERIAL_MODELS = ("isotropic", "anisotropic", "viscoelastic", "fluid")
+FLUID_SHEAR_RATIO = 0.01
 
 _FLUID_SPEED_KEYS = ("c", "c_sound", "c_fluid", "speed")
 _FLUID_BULK_KEYS = ("K", "bulk_modulus", "bulk_mod")
@@ -627,8 +628,8 @@ def sizing_group_velocity(cfg: Mapping[str, Any], summary: Mapping[str, Any]) ->
     speed = reference_wave_speed(summary)
     plate = _free_isotropic_plate(summary)
     if plate is not None:
-        low = float(cfg.get("min_frequency") or float(cfg["f_center"]) / 5)
         high = float(cfg.get("max_frequency") or 3 * float(cfg["f_center"]))
+        low = float(cfg.get("min_frequency") or min(float(cfg["f_center"]) / 5, 0.5 * high))
         for frequency in np.geomspace(low, high, 32):
             delta = frequency * 1e-3
             args = (plate["thickness"], plate["c_L"], plate["c_T"])
@@ -902,6 +903,12 @@ def explicit_time_step_estimate(
     return float(cfg["CFL"]) * RK4_STABILITY_RADIUS / max(np.sqrt(bound_k), bound_c)
 
 
+#: Minimum number of time samples required by the FFT post-processing.
+MIN_POSTPROCESS_SAMPLES = 32
+#: Default sensor sampling rate in multiples of the analysis maximum frequency.
+AUTO_SAMPLES_PER_MESH_PERIOD = 20
+
+
 def sampled_time_grid(
     cfg: Mapping[str, Any], layout: MeshLayout, requested_dt: float
 ) -> tuple[float, int, int]:
@@ -911,7 +918,7 @@ def sampled_time_grid(
     reduce the requested maximum step, preserving its stability/accuracy limit.
     """
     dt, n_steps = time_grid(layout.duration, requested_dt)
-    min_samples = 32 if cfg.get("run_postprocess", True) else 2
+    min_samples = MIN_POSTPROCESS_SAMPLES if cfg.get("run_postprocess", True) else 2
     if cfg.get("run_postprocess", True) and n_steps + 1 < min_samples:
         raise ValueError(
             f"Postprocessing requires at least {min_samples} time samples "
@@ -920,7 +927,9 @@ def sampled_time_grid(
     stride = sample_stride(
         dt,
         n_steps,
-        float(cfg.get("sensor_sample_rate") or 20 * layout.mesh_frequency),
+        float(
+            cfg.get("sensor_sample_rate") or AUTO_SAMPLES_PER_MESH_PERIOD * layout.mesh_frequency
+        ),
         f_max=max(float(cfg.get("disp_f_max") or 2 * cfg["f_center"]), 3 * cfg["f_center"]),
         min_samples=min_samples,
     )
@@ -1021,7 +1030,10 @@ def preflight_estimate(cfg: dict[str, Any], rank: int = 0) -> dict[str, Any]:
         y = cfg.get("sensor_y")
         if y is None:
             y = summary["H_plate"] if summary["has_top_halfspace"] else summary["y_max"]
-        candidates = [r for r in summary["all_regions"] if r["y_bot"] <= y <= r["y_top"]]
+        tol = min(layout.h_y_per_region) * 1e-6
+        candidates = [
+            r for r in summary["all_regions"] if r["y_bot"] - tol <= y <= r["y_top"] + tol
+        ]
         if cfg.get("sensor_region") is not None:
             candidates = [r for r in candidates if r["name"] == cfg["sensor_region"]]
         observable = "displacement" if any(not r["is_acoustic"] for r in candidates) else "pressure"

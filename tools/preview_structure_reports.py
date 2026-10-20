@@ -116,6 +116,27 @@ def _branches(case, cfg, structure):
             _power_branch("Fast guided packet", f0, 3500, -0.06, 0.50, 1.6j, 6.0),
             _power_branch("Tissue-speed packet", f0, 1500, 0.0, 0.20, 1.0, 3.0),
         ]
+    if case == "07":
+        fluid = structure["plate_layers"][0]
+        c = fluid["c_L"]
+        return [
+            Branch(
+                "Fundamental acoustic waveguide packet",
+                lambda f: 2 * np.pi * f / c,
+                1.0,
+                0.0j,
+                0.0,
+                f"Direct acoustic propagation at c={c:g} m/s",
+            ),
+            _power_branch(
+                "Higher waveguide reflection packet", f0, c * 1.15, -0.08, 0.35, 0.0j, 4.0
+            ),
+        ]
+    if case == "08":
+        return [
+            _power_branch("Water-coupled flexural packet", f0, 2150, 0.14, 1.0, -0.45j, 12.0),
+            _power_branch("Water-coupled extensional packet", f0, 5200, -0.05, 0.45, 1.7j, 5.0),
+        ]
     return [
         _power_branch("Subsonic interface-like packet", f0, 1360, 0.035, 1.0, -0.65j, 2.0),
         _power_branch("Supersonic plate-like packet", f0, 3100, 0.12, 0.65, 0.60j, 22.0),
@@ -195,36 +216,74 @@ def create_synthetic_archive(config_path: Path, output_dir: Path) -> tuple[Path,
         )
     uy = np.fft.irfft(sy, n=samples, axis=0)
     ux = np.fft.irfft(sx, n=samples, axis=0)
-    amplitude = 1e-6 if case == "04" else 30e-9
+    regions = structure["all_regions"]
+    sensor_y = cfg.get("sensor_y")
+    if sensor_y is None:
+        sensor_y = structure["H_plate"] if structure["has_top_halfspace"] else structure["y_max"]
+    observable = cfg.get("sensor_observable", "auto")
+    if observable == "auto":
+        candidates = [
+            r
+            for r in regions
+            if r["y_bot"] - 1e-9 <= sensor_y <= r["y_top"] + 1e-9
+            and (cfg.get("sensor_region") is None or r["name"] == cfg["sensor_region"])
+        ]
+        observable = (
+            "displacement"
+            if any(not r.get("is_acoustic", False) for r in candidates)
+            else "pressure"
+        )
+    amplitude = 100.0 if observable == "pressure" else (1e-6 if case == "04" else 30e-9)
     scale = amplitude / np.max(np.abs(uy))
     uy, ux = scale * uy, scale * ux
     rng = np.random.default_rng(100 + int(case))
     uy += rng.normal(0, amplitude * 2e-4, uy.shape)
     ux += rng.normal(0, amplitude * 2e-4, ux.shape)
-    sensor_y = structure["H_plate"] if structure["has_top_halfspace"] else structure["y_max"]
     cfg.update(
         n_sensors=receivers,
         sensor_pitch=float(positions[1] - positions[0]),
         sensor_y=sensor_y,
+        sensor_observable=observable,
         duration=float(duration),
         sample_rate=float(1 / times[1]),
     )
     provenance = "SYNTHETIC prescribed wave packets; report demonstration, not an FEM result"
-    regions = structure["all_regions"]
     output_dir.mkdir(parents=True, exist_ok=True)
     archive_path = output_dir / "synthetic_sensor_data.npz"
+    if observable == "pressure":
+        observable_fields = {
+            "sensor_data_pressure": uy,
+            "sensor_observable": "pressure",
+            "sensor_units": "Pa",
+        }
+    elif observable in ("velocity", "particle_velocity"):
+        observable_fields = {
+            "sensor_data_vx": ux,
+            "sensor_data_vy": uy,
+            "sensor_observable": observable,
+            "sensor_units": "m/s",
+        }
+    else:
+        observable_fields = {
+            "sensor_data_x": ux,
+            "sensor_data_y": uy,
+            "sensor_observable": "displacement",
+            "sensor_units": "m",
+        }
+    optional_speeds = {}
+    if structure["c_T_plate_top"] is not None:
+        optional_speeds["c_T"] = structure["c_T_plate_top"]
     np.savez(
         archive_path,
         times=times,
         sensor_x=positions,
         sensor_y=sensor_y,
         load_y=sensor_y,
-        sensor_data_x=ux,
-        sensor_data_y=uy,
+        **observable_fields,
+        **optional_speeds,
         source_x=cfg["source_x"],
         f_center=f0,
         c_L=structure["c_L_plate_top"],
-        c_T=structure["c_T_plate_top"],
         plate_thickness=structure["H_plate"],
         structure_mode=cfg["structure_mode"],
         all_regions_names=np.array([r["name"] for r in regions]),
@@ -248,7 +307,7 @@ def create_synthetic_archive(config_path: Path, output_dir: Path) -> tuple[Path,
         "duration_s": duration,
         "spectral_support_Hz": list(band),
         "prescribed_backward_amplitude_ratio": 0.06,
-        "independent_noise_standard_deviation_m": amplitude * 2e-4,
+        "independent_noise_standard_deviation": amplitude * 2e-4,
         "seed": 100 + int(case),
         "branches": assumptions,
         "limitations": [
@@ -266,7 +325,8 @@ def main():
     parser.add_argument(
         "--formats", nargs="+", choices=("png", "pdf", "svg"), default=["png", "pdf"]
     )
-    parser.add_argument("--case", choices=[f"{i:02d}" for i in range(1, 7)], help="Render one case")
+    parser.add_argument("--case", choices=[f"{i:02d}" for i in range(1, 9)], help="Render one case")
+    parser.add_argument("--usetex", action="store_true", help="Render text with external LaTeX")
     args = parser.parse_args()
     from wavesimfem.wave_reports import write_structure_report
 
@@ -277,7 +337,9 @@ def main():
             continue
         destination = args.output / config.stem
         archive, description = create_synthetic_archive(config, destination)
-        result = write_structure_report(archive, destination, formats=args.formats, usetex=True)
+        result = write_structure_report(
+            archive, destination, formats=args.formats, usetex=args.usetex
+        )
         description["figures"] = result["figures"]
         description["title"] = result["profile"]["title"]
         records.append(description)

@@ -40,7 +40,7 @@ The framework supports guided- and surface-wave studies in metallic and composit
 | Analysis | Waveforms, B-scans, frequency–wavenumber spectra, structure-specific diagnostics, and optional mode or packet reports |
 | Reproducible data | Receiver archives with resolved inputs, acquisition geometry, realized time grids, backend and precision metadata, and source hashes |
 
-The elastic CUDA engine retains sparse operators and evolving state on the device. It evaluates stiffness and damping through a combined sparse block, using one internal-force product per RK4 stage, and buffers receiver samples before transferring them to host storage. The coupled acoustic engine also advances its fields on the selected device, but uploads forcing each stage and updates host field mirrors each step for acquisition. Mesh generation, finite element assembly, and spectral post-processing run on the CPU.
+The elastic CUDA engine retains sparse operators and evolving state on the device. It evaluates stiffness and damping through a combined sparse block, using one internal-force product per RK4 stage, and buffers receiver samples before transferring them to host storage. The coupled acoustic engine also advances its fields on the selected device, retains separable source vectors on the device, and updates host field mirrors on demand for acquisition and diagnostics. Generic forcing callbacks upload their loads each stage. Mesh generation, finite element assembly, and spectral post-processing run on the CPU.
 
 ## Physical model
 
@@ -84,6 +84,16 @@ wavesim --help
 > [!IMPORTANT]
 > Install the DOLFINx/PETSc/MPI stack through `environment.yml`. Installing the Python package with pip alone does not supply these runtime dependencies.
 
+On macOS, if FEM kernel compilation fails with `unknown architecture
+arm64e.x1-macos` while reading an Xcode SDK `.tbd` file, the Conda linker is
+incompatible with that SDK. With Xcode Command Line Tools installed, select
+Apple's compiler for that invocation:
+
+```bash
+CC=/usr/bin/clang LDSHARED="/usr/bin/clang -bundle -undefined dynamic_lookup" \
+  wavesim -c configs/07_fluid_acoustic.yaml --no-postprocess
+```
+
 ### Enable CUDA execution
 
 On a system with a supported NVIDIA GPU and a compatible CUDA driver, install the optional CuPy dependency:
@@ -122,7 +132,7 @@ wavesim --postprocess results_01_plate_aluminum_lamb/sensor_data.npz
 
 Standalone post-processing uses the archived physical model and generates waveforms, B-scans, frequency–wavenumber spectra, and the default structure report. A plotting configuration selects optional reports such as Lamb reconstruction. Without a plotting configuration, it uses built-in fonts and requires no LaTeX installation.
 
-Omit `--no-postprocess` to simulate and plot in one invocation. Example 01 sets `output.usetex: true`; change that setting to `false` for built-in rendering, or provide `latex`, `dvipng`, and Ghostscript. The reference template and Examples 02–06 already use `usetex: false`.
+Omit `--no-postprocess` to simulate and plot in one invocation. Example 01 sets `output.usetex: true`; change that setting to `false` for built-in rendering, or provide `latex`, `dvipng`, and Ghostscript. The reference template and Examples 02–08 already use `usetex: false`.
 
 `python -m wavesimfem` can replace `wavesim` in these commands.
 
@@ -347,12 +357,12 @@ The utility records simulation wall time and peak host memory, including setup, 
 
 The automated tests provide implementation and selected physics checks. Application-wide accuracy, speedup, dataset yield, and fluid-model validity require the corresponding reference and performance studies; the supplied configurations alone do not establish those results.
 
-The [acoustic validation report](docs/acoustic_validation.md) records analytical
-cavity, transmission, Scholte-wave, and loaded-plate comparisons, including a
-matched comparison with the legacy approximation. Reproduce its measured JSON:
+The acoustic verification suite checks analytical cavity modes, fluid-layer
+transmission, Scholte-wave speed, and fluid-loaded plate dispersion, including a
+matched comparison with the legacy regularized-elastic approximation:
 
 ```bash
-python tools/verify_acoustics.py --case all --output docs/acoustic_validation_results.json
+python tools/verify_acoustics.py --case all --output results_acoustic_validation.json
 ```
 
 ## Development
@@ -360,7 +370,7 @@ python tools/verify_acoustics.py --case all --output docs/acoustic_validation_re
 ```text
 WaveSimFEM/
 ├── src/wavesimfem/   # Configuration, FEM assembly, integration, acquisition, and analysis
-├── configs/            # Annotated reference configuration and six application examples
+├── configs/            # Annotated reference configuration and eight application examples
 ├── tests/              # Unit, numerical, physics, backend, MPI, and CLI checks
 ├── tools/              # CPU launcher, benchmarking, refinement, and report previews
 ├── environment.yml     # Scientific-computing environment

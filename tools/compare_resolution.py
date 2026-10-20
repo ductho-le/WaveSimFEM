@@ -14,13 +14,17 @@ import math
 import time
 from pathlib import Path
 
-import numpy as np
-import yaml
-from mpi4py import MPI
+from wavesimfem.parallel import limit_threads_per_rank
 
-from wavesimfem import run_simulation, set_verbosity
-from wavesimfem.config import parse_and_resolve_config
-from wavesimfem.storage import atomic_output
+limit_threads_per_rank()
+
+import numpy as np  # noqa: E402
+import yaml  # noqa: E402
+from mpi4py import MPI  # noqa: E402
+
+from wavesimfem import run_simulation, set_verbosity  # noqa: E402
+from wavesimfem.config import parse_and_resolve_config  # noqa: E402
+from wavesimfem.storage import atomic_output  # noqa: E402
 
 
 def resolution_variants(cfg, refinement_factor, step_factor):
@@ -47,11 +51,29 @@ def resolution_variants(cfg, refinement_factor, step_factor):
     return control, [refined, temporal, dict(cfg)]
 
 
+def _extract_history(data) -> np.ndarray:
+    """Return sensor histories with shape ``(n_times, n_sensors, n_components)``."""
+    observable = (
+        str(np.asarray(data["sensor_observable"]).item())
+        if "sensor_observable" in data
+        else ("pressure" if "sensor_data_pressure" in data else "displacement")
+    )
+    if observable == "pressure":
+        return np.asarray(data["sensor_data_pressure"], dtype=float)[..., None]
+    if observable in ("velocity", "particle_velocity"):
+        return np.stack([data["sensor_data_vx"], data["sensor_data_vy"]], axis=-1)
+    return np.stack([data["sensor_data_x"], data["sensor_data_y"]], axis=-1)
+
+
 def check_resumed_configuration(saved, requested):
     """Do not silently compare cached runs made with different model inputs."""
     ignored = {"runtime", "load_y"}
     if requested.get("sensor_y") is None:
         ignored.add("sensor_y")  # the solver saves the resolved automatic height
+    if requested.get("sensor_region") is None:
+        ignored.add("sensor_region")
+    if requested.get("sensor_observable") == "auto":
+        ignored.add("sensor_observable")
     differences = [
         key
         for key, value in requested.items()
@@ -111,9 +133,9 @@ def main():
             wall = comm.allreduce(time.perf_counter() - start, op=MPI.MAX)
         if comm.rank != 0:
             continue
-        with np.load(archive) as data:
+        with np.load(archive, allow_pickle=False) as data:
             times = data["times"]
-            values = np.stack([data["sensor_data_x"], data["sensor_data_y"]], axis=-1)
+            values = _extract_history(data)
             saved = yaml.safe_load(str(data["simulation_config_yaml"]))
             check_resumed_configuration(saved, current)
             runtime = saved["runtime"]
@@ -133,13 +155,13 @@ def main():
     if comm.rank != 0:
         return
     # Interpolate each reference onto the candidate's sample grid. Sampling is
-    # far denser than the source band; compare both components without shifting.
+    # far denser than the source band; compare all components without shifting.
     for index, reference in ((1, 0), (2, 1), (2, 0)):
         times, values = histories[index]
         ref_times, ref_values = histories[reference]
         interpolated = np.empty_like(values)
         for sensor in range(values.shape[1]):
-            for component in range(2):
+            for component in range(values.shape[2]):
                 interpolated[:, sensor, component] = np.interp(
                     times, ref_times, ref_values[:, sensor, component]
                 )

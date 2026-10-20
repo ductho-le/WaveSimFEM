@@ -9,7 +9,7 @@
 #   Rayleigh-wave velocity measurement for steel surface inspection.
 # Model and numerical scope
 #   Flat, homogeneous 2D plane-strain halfspace approximation. The sizing band
-#   extends from 0.5 to 2 MHz; figures display 0.5-1.5 MHz around the pulse peak.
+#   extends from 0.5 to 1.5 MHz; figures display 0 to 2 MHz around the pulse peak.
 #   Q2 elements discretise the truncated depth and lateral absorbing regions.
 #   Compare the measured speed with c_R ~ 2.98 km/s and establish mesh, time-step,
 #   and truncation-depth convergence over the 120-180 mm source-receiver offsets.

@@ -22,7 +22,7 @@ from petsc4py import PETSc
 
 from wavesimfem.materials import compute_mesh_layout, structure_from_config
 from wavesimfem.numerics import PointSensors
-from wavesimfem.sources import DEFAULT_N_CYCLES
+from wavesimfem.sources import _resolve_n_cycles
 
 
 def acoustic_waveform(t: float, cfg: dict[str, Any]) -> tuple[float, float, float]:
@@ -36,7 +36,7 @@ def acoustic_waveform(t: float, cfg: dict[str, Any]) -> tuple[float, float, floa
     if t < 0:
         return 0.0, 0.0, 0.0
     if cfg["source_type"] == "tone_burst":
-        n = cfg.get("n_cycles") or DEFAULT_N_CYCLES
+        n = _resolve_n_cycles(cfg.get("n_cycles"))
         if t > n / f:
             return 0.0, 0.0, 0.0
         w, a = 2 * np.pi * f, 2 * np.pi * f / n
@@ -477,7 +477,10 @@ def _source_forms(
                 "A traction source must act on a solid or explicitly regularized_elastic region; choose an acoustic source_kind for fluid"
             )
         fx, fy = cfg["source_fx"], cfg["source_fy"]
-        direction = ufl.as_vector([fx, fy]) / np.hypot(fx, fy)
+        norm = float(np.hypot(fx, fy))
+        if not np.isfinite(norm) or norm <= 0.0:
+            raise ValueError("source_fx and source_fy must not both be zero")
+        direction = ufl.as_vector([fx / norm, fy / norm])
         if source_face == "interface":
             facet = locate_entities(
                 domain, fdim, lambda z: np.isclose(z[1], source_y, atol=tol, rtol=0)
@@ -676,9 +679,16 @@ def build_acoustic_problem(
     full = [_assemble(form) for form in _field_forms(ctx, V, Q)]
     loads = (_vector(ls), _vector(lp))
     try:
+        from wavesimfem.solvers import _drop_zero_entries
+
         restricted = [
             a.createSubMatrix(ui if i < 3 else pi, ui if i < 3 else pi) for i, a in enumerate(full)
         ]
+        for idx in (2, 5):
+            if restricted[idx].getSize()[0] > 0:
+                raw = restricted[idx]
+                restricted[idx] = _drop_zero_entries(raw)
+                raw.destroy()
         ops = AcousticOperators(*restricted, coupling_full.createSubMatrix(ui, pi))
         energy = (full[3].createSubMatrix(ei, ei), full[4].createSubMatrix(ei, ei))
         forcing, source_vectors = _separable_forcing(
@@ -1120,5 +1130,5 @@ def run_acoustic_simulation(cfg: dict[str, Any], summary: dict[str, Any]) -> tup
                     usetex=cfg["usetex"],
                     observable=problem.observable,
                 )
-        comm.Barrier()
-        return path, cfg["output_dir"]
+    comm.Barrier()
+    return path, cfg["output_dir"]

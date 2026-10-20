@@ -212,8 +212,8 @@ traction to the plate and selects solid displacement
 on the plate side of the upper interface.
 
 See examples [07](07_fluid_acoustic.yaml) and [08](08_fluid_solid_acoustic.yaml)
-for runnable pure-fluid and coupled inputs, and the
-[implementation notes](../docs/acoustics_design.md) for equations and validation.
+for runnable pure-fluid and coupled inputs, and `tools/verify_acoustics.py` for
+analytical continuum validation benchmarks.
 
 ### Excitation
 
@@ -282,6 +282,8 @@ superstrate where present. Sponge depths do not create additional regions.
 | 04 | 180 | `[30, 10]` | 1 m |
 | 05 | 757 | `[6, 22, 6]` | 0.185 mm |
 | 06 | 600 | `[25, 6, 25]` | 0.233 mm |
+| 07 | 100 | `[8]` | 0.250 mm |
+| 08 | 320 | `[32, 4]` | 0.250 mm |
 
 A useful initial Q2 resolution is 6–10 elements per shortest retained physical
 wavelength, with sufficient rows to resolve through-thickness gradients. Guided
@@ -352,7 +354,7 @@ Postprocessing can still require substantial memory.
 All figures use 190 mm width and 10-point text, including tick numbers,
 legends and colourbars. `output.usetex: false` is the default and uses Matplotlib's
 bundled serif fonts and mathtext, so no LaTeX installation is needed. The template
-and examples 02–06 select this setting. Example 01 selects `output.usetex: true`
+and examples 02–08 select this setting. Example 01 selects `output.usetex: true`
 for external LaTeX rendering; this requires `latex`,
 `dvipng` and Ghostscript. The legacy `auto` setting uses LaTeX when its toolchain
 is available, otherwise built-in rendering. Panel sizing and styling stay the
@@ -370,7 +372,7 @@ wavesim --postprocess results_03_halfspace_steel_rayleigh/sensor_data.npz \
 
 ### Wave-characterisation reports
 
-All six examples also enable `postprocess.structure_analysis: true`. This adds
+All eight examples also enable `postprocess.structure_analysis: true`. This adds
 two four-panel reports in `wave_physics/`: dispersion/mode interpretation and
 propagation/component balance. Analysis follows the archived structure:
 free-plate Lamb references, halfspace Rayleigh/polarization comparisons,
@@ -402,7 +404,7 @@ The supplied starting bands are:
 | Configuration | Report frequency band |
 | :-- | :-- |
 | Template | 0.3–0.8 MHz |
-| 01 aluminium plate (disabled) | 0.5–1.5 MHz |
+| 01 aluminium plate (disabled) | 0–2 MHz |
 | 02 CFRP plate (disabled) | 0–2 MHz |
 | 03 steel halfspace | 0.7–1.3 MHz |
 | 04 soil/bedrock | 8–25 Hz |

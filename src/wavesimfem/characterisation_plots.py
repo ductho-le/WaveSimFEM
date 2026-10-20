@@ -201,46 +201,51 @@ def render_characterisation(report, arrays, destination, formats, dpi=300):
 
     # Two columns preserve room for 10 pt labels at the fixed publication width.
     nrows = int(np.ceil(len(selected) / 2))
-    fig = _figure(76 * nrows)
-    gs = fig.add_gridspec(
-        nrows,
-        2,
-        left=0.105,
-        right=0.88,
-        bottom=0.105,
-        top=0.955,
-        hspace=0.34,
-        wspace=0.35,
-    )
-    axes = [fig.add_subplot(gs[j // 2, j % 2]) for j in range(len(selected))]
-    motion_limit = (
-        max(float(np.max(np.abs(uu(ux[:, selected])))), float(np.max(np.abs(uu(uy[:, selected])))))
-        * 1.08
-        or 1
-    )
-    norm = Normalize(td[0], td[-1])
-    image = None
-    for j, (ax, i) in enumerate(zip(axes, selected, strict=True)):
-        points = np.column_stack((uu(ux[:, i]), uu(uy[:, i])))
-        segments = np.stack((points[:-1], points[1:]), axis=1)
-        active = (envelope[:-1, i] > 0.05 * amplitude[i]) | (envelope[1:, i] > 0.05 * amplitude[i])
-        image = LineCollection(
-            segments[active], cmap="viridis", norm=norm, linewidths=1.2, rasterized=True
-        )
-        image.set_array(td[:-1][active])
-        ax.add_collection(image)
-        ax.set(
-            xlabel=_label(f"${symbol}_x$", uu),
-            ylabel=_label(f"${symbol}_y$", uu),
-            title=f"({chr(97 + j)}) $x={xd[i]:.3g}$ {xu.tex}",
-            xlim=(-motion_limit, motion_limit),
-            ylim=(-motion_limit, motion_limit),
-        )
-        ax.set_aspect("equal", adjustable="box")
-        _line_axes(ax)
-    cax = fig.add_axes((0.9, 0.2, 0.017, 0.64))
-    fig.colorbar(image, cax=cax, label=_label("Time", tu))
     if observable != "pressure":
+        fig = _figure(76 * nrows)
+        gs = fig.add_gridspec(
+            nrows,
+            2,
+            left=0.105,
+            right=0.88,
+            bottom=0.105,
+            top=0.955,
+            hspace=0.34,
+            wspace=0.35,
+        )
+        axes = [fig.add_subplot(gs[j // 2, j % 2]) for j in range(len(selected))]
+        motion_limit = (
+            max(
+                float(np.max(np.abs(uu(ux[:, selected])))),
+                float(np.max(np.abs(uu(uy[:, selected])))),
+            )
+            * 1.08
+            or 1
+        )
+        norm = Normalize(td[0], td[-1])
+        image = None
+        for j, (ax, i) in enumerate(zip(axes, selected, strict=True)):
+            points = np.column_stack((uu(ux[:, i]), uu(uy[:, i])))
+            segments = np.stack((points[:-1], points[1:]), axis=1)
+            active = (envelope[:-1, i] > 0.05 * amplitude[i]) | (
+                envelope[1:, i] > 0.05 * amplitude[i]
+            )
+            image = LineCollection(
+                segments[active], cmap="viridis", norm=norm, linewidths=1.2, rasterized=True
+            )
+            image.set_array(td[:-1][active])
+            ax.add_collection(image)
+            ax.set(
+                xlabel=_label(f"${symbol}_x$", uu),
+                ylabel=_label(f"${symbol}_y$", uu),
+                title=f"({chr(97 + j)}) $x={xd[i]:.3g}$ {xu.tex}",
+                xlim=(-motion_limit, motion_limit),
+                ylim=(-motion_limit, motion_limit),
+            )
+            ax.set_aspect("equal", adjustable="box")
+            _line_axes(ax)
+        cax = fig.add_axes((0.9, 0.2, 0.017, 0.64))
+        fig.colorbar(image, cax=cax, label=_label("Time", tu))
         finish(fig, "particle_motion")
 
     dt = t[1] - t[0]

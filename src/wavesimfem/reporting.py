@@ -56,7 +56,7 @@ def warn(msg: str) -> None:
 
 def format_banner_box(lines: Sequence[str], min_width: int = 60) -> str:
     """Format lines inside a double-bordered Unicode box."""
-    max_len = max(len(line) for line in lines)
+    max_len = max((len(line) for line in lines), default=0)
     inner_width = max(max_len + 4, min_width)
     top = "╔" + "═" * inner_width + "╗"
     bot = "╚" + "═" * inner_width + "╝"
@@ -74,7 +74,7 @@ def print_structure_table(summary: dict[str, Any], rank: int = 0, f0: float | No
         return
 
     regions = summary["all_regions"]
-    th_unit = length_unit(min(r["thickness"] for r in regions))
+    th_unit = length_unit(min((r["thickness"] for r in regions), default=1.0))
     widths = [5, 27, 12, 15, 11, 11, 11, 14]
     w_no, w_name, w_th, w_mod, w_rho, w_cl, w_ct, w_role = widths
     top = "┌" + "┬".join("─" * c for c in widths) + "┐"

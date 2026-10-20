@@ -322,6 +322,41 @@ def test_acoustic_explicit_refuses_uncertified_step_and_cuda():
         _destroy(ops)
 
 
+@pytest.mark.parametrize("method", [CoupledRK4, CoupledNewmark])
+@pytest.mark.parametrize("invalid", ["conversion", "shape", "nonfinite", "vector", "mapping"])
+def test_distributed_initial_validation_is_collective(method, invalid):
+    ops = _operators(comm=PETSc.COMM_WORLD)
+    comm = ops.Ms.comm.tompi4py()
+    initial, _, _ = _mode_initial(ops)
+    vector = ops.Mp.createVecLeft()
+    vector.set(0.0)
+    if comm.rank == 0:
+        if invalid == "conversion":
+            initial["p"] = ["not a number"]
+        elif invalid == "shape":
+            initial["p"] = np.zeros((2, 2))
+        elif invalid == "nonfinite":
+            initial["p"][:] = np.nan
+        elif invalid == "vector":
+            vector.array[:] = np.nan
+            initial["p"] = vector
+        else:
+            initial = []
+    try:
+        with pytest.raises(ValueError, match="Invalid acoustic initial state"):
+            if method is CoupledNewmark:
+                method(ops, 0.01, initial=initial)
+            else:
+                method(ops, initial=initial)
+        # Validation must leave the communicator and caller-owned operators usable.
+        assert comm.allreduce(1) == comm.size
+        solver = method(ops, 0.01) if method is CoupledNewmark else method(ops)
+        solver.destroy()
+    finally:
+        vector.destroy()
+        _destroy(ops)
+
+
 @pytest.mark.parametrize("method", [CoupledRK4, CoupledArrayRK4, CoupledNewmark])
 def test_closed_cavity_constant_pressure_mode_is_preserved(method):
     """The physical zero-frequency pressure mode must survive an exactly singular Kp."""

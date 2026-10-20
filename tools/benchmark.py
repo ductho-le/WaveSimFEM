@@ -31,13 +31,21 @@ def peak_rss_bytes(value: float | None = None, system: str | None = None) -> int
     return int(value * (1 if system == "Darwin" else 1024))
 
 
+_RESERVED_OVERRIDES = frozenset({"output_dir", "run_postprocess", "write_vtx"})
+
+
 def parse_override(text: str) -> tuple[str, object]:
     """Parse a flat config key and JSON value; config validation owns the schema."""
     key, separator, value = text.partition("=")
     if not separator or not key.strip():
         raise argparse.ArgumentTypeError("Expected KEY=JSON_VALUE, for example duration=1e-5")
+    clean_key = key.strip()
+    if clean_key in _RESERVED_OVERRIDES:
+        raise argparse.ArgumentTypeError(
+            f"Override key {clean_key!r} is managed by the benchmark harness"
+        )
     try:
-        return key.strip(), json.loads(value)
+        return clean_key, json.loads(value)
     except json.JSONDecodeError as exc:
         raise argparse.ArgumentTypeError(f"Invalid JSON override {text!r}: {exc.msg}") from exc
 
@@ -95,7 +103,7 @@ def _run(args, MPI):
     import numpy as np
     import yaml
 
-    from wavesimfem import load_config, run_simulation, set_verbosity
+    from wavesimfem import load_config, parse_and_resolve_config, run_simulation, set_verbosity
     from wavesimfem.config import flatten_config
     from wavesimfem.parallel import THREAD_ENV_VARS
 
@@ -115,6 +123,7 @@ def _run(args, MPI):
         cfg.update(dict(args.overrides))
         # Benchmark cost excludes plotting and VTX snapshots; output archives are included.
         cfg.update(output_dir=str(output / "simulation"), run_postprocess=False, write_vtx=False)
+        parse_and_resolve_config(custom_cfg=dict(cfg))
         config_sha = hashlib.sha256(args.config.read_bytes()).hexdigest()
         output.mkdir(parents=True, exist_ok=False)
     cfg = comm.bcast(cfg, root=0)

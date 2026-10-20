@@ -27,7 +27,7 @@ from wavesimfem.analysis import (
 )
 from wavesimfem.reporting import log
 from wavesimfem.storage import atomic_output
-from wavesimfem.structure_analysis import reference_dispersion, structure_profile
+from wavesimfem.structure_analysis import _scalar, reference_dispersion, structure_profile
 from wavesimfem.units import (
     frequency_unit,
     length_unit,
@@ -50,7 +50,7 @@ def _finite(value):
 def _read_record(path):
     with np.load(path, allow_pickle=False) as archive:
         data = dict(archive)
-    observable = str(data.get("sensor_observable", "displacement"))
+    observable = str(_scalar(data, "sensor_observable", "displacement"))
     if "sensor_data_pressure" in data and "sensor_observable" not in data:
         observable = "pressure"
     if observable == "pressure":
@@ -63,7 +63,7 @@ def _read_record(path):
         raise ValueError(f"Unknown archived sensor_observable {observable!r}")
     data["sensor_observable"] = observable
     data.setdefault("sensor_units", unit)
-    if str(data["sensor_units"]) != unit:
+    if str(_scalar(data, "sensor_units")) != unit:
         raise ValueError(f"Archived {observable} history must use SI units '{unit}'")
     missing = {"times", "sensor_x", keys[1]} - data.keys()
     if missing:
@@ -596,11 +596,14 @@ def write_structure_report(
             klim = min(klim, float(data[key]) * factor)
         elif "k_max_disp" in data:
             klim = min(klim, float(data["k_max_disp"]) * 1000)
-    kfloor = (
-        parse_quantity(k_min, "wavenumber")
-        if k_min is not None
-        else float(data.get("disp_k_min", 0.0))
-    )
+    if k_min is not None:
+        kfloor = parse_quantity(k_min, "wavenumber")
+    elif "disp_k_min" in data:
+        kfloor = float(data["disp_k_min"])
+    elif "k_min_disp" in data:
+        kfloor = float(data["k_min_disp"]) * 1000
+    else:
+        kfloor = 0.0
     if not np.isfinite([kfloor, klim]).all() or not 0 <= kfloor < klim:
         raise ValueError("Wave report wavenumber limits require finite 0 <= min < max")
     ku = wavenumber_unit(length_unit(2 * np.pi / klim))
@@ -612,7 +615,7 @@ def write_structure_report(
     summary = dict(
         selected_component="pressure" if scalar else "y" if component else "x",
         sensor_observable=observable,
-        sensor_units=str(data["sensor_units"]),
+        sensor_units=str(_scalar(data, "sensor_units")),
         direction=direction_note,
         selected_receiver_count=len(side),
         total_receiver_count=len(x),
@@ -790,8 +793,13 @@ def write_structure_report(
         )
         if scalar:
             ax = axes[1]
-            for i in sorted({0, len(x) // 2, len(x) - 1}):
-                ax.plot(tu(t), uu(uy[:, i]), label=f"x = {xu(offsets[i]):.3g} {xu.label}")
+            for idx, i in enumerate(sorted({0, len(x) // 2, len(x) - 1})):
+                ax.plot(
+                    tu(t),
+                    uu(uy[:, i]),
+                    color=_COLORS[idx % len(_COLORS)],
+                    label=f"$x = {xu(offsets[i]):.3g}$ {xu.tex}",
+                )
             ax.set(
                 xlabel=_label("Time", tu),
                 ylabel=_label("Pressure", uu),
@@ -819,9 +827,10 @@ def write_structure_report(
         k = spectra["wavenumber"]
         # Exclude the central Hann lobe and Nyquist bin, whose sign is ambiguous.
         dk = 2 * np.pi / (len(xs) * pitch)
+        k_lo, k_hi = 2 * dk * (1 - 1e-12), np.pi / pitch * (1 - 1e-12)
         selected = spectra["images"][component]
-        positive = np.sum(selected[:, (k >= 2 * dk) & (k < np.pi / pitch)], axis=1)
-        negative = np.sum(selected[:, (k <= -2 * dk) & (k > -np.pi / pitch)], axis=1)
+        positive = np.sum(selected[:, (k >= k_lo) & (k < k_hi)], axis=1)
+        negative = np.sum(selected[:, (k <= -k_lo) & (k > -k_hi)], axis=1)
         total = positive + negative
         band_power = spectra["power"][component]
         supported = (band_power >= (band_power.max() or 1) * 1e-3) & (total > 0)
@@ -830,7 +839,7 @@ def write_structure_report(
         ax.plot(fu(spectra["frequency"]), 100 * fraction, color=_PURPLE, lw=1.5)
         ax.set(
             xlabel=_label("Frequency", fu),
-            ylabel=f"{'Opposite-direction' if known_side else '-x'} power [\\%]",
+            ylabel=f"{'Opposite-direction' if known_side else '-x'} power [%]",
             title="(d) Directionality",
             ylim=(0, 100),
             xlim=fu(np.array(band)),
