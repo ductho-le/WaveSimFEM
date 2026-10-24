@@ -14,8 +14,9 @@ from wavesimfem import __version__
 from wavesimfem.config import generate_template_config, parse_and_resolve_config
 from wavesimfem.device import DEVICE_CHOICES_HELP, DeviceUnavailableError
 from wavesimfem.materials import STRUCTURE_MODES, preflight_estimate
-from wavesimfem.reporting import log, set_verbosity
+from wavesimfem.reporting import log, set_verbosity, warn
 from wavesimfem.solvers import mpi_fail_fast, run_simulation
+from wavesimfem.units import parse_quantity
 
 comm = MPI.COMM_WORLD
 rank = comm.rank
@@ -45,6 +46,31 @@ def _exit_with_error(
     sys.exit(code)
 
 
+def _plotting_preflight_error(cfg: dict) -> str | None:
+    """Check figure prerequisites before any solve; identical result on every rank.
+
+    Only rank 0 plots, so only it imports Matplotlib; the verdict is broadcast so
+    all ranks exit together instead of failing after a long simulation.
+    """
+    error = None
+    if rank == 0:
+        from wavesimfem.analysis import resolve_usetex
+
+        try:
+            resolve_usetex(cfg["usetex"])
+        except (RuntimeError, ValueError) as exc:
+            error = str(exc)
+    return comm.bcast(error, root=0)
+
+
+def _frequency_arg(text: str) -> float:
+    """Argparse type: SI number or quantity with a unit (``"2MHz"``), in Hz."""
+    try:
+        return parse_quantity(text, "frequency")
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Construct the ``wavesim`` argument parser."""
     parser = argparse.ArgumentParser(
@@ -66,6 +92,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="PATH",
         help="Generate a fully commented template YAML configuration file and exit",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Allow --generate-config to overwrite an existing file",
     )
     parser.add_argument(
         "--solver",
@@ -126,15 +157,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--min-frequency",
-        type=float,
+        type=_frequency_arg,
         default=None,
-        help="Analysis/sizing lower frequency bound override [Hz]",
+        metavar="Q",
+        help="Analysis/sizing lower frequency bound override; Hz or with a unit, e.g. 200kHz",
     )
     parser.add_argument(
         "--max-frequency",
-        type=float,
+        type=_frequency_arg,
         default=None,
-        help="Analysis/sampling band and implicit accuracy frequency [Hz] "
+        metavar="Q",
+        help="Analysis/sampling band and implicit accuracy frequency; Hz or with a unit "
         "(defaults to 3*f_center; does not change the mesh)",
     )
     parser.add_argument(
@@ -179,7 +212,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.generate_config:
         if rank == 0:
             try:
-                generate_template_config(args.generate_config)
+                generate_template_config(args.generate_config, overwrite=args.force)
             except OSError as exc:
                 _exit_with_error(
                     f"cannot write template configuration: {exc}",
@@ -214,6 +247,17 @@ def main(argv: Sequence[str] | None = None) -> None:
     except (OSError, ValueError, TypeError) as exc:
         _exit_with_error(f"invalid configuration: {exc}", EXIT_USAGE, exc=exc, verbose=args.verbose)
 
+    will_postprocess = bool(args.postprocess or cfg["run_postprocess"]) and not args.no_postprocess
+    if will_postprocess:
+        error = _plotting_preflight_error(cfg)
+        if error is not None:
+            if not args.dry_run:
+                _exit_with_error(f"invalid configuration: {error}", EXIT_USAGE)
+            if rank == 0:
+                # Dry runs are often made on a login node without the plotting
+                # toolchain, so report rather than fail.
+                warn(f"post-processing would fail on this machine: {error}")
+
     # Preflight dry-run path
     if args.dry_run:
         try:
@@ -244,7 +288,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     # Step 2: Signal Processing (Rank 0 only)
     if rank == 0:
-        if (args.postprocess or cfg["run_postprocess"]) and not args.no_postprocess:
+        if will_postprocess:
             try:
                 from wavesimfem.analysis import plot_full_analysis
 
@@ -289,7 +333,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                         formats=cfg["figure_formats"],
                         usetex=cfg["usetex"],
                     )
-            except (OSError, ValueError, TypeError) as exc:
+            except (OSError, ValueError, TypeError, RuntimeError) as exc:
+                # RuntimeError covers plotting-tool failures (e.g. LaTeX).
                 _exit_with_error(str(exc), EXIT_USAGE, exc=exc, verbose=args.verbose)
 
         log(f"\n{'═' * 58}")

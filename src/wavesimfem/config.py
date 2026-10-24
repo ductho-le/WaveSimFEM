@@ -808,6 +808,28 @@ def _validate_simulation(cfg: dict[str, Any], source: str) -> None:
     _resolve_automatic_values(cfg, summary)
 
 
+def _effective_sensor_observable(cfg: Mapping[str, Any], summary: Mapping[str, Any]) -> str:
+    """Resolve ``sensors.observable`` as the solver will record it."""
+    observable = str(cfg.get("sensor_observable", "auto"))
+    if observable != "auto":
+        return observable
+    if not summary.get("has_acoustic"):
+        return "displacement"
+    sensor_y = cfg.get("sensor_y")
+    if sensor_y is None:
+        sensor_y = summary["H_plate"] if summary["has_top_halfspace"] else summary["y_max"]
+    tol = min(r["thickness"] for r in summary["all_regions"]) * 1e-6
+    candidates = [
+        r
+        for r in summary["all_regions"]
+        if r["y_bot"] - tol <= float(sensor_y) <= r["y_top"] + tol
+        and (cfg.get("sensor_region") is None or r["name"] == cfg["sensor_region"])
+    ]
+    if candidates and all(r.get("is_acoustic", False) for r in candidates):
+        return "pressure"
+    return "displacement"
+
+
 def _apply_cli_overrides(resolved: dict[str, Any], args: argparse.Namespace) -> None:
     overrides = {
         "solver": "solver_type",
@@ -911,12 +933,37 @@ def parse_and_resolve_config(
     _validate_output_options(resolved)
     from wavesimfem.characterisation import validate_options
 
-    resolved["wave_characterisation"] = validate_options(resolved["wave_characterisation"])
+    raw_wc = resolved["wave_characterisation"]
+    explicit_wc_component = raw_wc.get("component") if isinstance(raw_wc, Mapping) else None
+    resolved["wave_characterisation"] = validate_options(raw_wc)
     if not isinstance(resolved["lamb_modes"], (bool, np.bool_)):
         raise ValueError("postprocess.lamb_modes must be boolean")
     resolved["lamb_modes"] = bool(resolved["lamb_modes"])
     if validate_simulation:
         _validate_simulation(resolved, config_source)
+        if resolved["run_postprocess"]:
+            if resolved["lamb_modes"]:
+                # Fail before the solve rather than after hours of compute.
+                from wavesimfem.lamb import lamb_eligibility_error
+
+                reason = lamb_eligibility_error(resolved)
+                if reason is not None:
+                    raise ValueError(f"postprocess.lamb_modes: {reason}")
+            wc = resolved["wave_characterisation"]
+            if wc and wc["enabled"]:
+                observable = _effective_sensor_observable(resolved, structure_from_config(resolved))
+                if observable == "pressure":
+                    if explicit_wc_component in ("x", "y"):
+                        raise ValueError(
+                            "postprocess.wave_characterisation: Pressure archives do not "
+                            "contain horizontal/vertical motion components"
+                        )
+                    wc["component"] = "pressure"
+                elif explicit_wc_component == "pressure":
+                    raise ValueError(
+                        "postprocess.wave_characterisation: The selected archive does not "
+                        "contain pressure sensors"
+                    )
     return resolved
 
 
@@ -1034,7 +1081,16 @@ output:
 """
 
 
-def generate_template_config(output_path: str) -> None:
-    """Write the annotated YAML template configuration."""
+def generate_template_config(output_path: str, *, overwrite: bool = False) -> None:
+    """Write the annotated YAML template configuration.
+
+    Raises
+    ------
+    FileExistsError
+        If ``output_path`` exists and ``overwrite`` is false, so an edited
+        configuration is never replaced by accident.
+    """
+    if not overwrite and os.path.lexists(output_path):
+        raise FileExistsError(f"{output_path} already exists (use --force to overwrite)")
     with atomic_output(output_path) as f:
         f.write(TEMPLATE_CONFIG)

@@ -44,6 +44,59 @@ def test_exact_point_interpolation():
         PointSensors(domain, np.array([[2.0, 0.0, 0.0]]))
 
 
+@pytest.mark.parametrize(
+    "element",
+    [("Lagrange", 2, (2,)), ("Lagrange", 2), ("DG", 2, (2,))],
+    ids=["vector", "scalar", "dg-vector"],
+)
+def test_exact_point_evaluation_matrix_matches_eval(element):
+    """The cached sensor operator reproduces Function.eval, ghosts included."""
+    domain = mesh.create_unit_square(MPI.COMM_WORLD, 5, 4, cell_type=mesh.CellType.quadrilateral)
+    space = fem.functionspace(domain, element)
+    field = fem.Function(space)
+    rng = np.random.default_rng(7 + domain.comm.rank)
+    field.x.array[:] = rng.standard_normal(field.x.array.size)
+    field.x.scatter_forward()
+    # Points on shared edges and vertices exercise neighbouring-cell colouring.
+    points = np.array([[x, y, 0.0] for x in np.linspace(0.0, 1.0, 11) for y in (0.0, 0.5, 0.83)])
+    sensors = PointSensors(domain, points)
+    expected = field.eval(sensors.points, sensors.cells).reshape(len(sensors.indices), -1)
+    np.testing.assert_allclose(sensors.sample(field), expected, rtol=1e-13, atol=1e-13)
+    field.x.array[:] *= -2.0
+    np.testing.assert_allclose(sensors.sample(field), -2.0 * expected, rtol=1e-13, atol=1e-13)
+    assert len(sensors._evaluators) == 1
+    if space.num_sub_spaces:
+        component = field.sub(1)
+        np.testing.assert_allclose(
+            sensors.sample(component)[:, 0], -2.0 * expected[:, 1], rtol=1e-13, atol=1e-13
+        )
+    from wavesimfem.numerics import point_evaluation_matrix
+
+    with pytest.raises(ValueError, match="valid local cell"):
+        point_evaluation_matrix(field, np.array([[0.1, 0.1, 0.0]]), np.array([-1]))
+
+
+def test_point_sensor_operator_is_rank_local(monkeypatch):
+    """Only sensor-owning ranks build the operator, so it must not allocate a
+    Function (collective neighbourhood setup) and must restore the field."""
+    domain = mesh.create_unit_square(MPI.COMM_WORLD, 6, 6)
+    field = fem.Function(fem.functionspace(domain, ("Lagrange", 2, (2,))))
+    field.interpolate(lambda x: np.vstack([x[0] ** 2, x[0] * x[1]]))
+    before = field.x.array.copy()
+    # A single sensor: on several ranks, exactly one owns it.
+    sensors = PointSensors(domain, np.array([[0.05, 0.07, 0.0]]))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("sensor sampling must not allocate a Function")
+
+    monkeypatch.setattr(fem, "Function", forbidden)
+    values = sensors.sample(field)
+    np.testing.assert_array_equal(field.x.array, before)
+    if len(sensors.indices):
+        np.testing.assert_allclose(values, [[0.05**2, 0.05 * 0.07]], atol=1e-13)
+    assert domain.comm.allreduce(len(sensors.indices)) == 1
+
+
 def test_forward_spectrum_physical_coordinates():
     t = np.arange(256) * 1e-7
     x = np.arange(64) * 0.0005

@@ -59,6 +59,7 @@ from wavesimfem.materials import (
     structure_from_config,
 )
 from wavesimfem.numerics import (
+    ITERATIVE_DOF_THRESHOLD,
     RK4_STABILITY_RADIUS,
     PetscRK4,
     PointSensors,
@@ -75,6 +76,7 @@ from wavesimfem.sources import describe_source, ricker, source_signal
 from wavesimfem.storage import (
     HISTORY_CHUNK_BYTES,
     HistoryStore,
+    _output_mode,
     all_finite_history,
     atomic_output,
 )
@@ -99,9 +101,6 @@ comm = MPI.COMM_WORLD
 rank = comm.rank
 nprocs = comm.size
 
-#: Global DOF count above which the implicit solver switches to CG + GAMG.
-ITERATIVE_DOF_THRESHOLD = 500_000
-
 
 def mpi_fail_fast(function: Callable[..., Any]) -> Callable[..., Any]:
     """Abort the MPI job on a rank-local exception so peers never hang at collectives."""
@@ -122,8 +121,11 @@ def mpi_fail_fast(function: Callable[..., Any]) -> Callable[..., Any]:
 
                 # Send the complete traceback together and flush it before MPI
                 # terminates the ranks and their output-forwarding channels.
+                # Give the launcher's I/O forwarding loop a brief window to
+                # drain the pipe before PMI/PMIx processes MPI_Abort.
                 sys.stderr.write(traceback.format_exc())
                 sys.stderr.flush()
+                pytime.sleep(0.1)
                 comm.Abort(1)
             raise
 
@@ -263,15 +265,20 @@ def build_problem(
     bs = V.dofmap.index_map_bs
 
     # --- Excitation: Gaussian strip traction on the loaded surface/interface ----
+    # Scalars enter forms as Constants (not literals) so the generated kernels
+    # are reused across parameter sweeps instead of being JIT-compiled per value.
+    def const(value: float) -> Any:
+        return fem.Constant(domain, default_scalar_type(value))
+
     x = ufl.SpatialCoordinate(domain)
     traction_amplitude = fem.Constant(domain, default_scalar_type(0.0))
-    sigma_x = cfg["excitation_width"] / 3.0
-    profile = ufl.exp(-((x[0] - cfg["source_x"]) ** 2) / (2.0 * sigma_x**2))
+    sigma_x = const(cfg["excitation_width"] / 3.0)
+    profile = ufl.exp(-((x[0] - const(cfg["source_x"])) ** 2) / (2.0 * sigma_x**2))
     fx, fy = cfg["source_fx"], cfg["source_fy"]
     norm = float(np.hypot(fx, fy))
     if not np.isfinite(norm) or norm <= 0.0:
         raise ValueError("source_fx and source_fy must not both be zero")
-    traction = traction_amplitude * profile * ufl.as_vector([fx / norm, fy / norm])
+    traction = traction_amplitude * profile * ufl.as_vector([const(fx / norm), const(fy / norm)])
     # Use actual vertical cell spacing, not relative coordinate magnitude.
     tol_geom = min(layout.h_y_per_region) * 1e-4
     if has_top_hs:
@@ -296,9 +303,6 @@ def build_problem(
     # --- Constitutive laws per region -------------------------------------------
     def epsilon(w: Any) -> Any:
         return ufl.sym(ufl.grad(w))
-
-    def const(value: float) -> Any:
-        return fem.Constant(domain, default_scalar_type(value))
 
     def voigt(c: list[float]) -> Any:
         c11, c12, c16, c22, c26, c66 = (const(v) for v in c)
@@ -335,16 +339,17 @@ def build_problem(
     L_abs = cfg["absorb_length"]
     indicator = ufl.as_ufl(0.0)
     if L_abs > 0:
-        x_right = layout.plate_length - L_abs
-        indicator += ufl.conditional(ufl.gt(x[0], x_right), ((x[0] - x_right) / L_abs) ** 5, 0.0)
-        indicator += ufl.conditional(ufl.lt(x[0], L_abs), ((L_abs - x[0]) / L_abs) ** 5, 0.0)
+        length = const(L_abs)
+        x_right = const(layout.plate_length - L_abs)
+        indicator += ufl.conditional(ufl.gt(x[0], x_right), ((x[0] - x_right) / length) ** 5, 0.0)
+        indicator += ufl.conditional(ufl.lt(x[0], length), ((length - x[0]) / length) ** 5, 0.0)
     if summary["has_bottom_halfspace"]:
-        depth = summary["bottom_halfspace"]["absorb_depth"]
-        y_end = summary["y_min"] + depth
+        depth_value = summary["bottom_halfspace"]["absorb_depth"]
+        depth, y_end = const(depth_value), const(summary["y_min"] + depth_value)
         indicator += ufl.conditional(ufl.lt(x[1], y_end), ((y_end - x[1]) / depth) ** 5, 0.0)
     if has_top_hs:
-        depth = summary["top_halfspace"]["absorb_depth"]
-        y_start = y_max - depth
+        depth_value = summary["top_halfspace"]["absorb_depth"]
+        depth, y_start = const(depth_value), const(y_max - depth_value)
         indicator += ufl.conditional(ufl.gt(x[1], y_start), ((x[1] - y_start) / depth) ** 5, 0.0)
     alpha = const(cfg["absorb_alpha"])
     beta = const(cfg["absorb_beta"])
@@ -501,10 +506,17 @@ def _configure_ksp(solver: Any, ndofs_global: int, near_nullspace: Any | None = 
 
 
 def _fallback_bjacobi(solver: Any, ndofs_global: int) -> str:
-    solver.getPC().setType(PETSc.PC.Type.BJACOBI)
-    solver.setType(PETSc.KSP.Type.GMRES)
+    # The Newmark effective matrix K + c1 M + c1 c5 C is SPD, so CG halves the
+    # per-iteration work and memory of GMRES. ICC sub-blocks keep the
+    # preconditioner symmetric positive definite (shifted if needed).
+    solver.setType(PETSc.KSP.Type.CG)
+    pc = solver.getPC()
+    pc.setType(PETSc.PC.Type.BJACOBI)
     solver.setTolerances(rtol=1e-10, atol=1e-14, max_it=2000)
-    return f"GMRES + BJacobi (parallel, {ndofs_global} DOFs; MUMPS unavailable)"
+    pc.setUp()
+    for sub in pc.getBJacobiSubKSP():
+        sub.getPC().setType(PETSc.PC.Type.ICC)
+    return f"CG + BJacobi/ICC (parallel, {ndofs_global} DOFs; MUMPS unavailable)"
 
 
 def solve_implicit(
@@ -552,7 +564,10 @@ def solve_implicit(
     visco_form = problem.damping_visco(du, u_)
     if visco_form is not None:
         damping_form = damping_form + visco_form
-    effective_form = problem.stiffness(du, u_) + c1 * mass_form + (c1 * c5) * damping_form
+    # dt-dependent coefficients as Constants: one compiled kernel for every dt.
+    c1_form = fem.Constant(problem.domain, default_scalar_type(c1))
+    c15_form = fem.Constant(problem.domain, default_scalar_type(c1 * c5))
+    effective_form = problem.stiffness(du, u_) + c1_form * mass_form + c15_form * damping_form
 
     u = fem.Function(V, name="Displacement")
     n_owned = len(problem.probes.indices)
@@ -725,31 +740,35 @@ def solve_explicit(
         stack.callback(K_mat.destroy)
         K_mat.assemble()
 
-        M_mat = fem.petsc.assemble_matrix(fem.form(problem.mass(du, u_)), bcs=[])
-        M_mat.assemble()
-        ones = M_mat.createVecRight()
-        ones.set(1.0)
-        M_lumped = M_mat.createVecLeft()
-        M_mat.mult(ones, M_lumped)
-        mass_lumped = M_lumped.array_r[:n_owned_dofs].copy()
-        for obj in (ones, M_mat, M_lumped):
-            obj.destroy()
+        # Intermediates live in a scoped stack: released on success and on error.
+        with contextlib.ExitStack() as temporary:
+            M_mat = fem.petsc.assemble_matrix(fem.form(problem.mass(du, u_)), bcs=[])
+            temporary.callback(M_mat.destroy)
+            M_mat.assemble()
+            ones = M_mat.createVecRight()
+            temporary.callback(ones.destroy)
+            ones.set(1.0)
+            M_lumped = M_mat.createVecLeft()
+            temporary.callback(M_lumped.destroy)
+            M_mat.mult(ones, M_lumped)
+            mass_lumped = M_lumped.array_r[:n_owned_dofs].copy()
         if comm.allreduce(bool(np.any(~np.isfinite(mass_lumped) | (mass_lumped <= 0))), op=MPI.LOR):
             raise RuntimeError("Mass lumping produced non-positive entries")
         inv_mass = 1.0 / mass_lumped
 
         stiffness_bound = operator_bound(K_mat, mass_lumped)
         omega_max = float(np.sqrt(stiffness_bound))
-        C_mat = fem.petsc.assemble_matrix(fem.form(problem.damping(du, u_)), bcs=[])
-        C_mat.assemble()
-        if problem.any_viscoelastic:
-            Kv_mat = fem.petsc.assemble_matrix(fem.form(problem.damping_visco(du, u_)), bcs=[])
-            Kv_mat.assemble()
-            C_mat.axpy(1.0, Kv_mat, structure=PETSc.Mat.Structure.DIFFERENT_NONZERO_PATTERN)
-            Kv_mat.destroy()
-        C_full, C_mat = C_mat, _drop_zero_entries(C_mat)
-        C_full.destroy()
-        stack.callback(C_mat.destroy)
+        with contextlib.ExitStack() as temporary:
+            C_full = fem.petsc.assemble_matrix(fem.form(problem.damping(du, u_)), bcs=[])
+            temporary.callback(C_full.destroy)
+            C_full.assemble()
+            if problem.any_viscoelastic:
+                Kv_mat = fem.petsc.assemble_matrix(fem.form(problem.damping_visco(du, u_)), bcs=[])
+                temporary.callback(Kv_mat.destroy)
+                Kv_mat.assemble()
+                C_full.axpy(1.0, Kv_mat, structure=PETSc.Mat.Structure.DIFFERENT_NONZERO_PATTERN)
+            C_mat = _drop_zero_entries(C_full)
+            stack.callback(C_mat.destroy)
         damping_bound = operator_bound(C_mat, mass_lumped)
 
         dt_crit = RK4_STABILITY_RADIUS / max(omega_max, damping_bound)
@@ -911,6 +930,11 @@ def solve_explicit(
 # ---------------------------------------------------------------------------
 # Outputs
 # ---------------------------------------------------------------------------
+#: Elastic archives keep the v1 layout (``sensor_data_x``/``sensor_data_y``);
+#: field-aware archives are v2 (explicit observable, units and keys).
+ELASTIC_ARCHIVE_SCHEMA_VERSION = 1
+
+
 def _publish_results(cfg: dict[str, Any], archive: dict[str, Any], out_dir: str) -> str:
     """Commit a complete archive; its embedded configuration is authoritative.
 
@@ -930,6 +954,8 @@ def _publish_results(cfg: dict[str, Any], archive: dict[str, Any], out_dir: str)
         with atomic_output(staged_npz, binary=True) as stream:
             writer = np.savez_compressed if cfg["compress_output"] else np.savez
             writer(stream, **complete)
+        os.chmod(staged_npz, _output_mode(Path(saved_npz)))
+        os.chmod(staged_cfg, _output_mode(Path(saved_cfg)))
         os.replace(staged_npz, saved_npz)
         try:
             os.replace(staged_cfg, saved_cfg)
@@ -1222,6 +1248,8 @@ def run_simulation(
             cfg["load_y"] = float(problem.load_y)
             cfg["runtime"] = _runtime_record(problem, result)
             archive = {
+                # Explicit rather than inferred from a missing key.
+                "schema_version": ELASTIC_ARCHIVE_SCHEMA_VERSION,
                 "times": result.times,
                 "dt": result.dt,
                 "sample_stride": result.runtime["sample_stride"],

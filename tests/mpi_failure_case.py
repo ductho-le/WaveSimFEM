@@ -11,6 +11,7 @@ if case == "config":
     original = cli.parse_and_resolve_config
 
     def read_config(*args, **kwargs):
+        cli.comm.Barrier()
         if cli.rank == 0:
             raise OSError("injected rank-local configuration read failure")
         return original(*args, **kwargs)
@@ -56,6 +57,7 @@ else:
 
     @cli.mpi_fail_fast
     def fail():
+        cli.comm.Barrier()
         if cli.rank == 0:
             if case == "interrupt":
                 raise KeyboardInterrupt("injected rank-local interruption")

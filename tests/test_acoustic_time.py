@@ -605,3 +605,27 @@ def test_array_rk4_reports_divergence_when_state_is_read():
     finally:
         solver.destroy()
         _destroy(ops)
+
+
+def test_distributed_coupled_newmark_iterative_fallback(monkeypatch):
+    """When _direct_solver returns None, CoupledNewmark keeps its Nest operator
+    intact and solves via field-split GMRES (serial and MPI)."""
+    from wavesimfem import acoustic_time
+
+    ops = _operators(comm=PETSc.COMM_WORLD)
+    initial, lam, pressure = _mode_initial(ops)
+    dt, end = 0.01, 0.3
+    monkeypatch.setattr(acoustic_time, "_direct_solver", lambda *_a, **_kw: None)
+    solver = CoupledNewmark(ops, dt, initial=initial)
+    try:
+        assert solver._flat_rhs is None
+        assert solver._A.getType() == PETSc.Mat.Type.NEST
+        for step in range(round(end / dt)):
+            solver.step(step * dt, dt)
+        np.testing.assert_allclose(solver.u.array_r, np.cos(np.sqrt(lam) * end), atol=2e-4, rtol=0)
+        np.testing.assert_allclose(
+            solver.p.array_r, pressure * np.cos(np.sqrt(lam) * end), atol=2e-3, rtol=0
+        )
+    finally:
+        solver.destroy()
+        _destroy(ops)

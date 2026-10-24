@@ -169,6 +169,13 @@ def parse_quantity(value: object, kind: QuantityKind) -> float:
         number, unit = match.groups()
         # Accept case variants of the unit name, but never fold SI prefixes.
         unit_key = unit[:-2] + "Hz" if kind == "frequency" and unit[-2:].lower() == "hz" else unit
+        if unit_key == "mHz" and unit != "mHz":
+            # "mhz"/"mHZ" are almost always a mistyped MHz; a silent 1e9 error
+            # would be far worse than asking for the exact spelling.
+            raise ValueError(
+                f"ambiguous frequency unit {unit!r} in {value!r}; "
+                "write 'MHz' for megahertz or exactly 'mHz' for millihertz"
+            )
         if unit_key and unit_key not in units:
             choices = ", ".join(_display_units(kind))
             raise ValueError(f"unknown {kind} unit {unit!r} in {value!r}; use one of: {choices}")

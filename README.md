@@ -194,7 +194,7 @@ These inputs are starting points for application studies. Establish resolution, 
 
 ## Configuration
 
-Copy the closest example or the annotated reference configuration. The CLI can also generate a starter file:
+Copy the closest example or the annotated reference configuration. The CLI can also generate a starter file (an existing file is kept unless `--force` is given):
 
 ```bash
 wavesim --generate-config my_waveguide.yaml

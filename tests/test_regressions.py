@@ -1,20 +1,55 @@
 """Regression coverage for exact mesh controls, input validation, and arrival estimates."""
 
+from __future__ import annotations
+
+import stat
+from pathlib import Path
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import scipy.sparse as sp
+import yaml
 
-from wavesimfem.config import load_config, parse_and_resolve_config
+from wavesimfem import storage
+from wavesimfem.cli import build_parser, main
+from wavesimfem.config import generate_template_config, load_config, parse_and_resolve_config
 from wavesimfem.materials import (
     a0_wavenumber,
+    canonicalize_mode,
     compute_mesh_layout,
     normalize_structure,
     preflight_estimate,
+    sampled_time_grid,
     structure_from_config,
 )
 from wavesimfem.parallel import limit_threads_per_rank
+from wavesimfem.reporting import logger
 from wavesimfem.solvers_gpu import _NumpyLikeBackend, integrate_explicit_rk4
+from wavesimfem.storage import atomic_output
 from wavesimfem.units import parse_quantity
+
+CONFIG_DIR = Path(__file__).resolve().parents[1] / "configs"
+PLATE = CONFIG_DIR / "01_plate_aluminum_lamb.yaml"
+HALFSPACE = CONFIG_DIR / "03_halfspace_steel_rayleigh.yaml"
+FLUID_ACOUSTIC = CONFIG_DIR / "07_fluid_acoustic.yaml"
+
+
+@pytest.fixture(autouse=True)
+def _restore_log_level():
+    level = logger.level
+    yield
+    logger.setLevel(level)
+
+
+def _variant(tmp_path: Path, source: Path, **sections) -> Path:
+    """Copy an example configuration with section-level overrides."""
+    raw = yaml.safe_load(source.read_text(encoding="utf-8"))
+    for section, values in sections.items():
+        raw.setdefault(section, {}).update(values)
+    path = tmp_path / source.name
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    return path
 
 
 def plate_config(**updates):
@@ -266,3 +301,194 @@ def test_thin_coating_load_resultant():
         )
     )
     assert resultant == pytest.approx(expected, rel=2e-3)
+
+
+def test_atomic_output_new_file_follows_umask(tmp_path, monkeypatch):
+    monkeypatch.setattr(storage, "_UMASK", 0o022)
+    path = tmp_path / "result.txt"
+    with atomic_output(path) as stream:
+        stream.write("data")
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
+
+
+def test_atomic_output_keeps_mode_of_replaced_file(tmp_path):
+    path = tmp_path / "result.bin"
+    path.write_bytes(b"old")
+    path.chmod(0o640)
+    with atomic_output(path, binary=True) as stream:
+        stream.write(b"new")
+    assert path.read_bytes() == b"new"
+    assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+
+def test_publish_results_and_benchmark_keep_existing_mode(tmp_path):
+    import importlib.util
+
+    from wavesimfem.solvers import ELASTIC_ARCHIVE_SCHEMA_VERSION, _publish_results
+
+    spec = importlib.util.spec_from_file_location(
+        "benchmark", CONFIG_DIR.parent / "tools" / "benchmark.py"
+    )
+    benchmark = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(benchmark)
+
+    cfg = parse_and_resolve_config(str(PLATE))
+    npz_path = tmp_path / "sensor_data.npz"
+    yaml_path = tmp_path / "simulation_config.yaml"
+    npz_path.write_bytes(b"old")
+    yaml_path.write_text("old: true\n", encoding="utf-8")
+    npz_path.chmod(0o640)
+    yaml_path.chmod(0o640)
+    _publish_results(
+        cfg,
+        {"schema_version": ELASTIC_ARCHIVE_SCHEMA_VERSION, "times": np.zeros(2)},
+        str(tmp_path),
+    )
+    assert stat.S_IMODE(npz_path.stat().st_mode) == 0o640
+    assert stat.S_IMODE(yaml_path.stat().st_mode) == 0o640
+    with np.load(npz_path, allow_pickle=False) as data:
+        assert int(data["schema_version"]) == 1
+
+    report_path = tmp_path / "benchmark.json"
+    report_path.write_text("{}\n", encoding="utf-8")
+    report_path.chmod(0o640)
+    benchmark.write_report(report_path, {"ok": True})
+    assert stat.S_IMODE(report_path.stat().st_mode) == 0o640
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [(" halfspace ", "halfspace"), ("\t1 layer\n", "1_layer"), ("  N-Layers", "N_layers")],
+)
+def test_canonicalize_mode_ignores_surrounding_whitespace(raw, expected):
+    assert canonicalize_mode(raw) == expected
+
+
+@pytest.mark.parametrize("text", ["2 mhz", "2mHZ"])
+def test_parse_quantity_rejects_ambiguous_milli_megahertz(text):
+    with pytest.raises(ValueError, match="ambiguous"):
+        parse_quantity(text, "frequency")
+
+
+def test_parse_quantity_exact_millihertz_still_allowed():
+    assert parse_quantity("5 mHz", "frequency") == pytest.approx(5e-3)
+
+
+def test_cli_frequency_overrides_accept_units():
+    args = build_parser().parse_args(["--min-frequency", "200kHz", "--max-frequency", "2 MHz"])
+    assert args.min_frequency == pytest.approx(2e5)
+    assert args.max_frequency == pytest.approx(2e6)
+
+
+def test_cli_frequency_override_rejects_bad_unit(capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        build_parser().parse_args(["--max-frequency", "2 rad/mm"])
+    assert exc_info.value.code == 2
+    assert "unknown frequency unit" in capsys.readouterr().err
+
+
+def test_sampled_time_grid_keeps_max_frequency_alias_free():
+    layout = SimpleNamespace(duration=20e-6, mesh_frequency=8e6)
+    cfg = {"sensor_sample_rate": 5e6, "disp_f_max": None, "f_center": 1e6, "run_postprocess": False}
+    dt, _n_steps, stride = sampled_time_grid(cfg, layout, 5e-9)
+    assert 1.0 / (2.0 * stride * dt) >= 1.25 * layout.mesh_frequency * (1 - 1e-9)
+
+
+def test_generate_template_refuses_to_overwrite(tmp_path):
+    path = tmp_path / "mine.yaml"
+    path.write_text("edited: true\n", encoding="utf-8")
+    with pytest.raises(FileExistsError):
+        generate_template_config(str(path))
+    assert path.read_text(encoding="utf-8") == "edited: true\n"
+    generate_template_config(str(path), overwrite=True)
+    assert "solver:" in path.read_text(encoding="utf-8")
+
+
+def test_cli_generate_config_force(tmp_path, capsys):
+    path = tmp_path / "mine.yaml"
+    path.write_text("edited: true\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--generate-config", str(path)])
+    assert exc_info.value.code == 2
+    assert "already exists" in capsys.readouterr().err
+    main(["--generate-config", str(path), "--force"])
+    assert "solver:" in path.read_text(encoding="utf-8")
+
+
+def test_lamb_modes_rejected_for_halfspace_before_solve(tmp_path):
+    config = _variant(tmp_path, HALFSPACE, postprocess={"lamb_modes": True})
+    with pytest.raises(ValueError, match=r"lamb_modes.*single isotropic"):
+        parse_and_resolve_config(str(config))
+
+
+def test_lamb_modes_rejected_for_too_few_receivers(tmp_path):
+    config = _variant(tmp_path, PLATE, sensors={"n_sensors": 5})
+    with pytest.raises(ValueError, match="at least 8 receivers"):
+        parse_and_resolve_config(str(config))
+
+
+def test_lamb_modes_rejected_for_velocity_observable(tmp_path):
+    config = _variant(tmp_path, PLATE, sensors={"observable": "velocity"})
+    with pytest.raises(ValueError, match="displacement sensors"):
+        parse_and_resolve_config(str(config))
+
+
+def test_wave_characterisation_validates_component_against_observable(tmp_path):
+    bad_motion = _variant(
+        tmp_path,
+        FLUID_ACOUSTIC,
+        postprocess={"wave_characterisation": {"enabled": True, "component": "x"}},
+    )
+    with pytest.raises(ValueError, match="Pressure archives do not contain"):
+        parse_and_resolve_config(str(bad_motion))
+
+    bad_pressure = _variant(
+        tmp_path,
+        PLATE,
+        postprocess={"wave_characterisation": {"enabled": True, "component": "pressure"}},
+    )
+    with pytest.raises(ValueError, match="does not contain pressure sensors"):
+        parse_and_resolve_config(str(bad_pressure))
+
+    auto_pressure = _variant(
+        tmp_path,
+        FLUID_ACOUSTIC,
+        postprocess={"wave_characterisation": {"enabled": True}},
+    )
+    resolved = parse_and_resolve_config(str(auto_pressure))
+    assert resolved["wave_characterisation"]["component"] == "pressure"
+
+
+def test_lamb_modes_ignored_without_postprocessing(tmp_path):
+    config = _variant(
+        tmp_path, HALFSPACE, postprocess={"lamb_modes": True, "run_postprocess": False}
+    )
+    cfg = parse_and_resolve_config(str(config))
+    assert cfg["lamb_modes"] and not cfg["run_postprocess"]
+
+
+def test_cli_rejects_missing_latex_before_simulation(tmp_path, monkeypatch, capsys):
+    from wavesimfem import analysis, cli
+
+    monkeypatch.setattr(analysis, "latex_available", lambda: False)
+
+    def must_not_run(*_args, **_kwargs):
+        raise AssertionError("simulation started despite unusable plotting setup")
+
+    monkeypatch.setattr(cli, "run_simulation", must_not_run)
+    config = _variant(tmp_path, PLATE, output={"usetex": True})
+    with pytest.raises(SystemExit) as exc_info:
+        main(["-c", str(config), "--output", str(tmp_path / "out")])
+    assert exc_info.value.code == 2
+    assert "usetex=True requires LaTeX" in capsys.readouterr().err
+
+
+def test_cli_dry_run_only_warns_about_missing_latex(tmp_path, monkeypatch, capsys):
+    from wavesimfem import analysis
+
+    monkeypatch.setattr(analysis, "latex_available", lambda: False)
+    config = _variant(tmp_path, PLATE, output={"usetex": True})
+    main(["-c", str(config), "--dry-run"])
+    captured = capsys.readouterr()
+    assert "Dry run complete" in captured.out
+    assert "post-processing would fail" in captured.out + captured.err

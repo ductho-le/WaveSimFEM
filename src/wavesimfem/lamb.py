@@ -57,8 +57,10 @@ def separate_fundamentals(times, positions, signal, thickness, c_l, c_t, band, w
     No zero padding is used; aperture controls actual spectral resolution.
     """
     t, x, u = [np.asarray(v, dtype=float) for v in (times, positions, signal)]
-    if t.ndim != 1 or x.ndim != 1 or len(t) < 32 or len(x) < 8:
-        raise ValueError("Lamb separation requires >=32 samples and >=8 receivers")
+    if t.ndim != 1 or x.ndim != 1 or len(t) < 32 or len(x) < LAMB_MIN_RECEIVERS:
+        raise ValueError(
+            f"Lamb separation requires >=32 samples and >={LAMB_MIN_RECEIVERS} receivers"
+        )
     for axis in (t, x):
         steps = np.diff(axis)
         if (
@@ -234,6 +236,32 @@ def _lamb_diagnostics(result, horizontal, band, archive_path):
     )
 
 
+LAMB_MIN_RECEIVERS = 8
+
+
+def lamb_eligibility_error(cfg, summary=None):
+    """Reason a configuration cannot produce a Lamb report, or ``None`` if it can.
+
+    Shared by configuration validation (before any solve) and the report itself.
+    """
+    regions = (summary or structure_from_config(cfg))["all_regions"]
+    if (
+        len(regions) != 1
+        or regions[0]["is_halfspace"]
+        or regions[0]["material_model"] != "isotropic"
+    ):
+        return "Lamb report supports only a free, single isotropic elastic plate"
+    observable = cfg.get("sensor_observable")
+    if observable not in (None, "auto", "displacement"):
+        return f"Lamb report requires displacement sensors (got observable {observable!r})"
+    n_sensors = cfg.get("n_sensors")
+    if n_sensors is not None and int(n_sensors) < LAMB_MIN_RECEIVERS:
+        return (
+            f"Lamb report requires at least {LAMB_MIN_RECEIVERS} receivers (got {int(n_sensors)})"
+        )
+    return None
+
+
 def write_lamb_report(archive_path, output_dir=None, *, formats=("png", "pdf"), usetex=False):
     """Report modal-filter resolvability, displacement contributions and reconstruction.
 
@@ -258,12 +286,12 @@ def write_lamb_report(archive_path, output_dir=None, *, formats=("png", "pdf"), 
         provenance = str(data.get("provenance", "Recorded simulation archive"))
         summary = structure_from_config(cfg)
         regions = summary["all_regions"]
-        if (
-            len(regions) != 1
-            or regions[0]["is_halfspace"]
-            or regions[0]["material_model"] != "isotropic"
-        ):
-            raise ValueError("Lamb report supports only a free, single isotropic elastic plate")
+        # Receiver count is enforced by separate_fundamentals on the actual array.
+        reason = lamb_eligibility_error({}, summary)
+        if reason is not None:
+            raise ValueError(reason)
+        if "sensor_data_x" not in data or "sensor_data_y" not in data:
+            raise ValueError("Lamb report requires archived horizontal and vertical displacements")
         band = [
             cfg.get("min_frequency") or cfg["f_center"] / 5,
             cfg.get("max_frequency") or 3 * cfg["f_center"],

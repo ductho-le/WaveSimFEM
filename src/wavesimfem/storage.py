@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import stat
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -14,18 +15,43 @@ import numpy as np
 HISTORY_CHUNK_BYTES = 8 * 1024**2
 
 
+def _read_umask() -> int:
+    # The only portable query sets and restores the mask, so do it once at
+    # import rather than racing other threads that create files.
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
+
+
+_UMASK = _read_umask()
+
+
+def _output_mode(target: Path) -> int:
+    """Permission bits for a replacement: keep an existing file's, else honour umask.
+
+    ``mkstemp`` always creates ``0600`` files and ``os.replace`` preserves that,
+    which would make every result unreadable to collaborators on shared systems.
+    """
+    try:
+        return stat.S_IMODE(target.stat().st_mode)
+    except FileNotFoundError:
+        return 0o666 & ~_UMASK
+
+
 @contextlib.contextmanager
 def atomic_output(path: str | os.PathLike[str], *, binary: bool = False) -> Iterator[Any]:
     """Write beside the destination, then atomically replace it after flushing.
 
     Failure before replacement leaves the previous file intact. The temporary
-    file is on the same filesystem, so replacement never becomes a copy.
+    file is on the same filesystem, so replacement never becomes a copy. The
+    result keeps the permissions of the file it replaces, or follows the umask.
     """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
     stream: BinaryIO | TextIO | None = None
     try:
+        os.chmod(name, _output_mode(target))
         stream = os.fdopen(fd, "wb" if binary else "w", **({} if binary else {"encoding": "utf-8"}))
         with stream:
             yield stream
@@ -66,7 +92,11 @@ class HistoryStore:
         for array in self._maps:
             # Closing the mapping also releases its file descriptor. No durable
             # flush is needed: these are scratch files and the archive is saved.
-            array._mmap.close()
+            # Contract: callers must not use these arrays (or views of them)
+            # after exit; copy anything that has to outlive the store.
+            mapping = getattr(array, "_mmap", None)
+            if mapping is not None:
+                mapping.close()
         self._maps.clear()
         if self._scratch is not None:
             self._scratch.cleanup()

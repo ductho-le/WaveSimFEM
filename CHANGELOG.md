@@ -3,6 +3,42 @@
 All notable changes are documented here. Versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- `--generate-config` no longer overwrites an existing file; pass `--force`.
+- `--min-frequency`/`--max-frequency` accept units (`"100 kHz"`), like YAML.
+- `"mhz"`/`"mHZ"`-style spellings are rejected as ambiguous; write `MHz` or
+  `mHz` exactly.
+- An explicit `sensor_sample_rate` below Nyquist for `mesh.max_frequency` is
+  raised so the analysis band stays alias-free (the default rate is unchanged).
+- Configurations that request `postprocess.lamb_modes` or
+  `postprocess.wave_characterisation` with an incompatible structure, receiver
+  count, or `sensors.observable` / `component` fail during validation, not after
+  the solve. LaTeX (`usetex`) availability is checked before solving; dry runs
+  warn instead.
+- Results, sidecars and benchmark reports preserve an existing file's mode when
+  overwriting and otherwise honour the umask (previously 0600).
+- Elastic archives write `schema_version: 1` explicitly.
+
+### Performance
+
+- Sensor sampling uses a cached sparse point-evaluation operator instead of a
+  per-step `Function.eval` pull-back (matches `eval` to round-off; rank-local).
+- Form scalars (material constants, source footprint, sponge geometry, Newmark
+  coefficients) enter as `fem.Constant`, so kernels are reused across
+  parameter sweeps instead of being JIT-compiled per value.
+- Coupled acoustic Newmark factorises the monolithic operator once with a
+  direct solver (MUMPS), falling back to field-split GMRES for large parallel
+  problems; parallel iterative fallbacks use CG + block-Jacobi/ICC.
+
+### Fixed
+
+- PETSc temporaries are released on error paths during explicit-solver and
+  acoustic-problem setup.
+- `PointSensors.gather` reports the first validation error.
+
 ## [0.4.0] — 2026-10-10 — acoustic fluids
 
 ### Breaking changes

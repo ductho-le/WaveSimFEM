@@ -15,6 +15,7 @@ import os
 import platform
 import resource
 import socket
+import stat
 import sys
 import tempfile
 import time
@@ -69,6 +70,14 @@ def write_report(path: Path, report: dict) -> None:
     """Publish a complete JSON report, leaving an existing report intact on failure."""
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
+        # mkstemp creates 0600 files; keep an existing report's mode or follow umask.
+        try:
+            mode = stat.S_IMODE(path.stat().st_mode)
+        except FileNotFoundError:
+            umask = os.umask(0)
+            os.umask(umask)
+            mode = 0o666 & ~umask
+        os.chmod(temporary, mode)
         with os.fdopen(fd, "w", encoding="utf-8") as stream:
             json.dump(report, stream, indent=2, sort_keys=True, allow_nan=False)
             stream.write("\n")

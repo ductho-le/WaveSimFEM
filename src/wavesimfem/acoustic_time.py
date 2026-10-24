@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 from petsc4py import PETSc
 
-from wavesimfem.numerics import RK4_STABILITY_RADIUS, operator_bound
+from wavesimfem.numerics import ITERATIVE_DOF_THRESHOLD, RK4_STABILITY_RADIUS, operator_bound
 
 if TYPE_CHECKING:
     from wavesimfem.device import DeviceInfo
@@ -169,16 +169,62 @@ def coupled_rk4_bounds(ops: AcousticOperators) -> dict[str, float]:
     }
 
 
-def _linear_solver(matrix: Any, *, mass: bool = False) -> Any:
+def _direct_solver(matrix: Any, *, indefinite: bool = False) -> Any | None:
+    """Once-factorised LU for a constant operator, or ``None`` to stay iterative.
+
+    Serial runs always factorise (PETSc LU, or MUMPS for symmetric-indefinite
+    operators because it pivots). Parallel runs factorise with MUMPS below
+    :data:`ITERATIVE_DOF_THRESHOLD`; larger systems or builds without MUMPS
+    return ``None`` so the caller keeps its preconditioned Krylov solver.
+    """
+    parallel = matrix.comm.getSize() > 1
+    mumps = bool(PETSc.Sys.hasExternalPackage("mumps"))
+    if parallel and (not mumps or matrix.getSize()[0] >= ITERATIVE_DOF_THRESHOLD):
+        return None
     solver = PETSc.KSP().create(matrix.comm)
-    solver.setOperators(matrix)
+    try:
+        solver.setOperators(matrix)
+        solver.setType(PETSc.KSP.Type.PREONLY)
+        pc = solver.getPC()
+        pc.setType(PETSc.PC.Type.LU)
+        if mumps and (parallel or indefinite):
+            pc.setFactorSolverType("mumps")
+        # Factorise now: failures surface at setup, not in the first step.
+        solver.setUp()
+    except PETSc.Error:
+        solver.destroy()
+        if not parallel and not indefinite:
+            raise
+        return None
+    return solver
+
+
+def _linear_solver(matrix: Any, *, mass: bool = False) -> Any:
+    """Solver for a constant SPD operator.
+
+    Serial: LU. Parallel effective operators: a once-factorised MUMPS LU when
+    affordable, else CG + block-Jacobi/ICC. Parallel mass matrices: CG + Jacobi.
+    """
     if matrix.comm.getSize() == 1:
+        solver = PETSc.KSP().create(matrix.comm)
+        solver.setOperators(matrix)
         solver.setType(PETSc.KSP.Type.PREONLY)
         solver.getPC().setType(PETSc.PC.Type.LU)
-    else:
-        solver.setType(PETSc.KSP.Type.CG if mass else PETSc.KSP.Type.GMRES)
-        solver.getPC().setType(PETSc.PC.Type.JACOBI if mass else PETSc.PC.Type.BJACOBI)
-        solver.setTolerances(rtol=1e-12, atol=1e-14, max_it=2000)
+        return solver
+    if not mass:
+        direct = _direct_solver(matrix)
+        if direct is not None:
+            return direct
+    solver = PETSc.KSP().create(matrix.comm)
+    solver.setOperators(matrix)
+    solver.setType(PETSc.KSP.Type.CG)
+    solver.getPC().setType(PETSc.PC.Type.JACOBI if mass else PETSc.PC.Type.BJACOBI)
+    solver.setTolerances(rtol=1e-12, atol=1e-14, max_it=2000)
+    if not mass:
+        pc = solver.getPC()
+        pc.setUp()
+        for sub in pc.getBJacobiSubKSP():
+            sub.getPC().setType(PETSc.PC.Type.ICC)
     return solver
 
 
@@ -358,17 +404,21 @@ class CoupledRK4(_CoupledState):
         device: str = "cpu",
     ) -> None:
         super().__init__(ops, forcing, initial, device)
-        self._inv_ms, self._inv_mp = self._vector(ops.Ms), self._vector(ops.Mp)
-        self._inv_ms.array[:] = 1.0 / _mass_lump(ops.Ms)
-        self._inv_mp.array[:] = 1.0 / _mass_lump(ops.Mp)
-        self.bounds = coupled_rk4_bounds(ops)
-        self._state = (self.u, self.v, self.p, self.pdot)
-        self._stage = tuple(self._duplicate(v) for v in self._state)
-        self._total = tuple(self._duplicate(v) for v in self._state)
-        self._stage_acceleration = (self._duplicate(self.a), self._duplicate(self.pddot))
-        self._integral_total = self._duplicate(self.p)
-        self._acceleration_key: tuple[float, tuple[int, ...]] | None = None
-        self._end_acceleration(0.0)
+        try:
+            self._inv_ms, self._inv_mp = self._vector(ops.Ms), self._vector(ops.Mp)
+            self._inv_ms.array[:] = 1.0 / _mass_lump(ops.Ms)
+            self._inv_mp.array[:] = 1.0 / _mass_lump(ops.Mp)
+            self.bounds = coupled_rk4_bounds(ops)
+            self._state = (self.u, self.v, self.p, self.pdot)
+            self._stage = tuple(self._duplicate(v) for v in self._state)
+            self._total = tuple(self._duplicate(v) for v in self._state)
+            self._stage_acceleration = (self._duplicate(self.a), self._duplicate(self.pddot))
+            self._integral_total = self._duplicate(self.p)
+            self._acceleration_key: tuple[float, tuple[int, ...]] | None = None
+            self._end_acceleration(0.0)
+        except BaseException:
+            self.destroy()
+            raise
 
     def stable_dt(self, safety: float = 1.0) -> float:
         if not np.isfinite(safety) or not 0 < safety <= 1:
@@ -754,19 +804,25 @@ class CoupledNewmark(_CoupledState):
         if not np.isfinite(beta) or beta <= 0 or not np.isfinite(gamma) or gamma < 0.5:
             raise ValueError("Newmark requires finite beta > 0 and gamma >= 0.5")
         super().__init__(ops, forcing, initial, device)
-        self.dt, self.beta, self.gamma = float(dt), float(beta), float(gamma)
-        self._a0, self._a1 = 1.0 / (beta * dt * dt), gamma / (beta * dt)
-        self._up, self._vp = self._duplicate(self.u), self._duplicate(self.v)
-        self._pp, self._pvp = self._duplicate(self.p), self._duplicate(self.pdot)
-        self._old_pressure = self._duplicate(self.p)
-        self._solid_damping_input = self._duplicate(self.u)
-        self._pressure_damping_input = self._duplicate(self.p)
-        self._mass_solvers = [
-            _ScaledMassSolver(mass) if mass.getSize()[0] else None for mass in (ops.Ms, ops.Mp)
-        ]
-        self._objects.extend(s for s in self._mass_solvers if s is not None)
-        self._initial_acceleration()
-        self._setup_operator()
+        try:
+            self.dt, self.beta, self.gamma = float(dt), float(beta), float(gamma)
+            self._a0, self._a1 = 1.0 / (beta * dt * dt), gamma / (beta * dt)
+            self._up, self._vp = self._duplicate(self.u), self._duplicate(self.v)
+            self._pp, self._pvp = self._duplicate(self.p), self._duplicate(self.pdot)
+            self._old_pressure = self._duplicate(self.p)
+            self._solid_damping_input = self._duplicate(self.u)
+            self._pressure_damping_input = self._duplicate(self.p)
+            self._mass_solvers: list[_ScaledMassSolver | None] = []
+            for mass in (ops.Ms, ops.Mp):
+                solver = _ScaledMassSolver(mass) if mass.getSize()[0] else None
+                if solver is not None:
+                    self._objects.append(solver)
+                self._mass_solvers.append(solver)
+            self._initial_acceleration()
+            self._setup_operator()
+        except BaseException:
+            self.destroy()
+            raise
 
     def _initial_acceleration(self) -> None:
         self._residuals(self.u, self.v, self.p, self.pdot, 0.0)
@@ -790,15 +846,16 @@ class CoupledNewmark(_CoupledState):
                 self._scales.append(None)
                 continue
             operator = stiffness.copy()
+            self._objects.append(operator)
             operator.axpy(self._a0, mass, structure=PETSc.Mat.Structure.DIFFERENT_NONZERO_PATTERN)
             if damping is not None:
                 operator.axpy(
                     self._a1, damping, structure=PETSc.Mat.Structure.DIFFERENT_NONZERO_PATTERN
                 )
             scale = _inverse_sqrt_diagonal(operator)
+            self._objects.append(scale)
             self._effective.append(operator)
             self._scales.append(scale)
-            self._objects.extend((operator, scale))
         # In a coupled system balance the symmetric indefinite block. For a
         # single field retain its SPD effective operator and ordinary scaling.
         if self._ns and self._np:
@@ -809,40 +866,64 @@ class CoupledNewmark(_CoupledState):
             Ap.scale(-1.0 / self._a0)
             Ap.diagonalScale(sp, sp)
             coupling = self.ops.C.copy()
+            self._objects.append(coupling)
             coupling.diagonalScale(ss, sp)
             # PETSc's transpose() defaults to an in-place operation. Preserve
             # the rectangular upper block before creating its lower transpose.
             transpose = coupling.copy()
+            self._objects.append(transpose)
             transpose.transpose()
             self._A = PETSc.Mat().createNest(
                 [[As, coupling], [transpose, Ap]], comm=self.ops.Ms.comm
             )
+            self._objects.append(self._A)
             self._A.assemble()
-            self._objects.extend((coupling, transpose, self._A))
             self._solution_fields = [self._duplicate(self.u), self._duplicate(self.p)]
             self._rhs_fields = [self._duplicate(self.u), self._duplicate(self.p)]
             self._solution = PETSc.Vec().createNest(self._solution_fields, comm=self._A.comm)
             self._rhs = PETSc.Vec().createNest(self._rhs_fields, comm=self._A.comm)
-            self._solver = PETSc.KSP().create(self._A.comm)
-            self._solver.setOperators(self._A)
-            self._solver.setType(PETSc.KSP.Type.GMRES)
-            self._solver.setGMRESRestart(100)
-            # Displacement errors are divided by dt**2 to recover acceleration.
-            # A loose effective-solve tolerance therefore accumulates visible
-            # MPI error even when the position residual appears converged.
-            self._solver.setNormType(PETSc.KSP.NormType.UNPRECONDITIONED)
-            self._solver.setTolerances(rtol=1e-14, atol=0.0, max_it=2000)
-            pc = self._solver.getPC()
-            pc.setType(PETSc.PC.Type.FIELDSPLIT)
-            pc.setFieldSplitType(PETSc.PC.CompositeType.ADDITIVE)
-            pc.setUp()
-            for sub in pc.getFieldSplitSubKSP():
-                if self._A.comm.getSize() == 1:
-                    sub.setType(PETSc.KSP.Type.PREONLY)
-                    sub.getPC().setType(PETSc.PC.Type.LU)
+            self._objects.extend((self._solution, self._rhs))
+            # The operator is constant: factorise it once and back-substitute
+            # each step. The balanced system is symmetric quasi-definite, which
+            # MUMPS factorises stably. Each rank owns [solid rows, pressure
+            # rows] of the converted matrix, so fields map to contiguous slices.
+            parallel = self._A.comm.getSize() > 1
+            mumps = bool(PETSc.Sys.hasExternalPackage("mumps"))
+            self._solver = None
+            if not parallel or (mumps and self._A.getSize()[0] < ITERATIVE_DOF_THRESHOLD):
+                # PETSc's convert() defaults to an in-place operation; pass out=
+                # so the Nest operator stays intact if factorisation falls back.
+                monolithic = self._A.convert(PETSc.Mat.Type.AIJ, out=PETSc.Mat())
+                self._solver = _direct_solver(monolithic, indefinite=True)
+                if self._solver is not None:
+                    self._objects.append(monolithic)
+                    self._flat_solution, self._flat_rhs = monolithic.createVecs()
+                    self._objects.extend((self._flat_solution, self._flat_rhs))
+                    self._split = self._rhs_fields[0].getLocalSize()
                 else:
+                    monolithic.destroy()
+            if self._solver is None:
+                self._flat_solution = self._flat_rhs = None
+                self._solver = PETSc.KSP().create(self._A.comm)
+                self._solver.setOperators(self._A)
+                self._solver.setType(PETSc.KSP.Type.GMRES)
+                self._solver.setGMRESRestart(100)
+                # Displacement errors are divided by dt**2 to recover acceleration.
+                # A loose effective-solve tolerance therefore accumulates visible
+                # MPI error even when the position residual appears converged.
+                # 1e-12 stays far below discretisation error without asking
+                # GMRES for machine precision, where it can stagnate.
+                self._solver.setNormType(PETSc.KSP.NormType.UNPRECONDITIONED)
+                self._solver.setTolerances(rtol=1e-12, atol=0.0, max_it=2000)
+                pc = self._solver.getPC()
+                pc.setType(PETSc.PC.Type.FIELDSPLIT)
+                pc.setFieldSplitType(PETSc.PC.CompositeType.ADDITIVE)
+                pc.setUp()
+                for sub in pc.getFieldSplitSubKSP():
                     sub.setType(PETSc.KSP.Type.PREONLY)
-                    sub.getPC().setType(PETSc.PC.Type.BJACOBI)
+                    sub.getPC().setType(
+                        PETSc.PC.Type.LU if self._A.comm.getSize() == 1 else PETSc.PC.Type.BJACOBI
+                    )
         else:
             index = 0 if self._ns else 1
             self._A = self._effective[index]
@@ -851,8 +932,6 @@ class CoupledNewmark(_CoupledState):
             self._solution = self._duplicate(self.u if self._ns else self.p)
             self._rhs = self._duplicate(self._solution)
             self._solver = _linear_solver(self._A)
-        if self._ns and self._np:
-            self._objects.extend((self._solution, self._rhs))
         self._objects.append(self._solver)
 
     def step(self, t: float, dt: float) -> None:
@@ -907,7 +986,16 @@ class CoupledNewmark(_CoupledState):
             self._rhs_fields[0].pointwiseMult(self._rs, self._scales[0])
             self._rhs_fields[1].pointwiseMult(self._rp, self._scales[1])
             self._rhs_fields[1].scale(-1.0 / self._a0)
-            _solve_checked(self._solver, self._rhs, self._solution)
+            if self._flat_rhs is not None:
+                split = self._split
+                self._flat_rhs.array[:split] = self._rhs_fields[0].array_r
+                self._flat_rhs.array[split:] = self._rhs_fields[1].array_r
+                _solve_checked(self._solver, self._flat_rhs, self._flat_solution)
+                solution = self._flat_solution.array_r
+                self._solution_fields[0].array[:] = solution[:split]
+                self._solution_fields[1].array[:] = solution[split:]
+            else:
+                _solve_checked(self._solver, self._rhs, self._solution)
             self.u.pointwiseMult(self._solution_fields[0], self._scales[0])
             self.p.pointwiseMult(self._solution_fields[1], self._scales[1])
         else:

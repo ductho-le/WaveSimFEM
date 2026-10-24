@@ -37,6 +37,10 @@ ArrayT = TypeVar("ArrayT")
 #: :func:`rk4_half_disk_radius`); it is rounded down for a safety margin.
 RK4_STABILITY_RADIUS = 2.6
 
+#: Global DOF count from which implicit solvers stop factorising in parallel
+#: (direct fill would dominate memory) and switch to preconditioned Krylov.
+ITERATIVE_DOF_THRESHOLD = 500_000
+
 
 def rk4_amplification(z: complex | np.ndarray) -> complex | np.ndarray:
     """RK4 amplification factor ``R(z) = 1 + z + z²/2 + z³/6 + z⁴/24``."""
@@ -233,6 +237,75 @@ def time_grid(duration: float, requested_dt: float) -> tuple[float, int]:
     return duration / steps, steps
 
 
+def point_evaluation_matrix(function: Any, points: np.ndarray, cells: np.ndarray) -> Any:
+    """Sparse ``W`` with ``W @ f.x.array == f.eval(points, cells).ravel()``.
+
+    Columns span the rank-local DOF array (owned and ghost entries), so, as with
+    ``Function.eval``, ghosts must be current (``scatter_forward``). Built from
+    nodal basis values in node-disjoint cell colours: ``colours × cell nodes ×
+    block size`` evaluations once, instead of a pull-back per point and sample.
+
+    Rank-local and communication-free: ``function``'s array is used as scratch
+    and restored on return, because allocating a new ``Function`` is collective
+    and only sensor-owning ranks build this operator.
+    """
+    import scipy.sparse as sp
+
+    space = function.function_space
+    dofmap = space.dofmap
+    bs = dofmap.index_map_bs
+    n_cols = (dofmap.index_map.size_local + dofmap.index_map.num_ghosts) * bs
+    array = function.x.array
+    value_size = int(np.prod(function.ufl_shape)) if function.ufl_shape else 1
+    points = np.asarray(points, dtype=space.mesh.geometry.x.dtype).reshape(-1, 3)
+    cells = np.asarray(cells, dtype=np.int32)
+    if len(points) != len(cells) or np.any(cells < 0):
+        raise ValueError("All sensor points must have a valid local cell")
+    if not len(points):
+        return sp.csr_matrix((0, n_cols), dtype=array.dtype)
+    nodes = np.asarray(dofmap.list)[cells]  # (points, cell nodes)
+    # Greedy colouring: cells sharing a colour share no nodes, so setting node
+    # j of every cell in a colour isolates one basis function per point.
+    colour_nodes: list[set[int]] = []
+    colour_of: dict[int, int] = {}
+    for cell, cell_nodes in zip(cells.tolist(), nodes, strict=True):
+        if cell in colour_of:
+            continue
+        node_set = set(cell_nodes.tolist())
+        for k, used in enumerate(colour_nodes):
+            if used.isdisjoint(node_set):
+                used.update(node_set)
+                colour_of[cell] = k
+                break
+        else:
+            colour_nodes.append(node_set)
+            colour_of[cell] = len(colour_nodes) - 1
+    point_colour = np.array([colour_of[c] for c in cells.tolist()])
+    rows, cols, data = [], [], []
+    saved = array.copy()
+    try:
+        for k in range(len(colour_nodes)):
+            sel = np.flatnonzero(point_colour == k)
+            for j in range(nodes.shape[1]):
+                for comp in range(bs):
+                    dofs = nodes[sel, j] * bs + comp
+                    array[:] = 0.0
+                    array[dofs] = 1.0
+                    values = function.eval(points[sel], cells[sel]).reshape(len(sel), value_size)
+                    for out in range(value_size):
+                        weights = values[:, out]
+                        keep = weights != 0.0
+                        rows.append(sel[keep] * value_size + out)
+                        cols.append(dofs[keep])
+                        data.append(weights[keep])
+    finally:
+        array[:] = saved
+    return sp.csr_matrix(
+        (np.concatenate(data), (np.concatenate(rows), np.concatenate(cols))),
+        shape=(len(points) * value_size, n_cols),
+    )
+
+
 class PointSensors:
     """Evaluate exact FE point values with exactly one owning rank per point."""
 
@@ -266,10 +339,28 @@ class PointSensors:
         self.count = len(points_arr)
 
     def sample(self, field: Any) -> np.ndarray:
-        """Return ``(n_owned, 2)`` displacement values at the owned points."""
+        """Return ``(n_owned, value_size)`` field values at the owned points.
+
+        Uses a point-evaluation matrix cached per function space; ghost values
+        must be current, exactly as for ``Function.eval``.
+        """
+        size = int(np.prod(field.ufl_shape)) if field.ufl_shape else 1
         if not len(self.indices):
-            return np.empty((0, 2))
-        return field.eval(self.points, self.cells).reshape(-1, 2)
+            return np.empty((0, size))
+        # Subclasses may bypass __init__, so create the cache lazily. Keep the
+        # space alive with its operator so an id() is never reused while cached.
+        cache = self.__dict__.setdefault("_evaluators", {})
+        space = field.function_space
+        if space.component():
+            # Sub-function views address the parent's DOF array; use eval.
+            return field.eval(self.points, self.cells).reshape(-1, size)
+        entry = cache.get(id(space))
+        if entry is None:
+            entry = cache[id(space)] = (
+                space,
+                point_evaluation_matrix(field, self.points, self.cells),
+            )
+        return (entry[1] @ field.x.array).reshape(-1, size)
 
     def gather(
         self, local: np.ndarray, *, out: np.ndarray | None = None, chunk_bytes: int = 8 * 1024**2
@@ -287,7 +378,7 @@ class PointSensors:
         error = None
         if local.ndim != 2 or local.shape[1] != len(self.indices):
             error = "History columns must match the locally owned sensors"
-        if not isinstance(chunk_bytes, int) or isinstance(chunk_bytes, bool) or chunk_bytes < 1:
+        elif not isinstance(chunk_bytes, int) or isinstance(chunk_bytes, bool) or chunk_bytes < 1:
             error = "chunk_bytes must be a positive integer"
         # Validate collectively so a bad rank-local argument cannot strand peers
         # in a later Gatherv when this helper is used outside run_simulation.

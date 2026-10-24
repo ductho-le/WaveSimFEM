@@ -36,7 +36,7 @@ def validate_options(value):
     unknown = set(value) - set(defaults)
     if unknown:
         raise ValueError(f"Unknown wave_characterisation settings: {sorted(unknown)}")
-    options = defaults | dict(value)
+    options = defaults | {k: v for k, v in value.items() if k != "component" or v is not None}
     if not isinstance(options["enabled"], (bool, np.bool_)):
         raise ValueError("wave_characterisation.enabled must be boolean")
     options["enabled"] = bool(options["enabled"])

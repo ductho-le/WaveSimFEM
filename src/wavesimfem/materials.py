@@ -125,7 +125,7 @@ def canonicalize_mode(mode_str: str | None) -> str:
     """
     if mode_str is None:
         return "N_layers"
-    s = str(mode_str).lower().replace("-", "_").replace(" ", "_").strip()
+    s = str(mode_str).strip().lower().replace("-", "_").replace(" ", "_")
     if s in ("1_layer", "1layer", "single", "single_layer", "1", "one_layer"):
         return "1_layer"
     if s in ("n_layers", "nlayers", "multilayer", "multi_layer", "n"):
@@ -930,7 +930,12 @@ def sampled_time_grid(
         float(
             cfg.get("sensor_sample_rate") or AUTO_SAMPLES_PER_MESH_PERIOD * layout.mesh_frequency
         ),
-        f_max=max(float(cfg.get("disp_f_max") or 2 * cfg["f_center"]), 3 * cfg["f_center"]),
+        # Keep the whole meshed band alias-free, not only the source band.
+        f_max=max(
+            float(cfg.get("disp_f_max") or 2 * cfg["f_center"]),
+            3 * cfg["f_center"],
+            float(layout.mesh_frequency),
+        ),
         min_samples=min_samples,
     )
     if n_steps % stride:

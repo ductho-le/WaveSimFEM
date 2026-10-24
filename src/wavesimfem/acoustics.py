@@ -81,12 +81,6 @@ class RegionSensors(PointSensors):
         self.cells = local[self.indices]
         self.count = len(points)
 
-    def sample(self, function: Any) -> np.ndarray:
-        size = int(np.prod(function.ufl_shape)) if function.ufl_shape else 1
-        if not len(self.indices):
-            return np.empty((0, size))
-        return function.eval(self.points, self.cells).reshape(-1, size)
-
 
 def _assemble(form: Any) -> Any:
     result = fem_petsc.assemble_matrix(fem.form(form))
@@ -223,7 +217,10 @@ class _MeshContext:
 
 
 def _region_band(x: Any, region: dict[str, Any], tol: float) -> Any:
-    return ufl.And(ufl.ge(x[1], region["y_bot"] - tol), ufl.le(x[1], region["y_top"] + tol))
+    domain = x.ufl_domain()
+    low = fem.Constant(domain, default_scalar_type(region["y_bot"] - tol))
+    high = fem.Constant(domain, default_scalar_type(region["y_top"] + tol))
+    return ufl.And(ufl.ge(x[1], low), ufl.le(x[1], high))
 
 
 def _mesh_context(cfg: dict[str, Any], summary: dict[str, Any]) -> _MeshContext:
@@ -304,23 +301,30 @@ def _interface_coupling(ctx: _MeshContext, V: Any, Q: Any) -> Any:
     return _assemble(vs * pf * dS(1))
 
 
+def _constant(ctx: _MeshContext, value: float) -> Any:
+    """Form coefficient as a Constant: kernels are reused across parameter values."""
+    return fem.Constant(ctx.domain, default_scalar_type(value))
+
+
 def _sponge_indicator(ctx: _MeshContext) -> Any:
     """Quintic absorbing-layer profile, zero outside the lateral/half-space sponges."""
     x, summary, plate = ctx.x, ctx.summary, ctx.layout.plate_length
-    length = ctx.cfg["absorb_length"]
+    length_value = ctx.cfg["absorb_length"]
     ind = ufl.as_ufl(0.0)
-    if length > 0:
+    if length_value > 0:
+        length = _constant(ctx, length_value)
+        right = _constant(ctx, plate - length_value)
         ind += ufl.conditional(ufl.lt(x[0], length), ((length - x[0]) / length) ** 5, 0.0)
-        ind += ufl.conditional(
-            ufl.gt(x[0], plate - length), ((x[0] - plate + length) / length) ** 5, 0.0
-        )
+        ind += ufl.conditional(ufl.gt(x[0], right), ((x[0] - right) / length) ** 5, 0.0)
     if summary["has_bottom_halfspace"]:
-        depth = summary["bottom_halfspace"]["absorb_depth"]
-        edge = summary["y_min"] + depth
+        depth_value = summary["bottom_halfspace"]["absorb_depth"]
+        depth = _constant(ctx, depth_value)
+        edge = _constant(ctx, summary["y_min"] + depth_value)
         ind += ufl.conditional(ufl.lt(x[1], edge), ((edge - x[1]) / depth) ** 5, 0.0)
     if summary["has_top_halfspace"]:
-        depth = summary["top_halfspace"]["absorb_depth"]
-        edge = summary["y_max"] - depth
+        depth_value = summary["top_halfspace"]["absorb_depth"]
+        depth = _constant(ctx, depth_value)
+        edge = _constant(ctx, summary["y_max"] - depth_value)
         ind += ufl.conditional(ufl.gt(x[1], edge), ((x[1] - edge) / depth) ** 5, 0.0)
     return ind
 
@@ -330,7 +334,8 @@ def _field_forms(ctx: _MeshContext, V: Any, Q: Any) -> list[Any]:
     u, v = ufl.TrialFunction(V), ufl.TestFunction(V)
     p, w = ufl.TrialFunction(Q), ufl.TestFunction(Q)
     dx, ind = ctx.dx, _sponge_indicator(ctx)
-    alpha, beta = ctx.cfg["absorb_alpha"], ctx.cfg["absorb_beta"]
+    alpha = _constant(ctx, ctx.cfg["absorb_alpha"])
+    beta = _constant(ctx, ctx.cfg["absorb_beta"])
     zero = fem.Constant(ctx.domain, default_scalar_type(0.0))
     ms = zero * ufl.dot(u, v) * dx
     ks, ds_form = ms, ms
@@ -341,7 +346,7 @@ def _field_forms(ctx: _MeshContext, V: Any, Q: Any) -> list[Any]:
         return ufl.sym(ufl.grad(z))
 
     def voigt_stress(z: Any, constants: Any) -> Any:
-        c11, c12, c16, c22, c26, c66 = constants
+        c11, c12, c16, c22, c26, c66 = (_constant(ctx, c) for c in constants)
         tensor = ufl.as_matrix([[c11, c12, c16], [c12, c22, c26], [c16, c26, c66]])
         e = eps(z)
         stress = tensor * ufl.as_vector([e[0, 0], e[1, 1], 2 * e[0, 1]])
@@ -349,17 +354,18 @@ def _field_forms(ctx: _MeshContext, V: Any, Q: Any) -> list[Any]:
 
     for tag, reg in enumerate(ctx.regions, 1):
         if ctx.is_fluid(reg):
-            m = p * w / reg["K"]
-            k = ufl.dot(ufl.grad(p), ufl.grad(w)) / reg["rho"]
+            m = p * w / _constant(ctx, reg["K"])
+            k = ufl.dot(ufl.grad(p), ufl.grad(w)) / _constant(ctx, reg["rho"])
             mp += m * dx(tag)
             kp += k * dx(tag)
             dp += ind * (alpha * m + beta * k) * dx(tag)
         else:
-            m = reg["rho"] * ufl.dot(u, v)
+            m = _constant(ctx, reg["rho"]) * ufl.dot(u, v)
             if "C" in reg:
                 stress = voigt_stress(u, reg["C"])
             else:
-                stress = reg["lmbda"] * ufl.div(u) * ufl.Identity(2) + 2 * reg["mu"] * eps(u)
+                lmbda, mu = _constant(ctx, reg["lmbda"]), _constant(ctx, reg["mu"])
+                stress = lmbda * ufl.div(u) * ufl.Identity(2) + 2 * mu * eps(u)
             k = ufl.inner(stress, eps(v))
             ms += m * dx(tag)
             ks += k * dx(tag)
@@ -373,7 +379,9 @@ def _field_forms(ctx: _MeshContext, V: Any, Q: Any) -> list[Any]:
         if ctx.cfg.get("acoustic_boundaries", {}).get(face, "rigid") == "radiation":
             for reg in ctx.fluids:
                 impedance = ufl.conditional(
-                    _region_band(ctx.x, reg, ctx.tol), 1.0 / (reg["rho"] * reg["c_fluid"]), 0.0
+                    _region_band(ctx.x, reg, ctx.tol),
+                    _constant(ctx, 1.0 / (reg["rho"] * reg["c_fluid"])),
+                    0.0,
                 )
                 dp += impedance * p * w * ctx.ds(tag)
     return [ms, ks, ds_form, mp, kp, dp]
@@ -445,7 +453,9 @@ def _source_forms(
     # sigma = excitation_width / 3, i.e. exp(-(x - x0)^2 / (2 sigma^2)).
     sigma = cfg["excitation_width"] / 3.0
     profile = (
-        ufl.exp(-((x[0] - cfg["source_x"]) ** 2) / (2.0 * sigma**2))
+        ufl.exp(
+            -((x[0] - _constant(ctx, cfg["source_x"])) ** 2) / (2.0 * _constant(ctx, sigma) ** 2)
+        )
         if source_face not in ("left", "right")
         else 1.0
     )
@@ -480,7 +490,7 @@ def _source_forms(
         norm = float(np.hypot(fx, fy))
         if not np.isfinite(norm) or norm <= 0.0:
             raise ValueError("source_fx and source_fy must not both be zero")
-        direction = ufl.as_vector([fx / norm, fy / norm])
+        direction = ufl.as_vector([_constant(ctx, fx / norm), _constant(ctx, fy / norm)])
         if source_face == "interface":
             facet = locate_entities(
                 domain, fdim, lambda z: np.isclose(z[1], source_y, atol=tol, rtol=0)
@@ -671,66 +681,91 @@ def build_acoustic_problem(
     ls, lp, prescribed, drive, source_y = _source_forms(ctx, V, Q, location, coords_p, constrained)
     constrained |= drive
 
+    import contextlib
+
     coords_u = V.tabulate_dof_coordinates()
-    u_dofs, ui = _restriction(V, _in_regions(coords_u[:, 1], ctx.solids, ctx.tol))
-    p_dofs, pi = _restriction(Q, active_p & ~constrained)
-    energy_dofs, ei = _restriction(Q, active_p)
-    coupling_full = _interface_coupling(ctx, V, Q)
-    full = [_assemble(form) for form in _field_forms(ctx, V, Q)]
-    loads = (_vector(ls), _vector(lp))
+    # Objects that the problem will own: released here only if building fails.
+    owned: list[Any] = []
     try:
-        from wavesimfem.solvers import _drop_zero_entries
+        with contextlib.ExitStack() as temporary:
 
-        restricted = [
-            a.createSubMatrix(ui if i < 3 else pi, ui if i < 3 else pi) for i, a in enumerate(full)
-        ]
-        for idx in (2, 5):
-            if restricted[idx].getSize()[0] > 0:
-                raw = restricted[idx]
-                restricted[idx] = _drop_zero_entries(raw)
-                raw.destroy()
-        ops = AcousticOperators(*restricted, coupling_full.createSubMatrix(ui, pi))
-        energy = (full[3].createSubMatrix(ei, ei), full[4].createSubMatrix(ei, ei))
-        forcing, source_vectors = _separable_forcing(
-            cfg,
-            full,
-            coupling_full,
-            loads,
-            prescribed,
-            (u_dofs, p_dofs),
-            ops,
+            def temp(obj: Any) -> Any:
+                temporary.callback(obj.destroy)
+                return obj
+
+            u_dofs, ui = _restriction(V, _in_regions(coords_u[:, 1], ctx.solids, ctx.tol))
+            temp(ui)
+            p_dofs, pi = _restriction(Q, active_p & ~constrained)
+            temp(pi)
+            energy_dofs, ei = _restriction(Q, active_p)
+            temp(ei)
+            coupling_full = temp(_interface_coupling(ctx, V, Q))
+            full = [temp(_assemble(form)) for form in _field_forms(ctx, V, Q)]
+            loads = (temp(_vector(ls)), temp(_vector(lp)))
+
+            from wavesimfem.solvers import _drop_zero_entries
+
+            restricted = []
+            for i, a in enumerate(full):
+                rows = ui if i < 3 else pi
+                restricted.append(a.createSubMatrix(rows, rows))
+                owned.append(restricted[-1])
+            for idx in (2, 5):
+                if restricted[idx].getSize()[0] > 0:
+                    raw = restricted[idx]
+                    restricted[idx] = owned[idx] = _drop_zero_entries(raw)
+                    raw.destroy()
+            coupling = coupling_full.createSubMatrix(ui, pi)
+            owned.append(coupling)
+            ops = AcousticOperators(*restricted, coupling)
+            energy_mass = full[3].createSubMatrix(ei, ei)
+            owned.append(energy_mass)
+            energy_stiffness = full[4].createSubMatrix(ei, ei)
+            owned.append(energy_stiffness)
+            energy = (energy_mass, energy_stiffness)
+            forcing, source_vectors = _separable_forcing(
+                cfg,
+                full,
+                coupling_full,
+                loads,
+                prescribed,
+                (u_dofs, p_dofs),
+                ops,
+            )
+            owned.extend(source_vectors)
+
+        sensor_x, sensor_y, observable, selected, probes = _sensor_layout(ctx)
+        result = AcousticProblem(
+            cfg=cfg,
+            summary=ctx.summary,
+            layout=ctx.layout,
+            domain=ctx.domain,
+            V=V,
+            Q=Q,
+            operators=ops,
+            u_dofs=u_dofs,
+            p_dofs=p_dofs,
+            u_coords=np.repeat(coords_u[: V.dofmap.index_map.size_local], 2, axis=0)[u_dofs],
+            u_components=u_dofs % 2,
+            p_coords=coords_p[p_dofs],
+            probes=probes,
+            sensor_x=sensor_x,
+            sensor_y=sensor_y,
+            sensor_region=selected,
+            observable=observable,
+            load_y=source_y,
+            prescribed=prescribed,
+            forcing=forcing,
+            energy_operators=energy,
+            energy_dofs=energy_dofs,
+            cell_tags=ctx.cell_tags,
         )
-    finally:
-        for obj in [*full, coupling_full, ui, pi, ei, *loads]:
+    except BaseException:
+        for obj in reversed(owned):
             obj.destroy()
-
-    sensor_x, sensor_y, observable, selected, probes = _sensor_layout(ctx)
-    result = AcousticProblem(
-        cfg=cfg,
-        summary=ctx.summary,
-        layout=ctx.layout,
-        domain=ctx.domain,
-        V=V,
-        Q=Q,
-        operators=ops,
-        u_dofs=u_dofs,
-        p_dofs=p_dofs,
-        u_coords=np.repeat(coords_u[: V.dofmap.index_map.size_local], 2, axis=0)[u_dofs],
-        u_components=u_dofs % 2,
-        p_coords=coords_p[p_dofs],
-        probes=probes,
-        sensor_x=sensor_x,
-        sensor_y=sensor_y,
-        sensor_region=selected,
-        observable=observable,
-        load_y=source_y,
-        prescribed=prescribed,
-        forcing=forcing,
-        energy_operators=energy,
-        energy_dofs=energy_dofs,
-        cell_tags=ctx.cell_tags,
-    )
-    result._objects = [*restricted, ops.C, *energy, *source_vectors]
+        raise
+    # Same order as before: restricted operators, coupling, energy, sources.
+    result._objects = owned
     return result
 
 
@@ -745,15 +780,16 @@ class AcousticSampler:
         self.integral = fem.Function(problem.Q)
         self.fluid_velocity = None
         self.velocity_expression = None
-        mass = problem.energy_operators[0]
-        self._energy_vectors = (mass.createVecRight(), mass.createVecLeft())
         if problem.observable == "particle_velocity":
             W = fem.functionspace(problem.domain, ("DG", int(problem.cfg["degree"]), (2,)))
             self.fluid_velocity = fem.Function(W, name="fluid_particle_velocity")
+            rho = fem.Constant(problem.domain, default_scalar_type(problem.sensor_region["rho"]))
             self.velocity_expression = fem.Expression(
-                -ufl.grad(self.integral) / problem.sensor_region["rho"],
+                -ufl.grad(self.integral) / rho,
                 W.element.interpolation_points,
             )
+        mass = problem.energy_operators[0]
+        self._energy_vectors = (mass.createVecRight(), mass.createVecLeft())
 
     def update(self, stepper: Any, t: float, prescribed_integral: float) -> np.ndarray:
         p = self.problem
