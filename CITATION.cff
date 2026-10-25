@@ -1,10 +1,10 @@
 cff-version: 1.2.0
 message: "If you use WaveSimFEM in academic research or industrial applications, please cite it as below."
-title: "WaveSimFEM: A GPU-accelerated multi-scale finite element framework for acoustic and elastic wave simulation in heterogeneous layered media"
+title: "WaveSimFEM: A GPU-accelerated finite element framework for acoustic and elastic wave propagation in layered media"
 type: software
 abstract: >-
-  WaveSimFEM is a GPU-accelerated multi-scale finite element framework built on DOLFINx and
-  PETSc for acoustic and elastic wave simulation in heterogeneous layered media, including
+  WaveSimFEM is a GPU-accelerated finite element framework built on DOLFINx and
+  PETSc for acoustic and elastic wave propagation in layered media, including
   guided and surface waves (Lamb, Rayleigh, leaky and interface waves) in layered plates
   and halfspaces with isotropic, anisotropic and viscoelastic solids coupled to inviscid acoustic
   (pressure) fluids. It
