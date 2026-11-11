@@ -297,7 +297,8 @@ def integrate_explicit_rk4(
     sensor_matrix
         Point-evaluation operator of shape ``(2*n_sensors, n)``.
     save_every
-        Snapshot cadence in steps (snapshots at steps ``0, save_every, ...``).
+        Snapshot cadence in completed steps (``0, save_every, ...``), always
+        including the final step. Callback timestamps are ``step * dt``.
     report_interval
         Progress/finite-check cadence in steps (``0`` → every ``n_steps//20``).
     history_chunk_bytes
@@ -404,6 +405,8 @@ def integrate_explicit_rk4(
                 if history_callback is not None:
                     history_callback(times[first : last_row + 1].copy(), values)
 
+        if snapshot_callback is not None:
+            snapshot_callback(0, 0.0, backend.to_host(u))
         t_loop = pytime.perf_counter()
         pending = 0
         row = 0  # last recorded sample row (row 0 is the initial state)
@@ -443,8 +446,11 @@ def integrate_explicit_rk4(
                     flush(row, pending)
                     pending = 0
 
-            if snapshot_callback is not None and step % save_every == 0:
-                snapshot_callback(step, t + dt, backend.to_host(u))
+            completed = step + 1
+            if snapshot_callback is not None and (
+                completed % save_every == 0 or completed == n_steps
+            ):
+                snapshot_callback(completed, completed * dt, backend.to_host(u))
 
             if (step + 1) % check_every == 0 or step + 1 == n_steps:
                 if not backend.all_finite(z):

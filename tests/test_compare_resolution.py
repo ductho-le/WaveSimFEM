@@ -101,3 +101,12 @@ def test_resolution_tool_runs_and_resumes_exact_meshes(tmp_path, solver):
     ]
     assert all(r["wall_seconds"] is None for r in report["runs"])
     assert report["receivers"] == 4
+
+
+def test_relative_metrics_rejects_zero_reference():
+    import numpy as np
+
+    zeros = np.zeros((16, 4, 2))
+    ones = np.ones((16, 4, 2))
+    with pytest.raises(ValueError, match="zero or non-finite amplitude"):
+        comparison.relative_metrics(ones, zeros)

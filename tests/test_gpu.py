@@ -164,9 +164,10 @@ def test_engine_matches_reference_rk4(chunk_bytes):
     assert np.abs(ref).max() > 0
 
 
-def test_engine_single_precision_and_snapshots():
+@pytest.mark.parametrize("n_steps,save_every", [(20, 5), (22, 5), (3, 5), (1, 1)])
+def test_engine_single_precision_and_snapshots(n_steps, save_every):
     K, C, inv_mass, load, S = _random_damped_system()
-    snaps: list[tuple[int, float]] = []
+    snaps = []
     result = integrate_explicit_rk4(
         K,
         C,
@@ -174,14 +175,21 @@ def test_engine_single_precision_and_snapshots():
         load,
         S,
         dt=2e-3,
-        n_steps=20,
+        n_steps=n_steps,
         source=_source,
         backend=make_backend(CPU_DEVICE, "single"),
-        save_every=5,
-        snapshot_callback=lambda step, t, u: snaps.append((step, t)),
+        save_every=save_every,
+        snapshot_callback=lambda step, t, u: snaps.append((step, t, u.copy())),
     )
     assert result.sensor_data_x.dtype == np.float32
-    assert [s for s, _ in snaps] == [0, 5, 10, 15]
+    expected_steps = sorted({0, n_steps, *range(save_every, n_steps + 1, save_every)})
+    assert [s for s, _, _ in snaps] == expected_steps
+    np.testing.assert_allclose([t for _, t, _ in snaps], np.array(expected_steps) * 2e-3)
+    np.testing.assert_array_equal(snaps[0][2], 0)
+    for step, _, state in snaps:
+        observed = S @ state
+        np.testing.assert_allclose(observed[0::2], result.sensor_data_x[step], atol=1e-7)
+        np.testing.assert_allclose(observed[1::2], result.sensor_data_y[step], atol=1e-7)
 
 
 def test_engine_detects_instability():

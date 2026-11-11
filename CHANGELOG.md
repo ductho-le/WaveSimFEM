@@ -35,6 +35,12 @@ All notable changes are documented here. Versions follow
 
 ### Fixed
 
+- Lamb reports read archived sectioned frequency bounds from `mesh`, including
+  unit strings, while retaining support for resolved flat configurations.
+- Elastic snapshots use completed-step timestamps across PETSc and array
+  backends and include the initial and final states.
+- Sensor validation and acoustic assembly share mesh-based interface tolerances
+  and material-side selection, accepting unambiguous near-interface receivers.
 - PETSc temporaries are released on error paths during explicit-solver and
   acoustic-problem setup.
 - `PointSensors.gather` reports the first validation error.

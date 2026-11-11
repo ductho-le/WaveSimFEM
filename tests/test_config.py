@@ -568,3 +568,68 @@ def test_anisotropic_layer_bounds_match_isotropic_equivalent():
     assert aniso["c_T"] == pytest.approx(iso["c_T"], rel=1e-12)
     assert aniso["c_L"] >= iso["c_L"]
     assert np.allclose(aniso["C_mat"], aniso["C_mat"].T)
+
+
+def test_readme_yaml_example_is_valid_config():
+    """The 'Configuration at a Glance' YAML snippet in README.md must parse and validate."""
+    import re
+    from pathlib import Path
+
+    import yaml
+
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    blocks = re.findall(r"```yaml\n(.*?)```", readme, flags=re.DOTALL)
+    assert blocks, "Expected at least one ```yaml block in README.md"
+    for block in blocks:
+        resolved = parse_and_resolve_config(custom_cfg=yaml.safe_load(block))
+        assert resolved["structure_mode"] == "1_layer"
+        assert resolved["n_sensors"] == 64
+
+
+def test_sensor_placement_and_observable_compatibility_checked_at_config_time():
+    """Incompatible sensor_region, sensor_y, and sensor_observable fail during config validation."""
+    from wavesimfem.materials import preflight_estimate
+
+    water = {"name": "water", "thickness": 1e-3, "rho": 1000.0, "c_sound": 1500.0}
+    solid = dict(ALUMINUM, name="aluminum", thickness=1e-3)
+
+    # Solid-solid stack: default sensor_y is top (aluminum), so sensor_region='bottom' cannot match
+    two_solids = _base()
+    two_solids["structure"] = {
+        "mode": "N_layers",
+        "layers": [dict(ALUMINUM, name="bottom", thickness=1e-3), solid],
+    }
+    two_solids["mesh"]["ny_per_region"] = [2, 2]
+    two_solids.setdefault("sensors", {})["region"] = "bottom"
+    with pytest.raises(ValueError, match="sensor_region 'bottom' does not contain or touch"):
+        parse_and_resolve_config(custom_cfg=two_solids)
+
+    # Even on an unvalidated raw dict, preflight_estimate must not misclassify empty candidates as pressure
+    unvalidated = parse_and_resolve_config(custom_cfg=two_solids, validate_simulation=False)
+    unvalidated.update(duration=1e-5, max_frequency=3e5, source_x=0.0, n_sensors=8)
+    assert preflight_estimate(unvalidated, rank=1)["sensor_components_est"] == 2
+
+    # Coupled water + solid: displacement inside water-only height fails immediately
+    coupled = _base()
+    coupled["structure"] = {"mode": "N_layers", "layers": [water, solid]}
+    coupled["mesh"]["ny_per_region"] = [2, 2]
+    coupled.setdefault("sensors", {}).update(sensor_y=0.5e-3, observable="displacement")
+    with pytest.raises(ValueError, match="supports sensor_observable 'displacement'"):
+        parse_and_resolve_config(custom_cfg=coupled)
+
+    # Fluid-fluid interface with particle_velocity requires sensors.region
+    two_fluids = _base()
+    two_fluids["structure"] = {
+        "mode": "N_layers",
+        "layers": [water, dict(water, name="oil", rho=850.0, c_sound=1400.0)],
+    }
+    two_fluids["mesh"]["ny_per_region"] = [2, 2]
+    two_fluids["excitation"] = {
+        "f_center": 1e5,
+        "source_kind": "acoustic_volume",
+        "source_region": "water",
+        "source_amplitude": 1.0,
+    }
+    two_fluids.setdefault("sensors", {}).update(sensor_y=1e-3, observable="particle_velocity")
+    with pytest.raises(ValueError, match=r"requires sensors\.region"):
+        parse_and_resolve_config(custom_cfg=two_fluids)

@@ -103,3 +103,65 @@ def test_scholte_speed_and_localization_converge():
 @pytest.mark.slow
 def test_fluid_loaded_plate_dispersion():
     assert verify.plate_check()["status"] == "pass"
+
+
+def test_acoustic_assembly_emits_no_deprecation_warnings():
+    import warnings
+
+    cfg = verify.benchmark_config([verify.fluid()], 4, [3], degree=1)
+    cfg["acoustic_boundaries"]["right"] = "radiation"
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        problem = verify.build(cfg)
+        problem.destroy()
+
+
+@pytest.mark.parametrize(
+    "offset,region", [(-5e-7, None), (5e-7, None), (0.0, "lower"), (0.0, "upper")]
+)
+def test_near_interface_sensor_validation_matches_assembly(offset, region):
+    from wavesimfem.config import parse_and_resolve_config
+
+    cfg = verify.benchmark_config(
+        [verify.fluid("lower"), verify.fluid("upper")], 4, [10, 10], degree=1
+    )
+    cfg.update(sensor_y=1.0 + offset, sensor_region=region, sensor_observable="particle_velocity")
+    cfg = parse_and_resolve_config(custom_cfg=cfg)
+    problem = verify.build(cfg)
+    try:
+        assert problem.sensor_region["name"] == (region or ("lower" if offset < 0 else "upper"))
+        assert problem.sensor_y == cfg["sensor_y"]
+    finally:
+        problem.destroy()
+
+
+def test_exact_fluid_interface_requires_side_in_validation_and_assembly():
+    from wavesimfem.config import parse_and_resolve_config
+
+    cfg = verify.benchmark_config(
+        [verify.fluid("lower"), verify.fluid("upper")], 4, [10, 10], degree=1
+    )
+    cfg.update(sensor_y=1.0, sensor_region=None, sensor_observable="particle_velocity")
+    for validate in (lambda: parse_and_resolve_config(custom_cfg=cfg), lambda: verify.build(cfg)):
+        with pytest.raises(ValueError, match=r"requires sensors\.region"):
+            validate()
+
+
+@pytest.mark.parametrize(
+    "offset,observable,components", [(-5e-7, "displacement", 2), (5e-7, "pressure", 1)]
+)
+def test_near_solid_fluid_interface_auto_observable_agrees_with_preflight(
+    offset, observable, components
+):
+    from wavesimfem.config import parse_and_resolve_config
+    from wavesimfem.materials import preflight_estimate
+
+    cfg = verify.benchmark_config([verify.solid(), verify.fluid()], 4, [10, 10], degree=1)
+    cfg.update(sensor_y=1.0 + offset, sensor_region=None, sensor_observable="auto")
+    cfg = parse_and_resolve_config(custom_cfg=cfg)
+    assert preflight_estimate(cfg, rank=1)["sensor_components_est"] == components
+    problem = verify.build(cfg)
+    try:
+        assert problem.observable == observable
+    finally:
+        problem.destroy()

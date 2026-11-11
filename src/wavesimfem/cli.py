@@ -182,6 +182,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable automated post-processing and figure generation",
     )
+    parser.add_argument(
+        "--usetex",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Enable or disable external LaTeX figure rendering (overrides output.usetex)",
+    )
     verbosity = parser.add_mutually_exclusive_group()
     verbosity.add_argument(
         "-q", "--quiet", action="store_true", help="Only print warnings and errors"

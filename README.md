@@ -16,7 +16,7 @@
 
 ---
 
-**WaveSimFEM** is an open-source, user-friendly Python framework for simulating acoustic and elastic wave propagation in layered media. Built on [DOLFINx](https://fenicsproject.org/) and [PETSc](https://petsc.org/), with optional single-GPU acceleration via [CuPy](https://cupy.dev/), it provides a seamless workflow: **configure in YAML → simulate → record virtual sensors → analyze dispersion**.
+**WaveSimFEM** is an open-source, user-friendly Python framework for simulating acoustic and elastic wave propagation in layered media. Built on [DOLFINx](https://fenicsproject.org/) and [PETSc](https://petsc.org/), with optional GPU acceleration via [CuPy](https://cupy.dev/), it provides a seamless workflow: **configure in YAML → simulate → record virtual sensors → analyze dispersion**.
 
 Whether you are studying guided Lamb waves in aerospace composites, Rayleigh waves in seismology, ultrasound in cortical bone, or acoustic waves in fluid–solid channels, WaveSimFEM makes complex multi-physics finite element wave modeling accessible in minutes.
 
@@ -24,7 +24,7 @@ Whether you are studying guided Lamb waves in aerospace composites, Rayleigh wav
 
 ## ✨ Key Features
 
-- ⚡ **High Performance & GPU Acceleration**: Stage-consistent explicit Runge–Kutta 4 (RK4) integration with single-GPU CUDA acceleration via CuPy and distributed multi-core scaling via MPI/PETSc.
+- ⚡ **High Performance & GPU Acceleration**: Stage-consistent explicit Runge–Kutta 4 (RK4) integration with GPU acceleration via CuPy and distributed multi-core scaling via MPI/PETSc.
 - 🌊 **Coupled Acoustic–Structure Interaction**: True pressure–displacement formulation enforcing normal traction and velocity continuity while naturally allowing tangential fluid slip.
 - 🧱 **Rich Material Library**: Supports isotropic elastic, anisotropic elastic, and Kelvin–Voigt viscoelastic solids, coupled to inviscid acoustic fluids.
 - 📐 **Zero-Boilerplate Configuration**: Define models, meshes, source excitations, and sensor arrays in simple, human-readable YAML/TOML/JSON files.
@@ -72,6 +72,7 @@ Run the aluminum plate guided-wave example (1 MHz Lamb waves):
 wavesim -c configs/01_plate_aluminum_lamb.yaml --dry-run
 
 # Run simulation on CPU and produce waveforms & dispersion plots
+# (Add --no-usetex if external LaTeX/dvipng/Ghostscript are not installed)
 wavesim -c configs/01_plate_aluminum_lamb.yaml
 ```
 
@@ -150,35 +151,38 @@ wavesim --generate-config my_waveguide.yaml
 Here is an example of how intuitive a model configuration is:
 
 ```yaml
+solver:
+  type: explicit
+  CFL: 0.8
+
 structure:
-  mode: free_plate
-  regions:
-    - name: aluminum
-      thickness: 3.0e-3
-      density: 2700.0
-      constitutive:
-        type: isotropic
-        E: 70.0e9
-        nu: 0.33
+  mode: 1_layer
+  single_layer:
+    name: aluminum
+    thickness: 3.0e-3
+    rho: 2700.0
+    E: 70.0e9
+    nu: 0.33
 
 geometry:
-  length: 0.10             # 100 mm propagation length
+  sensing_length: 0.10       # 100 mm sensing zone
+  absorb_length: 0.03        # 30 mm lateral absorbing sponges
 
 mesh:
-  nx: 200
+  nx: 320
   ny_per_region: [12]
-  degree: 2                # Quadratic (Q2) quadrilateral elements
+  degree: 2                  # Quadratic (Q2) quadrilateral elements
 
 excitation:
-  waveform: ricker
-  center_frequency: 1.0e6  # 1 MHz pulse
-  amplitude: 1.0e6
-  direction: y
+  source_type: ricker
+  f_center: 1.0e6            # 1 MHz pulse
+  traction_max: 1.0e6
+  source_fy: -1.0
 
 sensors:
-  count: 64
-  pitch: 1.0e-3            # 1 mm sensor spacing
-  material_side: upper
+  n_sensors: 64
+  sensor_offset: 5.0e-3
+  sensor_pitch: 1.0e-3       # 1 mm sensor spacing
 ```
 
 *See [configs/template.yaml](configs/template.yaml) for a complete, annotated reference of all available parameters.*
@@ -192,7 +196,7 @@ Every simulation outputs structured, reproducible archives:
 - **`sensor_data.npz`**: Compressed NumPy archive storing timestamps, sensor positions, recorded physical observables (`sensor_data_x`, `sensor_data_y`, `sensor_data_pressure`), units, and run metadata.
 - **`simulation_config.yaml`**: Full resolved configuration and runtime provenance (mesh details, realized $\Delta t$, versions, hashes).
 - **`full_analysis.png`** / **`pdf`**: Multi-panel visualization containing time-domain waveforms, B-scan spatio-temporal waterfall plots, and frequency–wavenumber ($f$–$k$) dispersion spectra.
-- **`guided_wave.bp`** *(optional)*: 2D wavefield snapshots viewable in ParaView (`output.write_vtx: true`).
+- **`guided_wave.bp`** / **`solid_displacement.bp`** / **`acoustic_pressure.bp`** *(optional)*: 2D wavefield snapshots viewable in ParaView (`output.write_vtx: true`).
 
 ---
 

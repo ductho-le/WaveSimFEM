@@ -232,3 +232,22 @@ def test_cli_frequency_overrides_dry_run(capsys):
     )
     out = capsys.readouterr().out
     assert "Dry run complete" in out
+
+
+def test_cli_no_usetex_overrides_config(tmp_path):
+    archive = _write_archive(tmp_path / "sensor_data.npz")
+    config = tmp_path / "usetex_on.yaml"
+    config.write_text("output:\n  figure_formats: [png]\n  usetex: true\n", encoding="utf-8")
+    destination = tmp_path / "out"
+    main(
+        [
+            "-c",
+            str(config),
+            "--postprocess",
+            str(archive),
+            "--output",
+            str(destination),
+            "--no-usetex",
+        ]
+    )
+    assert (destination / "full_analysis.png").exists()

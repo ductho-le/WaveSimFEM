@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from wavesimfem.config import parse_and_resolve_config
+from wavesimfem.config import FIGURE_FORMATS, parse_and_resolve_config
 from wavesimfem.lamb import s0_wavenumber
 from wavesimfem.materials import a0_wavenumber, compute_rayleigh_speed, structure_from_config
 
@@ -322,9 +322,7 @@ def create_synthetic_archive(config_path: Path, output_dir: Path) -> tuple[Path,
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("results_structure_preview"))
-    parser.add_argument(
-        "--formats", nargs="+", choices=("png", "pdf", "svg"), default=["png", "pdf"]
-    )
+    parser.add_argument("--formats", nargs="+", choices=FIGURE_FORMATS, default=["png", "pdf"])
     parser.add_argument("--case", choices=[f"{i:02d}" for i in range(1, 9)], help="Render one case")
     parser.add_argument("--usetex", action="store_true", help="Render text with external LaTeX")
     args = parser.parse_args()

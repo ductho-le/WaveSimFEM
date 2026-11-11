@@ -737,6 +737,66 @@ def mesh_resolution(cfg: Mapping[str, Any], summary: Mapping[str, Any]) -> tuple
     return nx, [count(value, f"mesh.ny_per_region[{i}]") for i, value in enumerate(values)]
 
 
+def mesh_vertical_tolerance(cfg: Mapping[str, Any], summary: Mapping[str, Any]) -> float:
+    """Geometric tolerance shared by sensor selection and mesh assembly."""
+    _, rows = mesh_resolution(cfg, summary)
+    return min(r["thickness"] / n for r, n in zip(summary["all_regions"], rows, strict=True)) * 1e-6
+
+
+def sensor_region_candidates(
+    cfg: Mapping[str, Any], summary: Mapping[str, Any]
+) -> tuple[float, list[dict[str, Any]]]:
+    """Resolve receiver height and touching regions using the mesh tolerance."""
+    y = cfg.get("sensor_y")
+    y = (
+        float(summary["H_plate"] if summary["has_top_halfspace"] else summary["y_max"])
+        if y is None
+        else float(y)
+    )
+    tol = mesh_vertical_tolerance(cfg, summary)
+    candidates = [
+        r
+        for r in summary["all_regions"]
+        if r["y_bot"] - tol <= y <= r["y_top"] + tol
+        and (cfg.get("sensor_region") is None or r["name"] == cfg["sensor_region"])
+    ]
+    return y, candidates
+
+
+def resolve_sensor_region(
+    cfg: Mapping[str, Any], summary: Mapping[str, Any]
+) -> tuple[float, str, dict[str, Any]]:
+    """Validate the receiver observable and select its material side."""
+    y, candidates = sensor_region_candidates(cfg, summary)
+    if not candidates:
+        raise ValueError(
+            f"sensor_region {cfg['sensor_region']!r} does not contain or touch sensor_y={y:g}"
+            if cfg.get("sensor_region") is not None
+            else f"No region at sensor_y={y:g}"
+        )
+    observable = cfg.get("sensor_observable", "auto")
+    if observable == "auto":
+        observable = (
+            "pressure" if all(r.get("is_acoustic", False) for r in candidates) else "displacement"
+        )
+    compatible = [
+        r
+        for r in candidates
+        if r.get("is_acoustic", False) == (observable in ("pressure", "particle_velocity"))
+    ]
+    if not compatible:
+        raise ValueError(f"No region at sensor_y={y:g} supports sensor_observable {observable!r}")
+    if (
+        len(compatible) > 1
+        and observable == "particle_velocity"
+        and cfg.get("sensor_region") is None
+    ):
+        raise ValueError(
+            "Particle velocity at a fluid-fluid interface requires sensors.region to select a side"
+        )
+    return y, observable, compatible[0]
+
+
 def compute_mesh_layout(cfg: Mapping[str, Any], summary: Mapping[str, Any]) -> MeshLayout:
     """Use the exact user-supplied mesh, preserving every material interface."""
     f_center = float(cfg["f_center"])
@@ -1032,16 +1092,12 @@ def preflight_estimate(cfg: dict[str, Any], rank: int = 0) -> dict[str, Any]:
     # Float64 is conservative for single precision and matches PETSc histories.
     observable = cfg.get("sensor_observable", "auto")
     if observable == "auto":
-        y = cfg.get("sensor_y")
-        if y is None:
-            y = summary["H_plate"] if summary["has_top_halfspace"] else summary["y_max"]
-        tol = min(layout.h_y_per_region) * 1e-6
-        candidates = [
-            r for r in summary["all_regions"] if r["y_bot"] - tol <= y <= r["y_top"] + tol
-        ]
-        if cfg.get("sensor_region") is not None:
-            candidates = [r for r in candidates if r["name"] == cfg["sensor_region"]]
-        observable = "displacement" if any(not r["is_acoustic"] for r in candidates) else "pressure"
+        _, candidates = sensor_region_candidates(cfg, summary)
+        observable = (
+            "pressure"
+            if candidates and all(r["is_acoustic"] for r in candidates)
+            else "displacement"
+        )
     n_components = 1 if observable == "pressure" else 2
     history_size_mb = n_components * int(cfg["n_sensors"]) * n_samples * 8 / 1024**2
     timestamp_mem_mb = n_samples * 8 / 1024**2

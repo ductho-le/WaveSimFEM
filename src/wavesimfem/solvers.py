@@ -634,6 +634,8 @@ def solve_implicit(
             log(f"\n{'═' * 58}\n  Starting IMPLICIT time-stepping  ({n_steps} steps)\n{'═' * 58}")
 
         vtx = _vtx_writer(stack, problem, u)
+        if vtx is not None:
+            vtx.write(0.0)
         t_loop = pytime.perf_counter()
         for i in range(n_steps):
             step = i + 1
@@ -665,7 +667,7 @@ def solve_implicit(
             t3 = pytime.perf_counter()
 
             sample_now = step % stride == 0
-            snapshot_now = vtx is not None and i % save_every == 0
+            snapshot_now = vtx is not None and (step % save_every == 0 or step == n_steps)
             if sample_now or snapshot_now:
                 u.x.petsc_vec.array[:] = x.array_r
                 u.x.scatter_forward()
@@ -892,12 +894,14 @@ def solve_explicit(
                 f"\n{'═' * 58}\n  Starting EXPLICIT time-stepping (PETSc, {nprocs} ranks) "
                 f"({n_steps} steps)\n{'═' * 58}"
             )
+        if vtx is not None:
+            vtx.write(0.0)
         t_loop = pytime.perf_counter()
         for i in range(n_steps):
             stepper.step(i * dt_val, dt_val)
             step = i + 1
             sample_now = step % stride == 0
-            snapshot_now = vtx is not None and i % save_every == 0
+            snapshot_now = vtx is not None and (step % save_every == 0 or step == n_steps)
             if sample_now or snapshot_now:
                 u_arr[:n_owned_dofs] = stepper.u.array_r
                 u.x.scatter_forward()

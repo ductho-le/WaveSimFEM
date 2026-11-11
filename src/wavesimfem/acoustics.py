@@ -20,7 +20,12 @@ from dolfinx.mesh import locate_entities, locate_entities_boundary, meshtags
 from mpi4py import MPI
 from petsc4py import PETSc
 
-from wavesimfem.materials import compute_mesh_layout, structure_from_config
+from wavesimfem.materials import (
+    compute_mesh_layout,
+    mesh_vertical_tolerance,
+    resolve_sensor_region,
+    structure_from_config,
+)
 from wavesimfem.numerics import PointSensors
 from wavesimfem.sources import _resolve_n_cycles
 
@@ -216,11 +221,10 @@ class _MeshContext:
         return np.concatenate(found) if found else np.empty(0, dtype=np.int32)
 
 
-def _region_band(x: Any, region: dict[str, Any], tol: float) -> Any:
-    domain = x.ufl_domain()
-    low = fem.Constant(domain, default_scalar_type(region["y_bot"] - tol))
-    high = fem.Constant(domain, default_scalar_type(region["y_top"] + tol))
-    return ufl.And(ufl.ge(x[1], low), ufl.le(x[1], high))
+def _region_band(ctx: _MeshContext, region: dict[str, Any]) -> Any:
+    low = _constant(ctx, region["y_bot"] - ctx.tol)
+    high = _constant(ctx, region["y_top"] + ctx.tol)
+    return ufl.And(ufl.ge(ctx.x[1], low), ufl.le(ctx.x[1], high))
 
 
 def _mesh_context(cfg: dict[str, Any], summary: dict[str, Any]) -> _MeshContext:
@@ -231,7 +235,7 @@ def _mesh_context(cfg: dict[str, Any], summary: dict[str, Any]) -> _MeshContext:
     fluids = [r for r in regions if r.get("fluid_formulation") == "acoustic"]
     solids = [r for r in regions if not any(r is f for f in fluids)]
     domain, cell_tags = _create_layered_mesh(summary, layout)
-    tol = min(layout.h_y_per_region) * 1e-6
+    tol = mesh_vertical_tolerance(cfg, summary)
     tdim, fdim = domain.topology.dim, domain.topology.dim - 1
     domain.topology.create_connectivity(fdim, tdim)
     domain.topology.create_connectivity(tdim, fdim)
@@ -379,7 +383,7 @@ def _field_forms(ctx: _MeshContext, V: Any, Q: Any) -> list[Any]:
         if ctx.cfg.get("acoustic_boundaries", {}).get(face, "rigid") == "radiation":
             for reg in ctx.fluids:
                 impedance = ufl.conditional(
-                    _region_band(ctx.x, reg, ctx.tol),
+                    _region_band(ctx, reg),
                     _constant(ctx, 1.0 / (reg["rho"] * reg["c_fluid"])),
                     0.0,
                 )
@@ -507,7 +511,7 @@ def _source_forms(
         else:
             for reg in eligible:
                 ls += (
-                    ufl.conditional(_region_band(x, reg, tol), 1.0, 0.0)
+                    ufl.conditional(_region_band(ctx, reg), 1.0, 0.0)
                     * profile
                     * ufl.dot(direction, v)
                     * ctx.ds(ctx.faces[source_face][0])
@@ -541,7 +545,7 @@ def _source_forms(
         else:
             for reg in eligible:
                 lp += (
-                    ufl.conditional(_region_band(x, reg, tol), 1.0, 0.0)
+                    ufl.conditional(_region_band(ctx, reg), 1.0, 0.0)
                     * profile
                     * w
                     * ctx.ds(ctx.faces[source_face][0])
@@ -622,43 +626,13 @@ def _sensor_layout(
     ctx: _MeshContext,
 ) -> tuple[np.ndarray, float, str, dict[str, Any], RegionSensors]:
     """Sensor positions, observable, material side, and point evaluator."""
-    cfg, summary, tol = ctx.cfg, ctx.summary, ctx.tol
+    cfg, summary = ctx.cfg, ctx.summary
     sensor_x = (
         cfg["source_x"]
         + cfg["sensor_offset"]
         + np.arange(int(cfg["n_sensors"])) * cfg["sensor_pitch"]
     )
-    sensor_y = cfg.get("sensor_y")
-    sensor_y = (
-        (summary["H_plate"] if summary["has_top_halfspace"] else summary["y_max"])
-        if sensor_y is None
-        else float(sensor_y)
-    )
-    candidates = [
-        r
-        for r in ctx.regions
-        if r["y_bot"] - tol <= sensor_y <= r["y_top"] + tol
-        and (cfg.get("sensor_region") is None or r["name"] == cfg["sensor_region"])
-    ]
-    observable = cfg.get("sensor_observable", "auto")
-    if observable == "auto":
-        observable = "displacement" if any(not ctx.is_fluid(r) for r in candidates) else "pressure"
-    candidates = [
-        r
-        for r in candidates
-        if ctx.is_fluid(r) == (observable in ("pressure", "particle_velocity"))
-    ]
-    if not candidates:
-        raise ValueError(f"No region at sensor_y={sensor_y:g} supports observable {observable!r}")
-    if (
-        len(candidates) > 1
-        and observable == "particle_velocity"
-        and cfg.get("sensor_region") is None
-    ):
-        raise ValueError(
-            "Particle velocity at a fluid-fluid interface requires sensors.region to select a side"
-        )
-    selected = candidates[0]
+    sensor_y, observable, selected = resolve_sensor_region(cfg, summary)
     points = np.column_stack([sensor_x, np.full(len(sensor_x), sensor_y), np.zeros(len(sensor_x))])
     probes = RegionSensors(ctx.domain, points, ctx.cells([selected]))
     return sensor_x, sensor_y, observable, selected, probes

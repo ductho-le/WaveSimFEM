@@ -7,6 +7,7 @@ energy-normalised modal amplitudes. Unresolved content remains in the residual.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -271,20 +272,23 @@ def write_lamb_report(archive_path, output_dir=None, *, formats=("png", "pdf"), 
     import matplotlib
 
     from wavesimfem.analysis import _PLOT_LOCK, _figure, _label, _rc, _save, resolve_usetex
+    from wavesimfem.structure_analysis import _configuration, _scalar
     from wavesimfem.units import (
         displacement_unit,
         frequency_unit,
         length_unit,
+        parse_quantity,
         time_unit,
         wavenumber_unit,
     )
 
     with np.load(archive_path, allow_pickle=False) as data:
-        if "simulation_config_yaml" not in data:
+        struct_cfg = _configuration(data)
+        if struct_cfg is None:
             raise ValueError("Lamb report requires archived simulation_config_yaml provenance")
-        cfg = yaml.safe_load(str(data["simulation_config_yaml"]))
-        provenance = str(data.get("provenance", "Recorded simulation archive"))
-        summary = structure_from_config(cfg)
+        cfg = yaml.safe_load(_scalar(data, "simulation_config_yaml"))
+        provenance = str(_scalar(data, "provenance", "Recorded simulation archive"))
+        summary = structure_from_config(struct_cfg)
         regions = summary["all_regions"]
         # Receiver count is enforced by separate_fundamentals on the actual array.
         reason = lamb_eligibility_error({}, summary)
@@ -292,9 +296,31 @@ def write_lamb_report(archive_path, output_dir=None, *, formats=("png", "pdf"), 
             raise ValueError(reason)
         if "sensor_data_x" not in data or "sensor_data_y" not in data:
             raise ValueError("Lamb report requires archived horizontal and vertical displacements")
+        excitation = cfg.get("excitation") if isinstance(cfg.get("excitation"), Mapping) else {}
+        mesh = cfg.get("mesh") if isinstance(cfg.get("mesh"), Mapping) else {}
+        raw_fc = (
+            cfg["f_center"]
+            if cfg.get("f_center") is not None
+            else excitation.get("f_center", _scalar(data, "f_center"))
+        )
+        raw_min = (
+            cfg["min_frequency"]
+            if cfg.get("min_frequency") is not None
+            else mesh.get("min_frequency")
+        )
+        raw_max = (
+            cfg["max_frequency"]
+            if cfg.get("max_frequency") is not None
+            else mesh.get("max_frequency")
+        )
+        f_center = parse_quantity(raw_fc, "frequency") if raw_fc is not None else None
+        min_f = parse_quantity(raw_min, "frequency") if raw_min is not None else None
+        max_f = parse_quantity(raw_max, "frequency") if raw_max is not None else None
+        if (not min_f or not max_f) and (f_center is None or f_center <= 0):
+            raise ValueError("Lamb report requires finite positive f_center or explicit band")
         band = [
-            cfg.get("min_frequency") or cfg["f_center"] / 5,
-            cfg.get("max_frequency") or 3 * cfg["f_center"],
+            min_f or f_center / 5,
+            max_f or 3 * f_center,
         ]
         t, x = data["times"], data["sensor_x"]
         result = separate_fundamentals(

@@ -83,6 +83,23 @@ def check_resumed_configuration(saved, requested):
         raise ValueError("Cached run configuration differs: " + ", ".join(sorted(differences)))
 
 
+def relative_metrics(values: np.ndarray, interpolated: np.ndarray) -> dict[str, float]:
+    """Relative waveform error metrics against an interpolated reference."""
+    ref_norm = float(np.linalg.norm(interpolated))
+    ref_peak = float(np.max(np.abs(interpolated)))
+    if not (np.isfinite(ref_norm) and np.isfinite(ref_peak)) or ref_norm <= 0.0 or ref_peak <= 0.0:
+        raise ValueError(
+            "Reference receiver history has zero or non-finite amplitude; "
+            "increase --duration so the wave reaches the sensor array"
+        )
+    error = values - interpolated
+    return dict(
+        relative_l2=float(np.linalg.norm(error) / ref_norm),
+        relative_peak_error=float(np.max(np.abs(error)) / ref_peak),
+        relative_peak_amplitude_change=float(abs(np.max(np.abs(values)) / ref_peak - 1)),
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
@@ -165,15 +182,7 @@ def main():
                 interpolated[:, sensor, component] = np.interp(
                     times, ref_times, ref_values[:, sensor, component]
                 )
-        error = values - interpolated
-        metrics = dict(
-            relative_l2=float(np.linalg.norm(error) / np.linalg.norm(interpolated)),
-            relative_peak_error=float(np.max(np.abs(error)) / np.max(np.abs(interpolated))),
-            relative_peak_amplitude_change=float(
-                abs(np.max(np.abs(values)) / np.max(np.abs(interpolated)) - 1)
-            ),
-        )
-        reports[index][f"versus_{reference}"] = metrics
+        reports[index][f"versus_{reference}"] = relative_metrics(values, interpolated)
     report = dict(
         config=args.config,
         duration=args.duration,

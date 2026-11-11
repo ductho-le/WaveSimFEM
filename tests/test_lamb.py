@@ -192,3 +192,28 @@ def test_modal_figures_use_only_publication_panels(tmp_path, monkeypatch):
             if artist.get_text():
                 assert not artist.get_usetex()
                 assert artist.get_fontsize() == 10
+
+
+@pytest.mark.parametrize("flat_override", [False, True])
+def test_report_accepts_sectioned_config_and_unit_strings(tmp_path, monkeypatch, flat_override):
+    monkeypatch.setattr("wavesimfem.analysis._save", lambda *args: [])
+    archive, _, _ = _report_archive(tmp_path)
+    sectioned = {
+        "structure": {
+            "mode": "1_layer",
+            "single_layer": {"thickness": 0.003, "rho": 2700, "E": 70e9, "nu": 0.33},
+        },
+        "excitation": {"f_center": "200 kHz"},
+        "mesh": {"min_frequency": "100 kHz", "max_frequency": "300 kHz"},
+    }
+    if flat_override:
+        sectioned.update(min_frequency="120 kHz", max_frequency="280 kHz")
+    with np.load(archive) as orig:
+        payload = {k: orig[k] for k in orig.files}
+    payload["simulation_config_yaml"] = yaml.safe_dump(sectioned)
+    sectioned_archive = tmp_path / "sectioned_sensor_data.npz"
+    np.savez(sectioned_archive, **payload)
+
+    report = write_lamb_report(sectioned_archive, output_dir=tmp_path / "sec_out", formats=())
+    assert report["band_hz"] == ([1.2e5, 2.8e5] if flat_override else [1e5, 3e5])
+    assert report["usable_frequency_bins"] > 0

@@ -26,6 +26,7 @@ from wavesimfem.materials import (
     DEFAULT_STEPS_PER_PERIOD,
     canonicalize_mode,
     mesh_resolution,
+    resolve_sensor_region,
     sizing_wavelength,
     structure_from_config,
 )
@@ -805,6 +806,7 @@ def _validate_simulation(cfg: dict[str, Any], source: str) -> None:
             raise ValueError(
                 f"sensor_y={y} must lie inside the domain [{summary['y_min']}, {summary['y_max']}]"
             )
+    resolve_sensor_region(cfg, summary)
     _resolve_automatic_values(cfg, summary)
 
 
@@ -815,19 +817,7 @@ def _effective_sensor_observable(cfg: Mapping[str, Any], summary: Mapping[str, A
         return observable
     if not summary.get("has_acoustic"):
         return "displacement"
-    sensor_y = cfg.get("sensor_y")
-    if sensor_y is None:
-        sensor_y = summary["H_plate"] if summary["has_top_halfspace"] else summary["y_max"]
-    tol = min(r["thickness"] for r in summary["all_regions"]) * 1e-6
-    candidates = [
-        r
-        for r in summary["all_regions"]
-        if r["y_bot"] - tol <= float(sensor_y) <= r["y_top"] + tol
-        and (cfg.get("sensor_region") is None or r["name"] == cfg["sensor_region"])
-    ]
-    if candidates and all(r.get("is_acoustic", False) for r in candidates):
-        return "pressure"
-    return "displacement"
+    return resolve_sensor_region(cfg, summary)[1]
 
 
 def _apply_cli_overrides(resolved: dict[str, Any], args: argparse.Namespace) -> None:
@@ -846,6 +836,7 @@ def _apply_cli_overrides(resolved: dict[str, Any], args: argparse.Namespace) -> 
         "cfl": "CFL",
         "device": "device",
         "precision": "precision",
+        "usetex": "usetex",
     }
     legacy_for = {key: legacy for legacy, (key, _) in LEGACY_DISPERSION_KEYS.items()}
     for attr, key in overrides.items():

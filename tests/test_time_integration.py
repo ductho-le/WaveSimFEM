@@ -287,6 +287,32 @@ def test_preflight_explicit_step_is_conservative():
             mat.destroy()
 
 
+def test_explicit_snapshot_times_and_fields_match_across_backends(monkeypatch):
+    from wavesimfem import solvers
+    from wavesimfem.device import CPU_DEVICE
+
+    problem = solvers.build_problem(
+        _small_plate_cfg(solver__duration=2e-6, output__target_snapshots=5)
+    )
+    recordings = []
+    for device in (None, CPU_DEVICE):
+        snapshots = []
+
+        def writer(stack, problem, u, snapshots=snapshots):
+            return SimpleNamespace(write=lambda t: snapshots.append((t, u.x.array.copy())))
+
+        monkeypatch.setattr(solvers, "_vtx_writer", writer)
+        result = solvers.solve_explicit(problem, device=device)
+        assert snapshots[0][0] == 0.0
+        assert snapshots[-1][0] == pytest.approx(result.n_steps * result.dt)
+        np.testing.assert_array_equal(snapshots[0][1], 0)
+        recordings.append(snapshots)
+    np.testing.assert_array_equal([t for t, _ in recordings[0]], [t for t, _ in recordings[1]])
+    np.testing.assert_allclose(
+        [u for _, u in recordings[0]], [u for _, u in recordings[1]], rtol=1e-10, atol=1e-20
+    )
+
+
 def _scipy_csr(mat):
     indptr, indices, values = mat.getValuesCSR()
     return sp.csr_matrix((values, indices, indptr), shape=mat.getSize())
