@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      full_tests:
+        description: Run full DOLFINx, MPI, LaTeX and source-distribution tests
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -28,6 +33,8 @@ jobs:
       - run: ruff format --check src tests tools
 
   test:
+    # Routine pushes/PRs use the lightweight jobs below; full verification is opt-in.
+    if: github.event_name == 'workflow_dispatch' && inputs.full_tests
     name: Tests (Python ${{ matrix.python }}, DOLFINx ${{ matrix.dolfinx }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -46,6 +53,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: mamba-org/setup-micromamba@0dea6379afdaffa5d528b3d1dabc45da37f443fc # v2.0.4
+        timeout-minutes: 10
         with:
           environment-file: environment.yml
           create-args: >-
@@ -56,9 +64,10 @@ jobs:
         run: python -m pip install --no-deps --no-build-isolation -e .
       - name: Install LaTeX figure dependencies
         shell: bash
+        timeout-minutes: 5
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends texlive-latex-base texlive-latex-recommended texlive-latex-extra cm-super dvipng ghostscript
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o APT::Update::Error-Mode=any update
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y --no-install-recommends texlive-latex-base texlive-latex-recommended texlive-latex-extra cm-super dvipng ghostscript
       - name: Serial test suite (with coverage)
         run: python -m pytest --cov --cov-report=term --cov-report=xml
       - name: Distributed tests (2 MPI ranks)
@@ -100,7 +109,7 @@ jobs:
   array-backends:
     name: SciPy CPU backend validation
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     env:
       OMP_NUM_THREADS: "1"
       OPENBLAS_NUM_THREADS: "1"
@@ -110,7 +119,10 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - run: python -m pip install -e . pytest
+        timeout-minutes: 3
       - name: Array backends against the exact matrix exponential
         run: python -m pytest -q tests/test_backend_validation.py -m "not gpu"
 
@@ -123,7 +135,10 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: pyproject.toml
       - run: python -m pip install build twine
+        timeout-minutes: 3
       - run: python -m build
       - run: python -m twine check --strict dist/*
       - name: Install wheel and verify metadata

@@ -205,11 +205,29 @@ Every simulation outputs structured, reproducible archives:
 WaveSimFEM is verified against analytical dispersion relations (Lamb, Rayleigh, Scholte modes), acoustic cavity resonances, and transmission benchmarks:
 
 ```bash
-# Run test suite
-pytest -m "not slow"
+# Run the full local suite before pushing (activate the wavesim environment first)
+python -m pytest
+
+# Check distributed operations on two ranks
+mpiexec -n 2 python -m pytest -q -p no:cacheprovider \
+  tests/test_numerics.py tests/test_acoustic_time.py \
+  -k "exact_point or gather or distributed or rank_local"
 
 # Run acoustic verification suite
 python tools/verify_acoustics.py --case all
+```
+
+Pushes to `main` and pull requests run lightweight CI: lint/format checks,
+SciPy CPU-backend verification, and distribution build/install checks. These
+jobs do not install DOLFINx or LaTeX. For a quicker local run, use
+`python -m pytest -m "not slow"`.
+
+Full GitHub verification remains available under **Actions → CI → Run workflow**:
+enable **full_tests** to run the Python 3.11/3.12 DOLFINx matrix, LaTeX rendering,
+MPI checks, source-distribution tests and example smoke runs. From the CLI:
+
+```bash
+gh workflow run tests.yml -f full_tests=true
 ```
 
 ---
