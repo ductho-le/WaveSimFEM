@@ -28,11 +28,11 @@ cd WaveSimFEM
 conda env create -f environment.yml
 conda activate wavesim
 
-# Install WaveSimFEM in editable mode without overriding Conda FEM stacks
-pip install --no-deps -e .
+# Install WaveSimFEM in editable mode
+pip install -e .
 
 # Optional: install dev & release tooling (twine, packaging, pre-commit)
-pip install --no-deps -e ".[dev]"
+pip install -e ".[dev]"
 
 # Optional: NVIDIA CUDA GPU support
 pip install -e ".[cuda]"

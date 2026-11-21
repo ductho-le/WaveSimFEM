@@ -58,13 +58,13 @@ git clone https://github.com/ductho-le/WaveSimFEM.git
 cd WaveSimFEM
 conda env create -f environment.yml
 conda activate wavesim
-pip install --no-deps -e .
+pip install -e .
 ```
 
 Already inside a DOLFINx 0.10.0 Conda or Docker environment? Install directly from PyPI:
 
 ```bash
-pip install --no-deps wavesimfem
+pip install wavesimfem
 ```
 
 *(Optional)* Add NVIDIA GPU support (CUDA 12.x):

@@ -27,7 +27,7 @@ def main() -> None:
                 f"wavesim: error: missing FEM runtime dependency '{missing}'.\n"
                 "DOLFINx, PETSc, petsc4py, and mpi4py must be installed from conda-forge:\n"
                 "    conda env create -f environment.yml && conda activate wavesim\n"
-                "    pip install --no-deps -e .",
+                "    pip install -e .",
                 file=sys.stderr,
             )
             sys.exit(1)
