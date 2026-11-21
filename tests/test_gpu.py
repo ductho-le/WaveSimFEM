@@ -258,7 +258,8 @@ def test_legacy_device_wrapper_and_tuple_csr():
 
 
 @pytest.mark.gpu
-def test_cupy_backend_matches_reference():
+@pytest.mark.parametrize("precision,rtol,atol", [("double", 1e-10, 1e-14), ("single", 1e-4, 1e-6)])
+def test_cupy_backend_matches_reference(precision, rtol, atol):
     cp = pytest.importorskip("cupy")
     if cp.cuda.runtime.getDeviceCount() < 1:
         pytest.skip("no CUDA device")
@@ -275,9 +276,9 @@ def test_cupy_backend_matches_reference():
         dt=dt,
         n_steps=n_steps,
         source=_source,
-        backend=make_backend(gpu, "double"),
+        backend=make_backend(gpu, precision),
     )
-    np.testing.assert_allclose(result.sensor_data_x, ref[:, 0::2], rtol=1e-10, atol=1e-14)
+    np.testing.assert_allclose(result.sensor_data_x, ref[:, 0::2], rtol=rtol, atol=atol)
 
 
 @pytest.mark.parametrize(
@@ -307,7 +308,7 @@ def test_engine_rejects_single_precision_overflow_and_underflow(case):
         )
 
 
-@pytest.mark.parametrize("precision,expected_c", [("single", "float"), ("double", "double")])
+@pytest.mark.parametrize("precision,expected_c", [("single", "float32"), ("double", "float64")])
 def test_cupy_backend_fused_kernels_and_precision_preservation(monkeypatch, precision, expected_c):
     import contextlib
     import sys

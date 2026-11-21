@@ -150,7 +150,7 @@ class _CupyBackend(_NumpyLikeBackend):
         self.xp = cp
         self._cpsp = cpsp
         self.device_id = device_id
-        c_type = "float" if self.dtype == np.dtype(np.float32) else "double"
+        c_type = "float32" if self.dtype == np.dtype(np.float32) else "float64"
         self._axpy_kernel = cp.ElementwiseKernel(
             f"{c_type} x, {c_type} a, {c_type} y",
             f"{c_type} out",
