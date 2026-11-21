@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import pytest
-import yaml
 
 from wavesimfem.config import load_config
 
@@ -37,23 +36,41 @@ def test_duplicate_original_keys_are_rejected(tmp_path, source, key):
 
 
 @pytest.mark.parametrize(
-    "source",
+    "source,expected",
     [
-        "solver: {<<: {CFL: 0.5}, CFL: 0.8}",
-        "layers: [{<<: &derived {<<: {E: 70e9}, E: 7e9}}, *derived]",
+        ("solver: {<<: {CFL: 0.5}, CFL: 0.8}", {"solver": {"CFL": 0.8}}),
+        (
+            "layers: [{<<: &derived {<<: {E: 70e9}, E: 7e9}}, *derived]",
+            {"layers": [{"E": "7e9"}, {"E": "7e9"}]},
+        ),
         (
             "base: &base {CFL: 0.5, steps_per_period: 40}\n"
-            "solver: {<<: [*base, {CFL: 1.0, duration: 0.1}], CFL: 0.8}"
+            "solver: {<<: [*base, {CFL: 1.0, duration: 0.1}], CFL: 0.8}",
+            {
+                "base": {"CFL": 0.5, "steps_per_period": 40},
+                "solver": {"CFL": 0.8, "steps_per_period": 40, "duration": 0.1},
+            },
         ),
-        "solver: {<<: [{CFL: 0.5}, {CFL: 1.0}]}",
-        "solver: {<<: {CFL: 0.5}, '<<': literal}",
-        "settings: {=: 1, other: 2}",
-        "settings: &settings {<<: *settings, value: 1}",
-        "settings: &settings {<<: &other {<<: *settings, value: 2}, value: 1}",
+        ("solver: {<<: [{CFL: 0.5}, {CFL: 1.0}]}", {"solver": {"CFL": 0.5}}),
+        ("solver: {<<: {CFL: 0.5}, '<<': literal}", {"solver": {"CFL": 0.5, "<<": "literal"}}),
+        ("settings: {=: 1, other: 2}", {"settings": {"=": 1, "other": 2}}),
+        ("settings: &settings {<<: *settings, value: 1}", {"settings": {"value": 1}}),
+        (
+            "settings: &settings {<<: &other {<<: *settings, value: 2}, value: 1}",
+            {"settings": {"value": 1}},
+        ),
     ],
 )
-def test_legitimate_merges_match_safe_loader(tmp_path, source):
-    assert _load(tmp_path, source) == yaml.safe_load(source)
+def test_legitimate_merges_follow_yaml_merge_precedence(tmp_path, source, expected):
+    assert _load(tmp_path, source) == expected
+
+
+def test_repeated_alias_merge_chain_stays_linear(tmp_path):
+    lines = ["m0: &m0 {a: 1, b: 2}"]
+    for i in range(1, 31):
+        lines.append(f"m{i}: &m{i} {{<<: [*m{i - 1}, *m{i - 1}]}}")
+    cfg = _load(tmp_path, "\n".join(lines))
+    assert cfg["m30"] == {"a": 1, "b": 2}
 
 
 def test_reused_derived_anchor_preserves_alias_identity(tmp_path):

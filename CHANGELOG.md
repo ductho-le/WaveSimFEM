@@ -20,7 +20,7 @@ All notable changes are documented here. Versions follow
 ### Fixed
 
 - **Solvers & numerics**: set `atol=0.0` in iterative PETSc KSP solvers for scale invariance on small right-hand sides; perform acoustic GLL mass lumping before Dirichlet elimination (omitting `Mp_fD` lifting for explicit prescribed pressure); build layered mesh interfaces directly from `y_bot`/`y_top`; check velocity finiteness in PETSc explicit runs.
-- **Resource & MPI safety**: release PETSc temporaries and `HistoryStore` scratch directories on exception paths; avoid reporting `"single rank"` in `describe_thread_state` under unrecognized multi-rank launchers; report the first validation error in `PointSensors.gather`.
+- **Resource & MPI safety**: release PETSc temporaries and `HistoryStore` scratch directories on exception paths; avoid reporting `"single rank"` in `describe_thread_state` under unrecognized multi-rank launchers; report the first validation error in `PointSensors.gather`; enforce spec-compliant, linear-time YAML 1.1 merge precedence in `_UniqueSafeLoader` (working around PyYAML 6.0.4's `flatten_mapping` regression).
 - **Post-processing & timing**: compute scalar pressure colourbar limits without stacking placeholder zeros; read sectioned `mesh` frequency bands, handle `max_frequency < f_center / 5`, and tolerate missing metadata in Lamb reports; tolerate ULP rounding on characterisation `time_window` bounds; align elastic snapshot timestamps to completed steps and share mesh-based interface tolerances.
 
 ## [0.4.0] — 2026-10-10 — acoustic fluids

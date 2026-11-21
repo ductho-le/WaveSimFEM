@@ -262,6 +262,12 @@ class _UniqueSafeLoader(yaml.SafeLoader):
                 pending.extend(current.value)
         return super().construct_document(node)
 
+    def _mapping_key(self, key_node: yaml.Node) -> Any:
+        if key_node.tag == "tag:yaml.org,2002:value":
+            # SafeLoader normalizes the plain '=' key to a string on flattening.
+            return self.construct_scalar(key_node)
+        return self.construct_object(key_node, deep=True)
+
     def _validate_mapping_keys(self, node: yaml.MappingNode) -> None:
         seen = {}
         merge_key = object()
@@ -271,11 +277,8 @@ class _UniqueSafeLoader(yaml.SafeLoader):
             if key_node.tag == "tag:yaml.org,2002:merge":
                 # A merge directive and a quoted literal "<<" key are distinct.
                 key = merge_key
-            elif key_node.tag == "tag:yaml.org,2002:value":
-                # SafeLoader normalizes the plain '=' key to a string on flattening.
-                key = self.construct_scalar(key_node)
             else:
-                key = self.construct_object(key_node, deep=True)
+                key = self._mapping_key(key_node)
             try:
                 if key in seen:
                     label = "<<" if key is merge_key else key
@@ -286,6 +289,57 @@ class _UniqueSafeLoader(yaml.SafeLoader):
                 seen[key] = key_node.start_mark
             except TypeError as exc:
                 raise ValueError(f"Invalid mapping key at {key_node.start_mark}") from exc
+
+    def flatten_mapping(self, node: yaml.MappingNode) -> None:
+        """Expand YAML 1.1 merge keys with strict first-wins precedence and key deduplication.
+
+        Overrides SafeConstructor.flatten_mapping so merge precedence stays
+        spec-compliant and bounded against repeated-alias blowup across PyYAML
+        versions (including PyYAML 6.0.4, whose ``id()``-based deduplication
+        inverts sequence precedence and drops overrides on interned keys).
+        """
+        merge_sources: list[list[tuple[yaml.Node, yaml.Node]]] = []
+        index = 0
+        while index < len(node.value):
+            key_node, value_node = node.value[index]
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                del node.value[index]
+                if isinstance(value_node, yaml.MappingNode):
+                    self.flatten_mapping(value_node)
+                    merge_sources.append(list(value_node.value))
+                elif isinstance(value_node, yaml.SequenceNode):
+                    for subnode in value_node.value:
+                        if not isinstance(subnode, yaml.MappingNode):
+                            raise yaml.constructor.ConstructorError(
+                                "while constructing a mapping",
+                                node.start_mark,
+                                f"expected a mapping for merging, but found {subnode.id}",
+                                subnode.start_mark,
+                            )
+                        self.flatten_mapping(subnode)
+                        merge_sources.append(list(subnode.value))
+                else:
+                    raise yaml.constructor.ConstructorError(
+                        "while constructing a mapping",
+                        node.start_mark,
+                        f"expected a mapping or list of mappings for merging, but found {value_node.id}",
+                        value_node.start_mark,
+                    )
+            elif key_node.tag == "tag:yaml.org,2002:value":
+                key_node.tag = "tag:yaml.org,2002:str"
+                index += 1
+            else:
+                index += 1
+        if merge_sources:
+            seen = {self._mapping_key(k) for k, _ in node.value}
+            inherited: list[tuple[yaml.Node, yaml.Node]] = []
+            for source_pairs in merge_sources:
+                for pair in source_pairs:
+                    key = self._mapping_key(pair[0])
+                    if key not in seen:
+                        seen.add(key)
+                        inherited.append(pair)
+            node.value = inherited + node.value
 
 
 def _unique_json_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
