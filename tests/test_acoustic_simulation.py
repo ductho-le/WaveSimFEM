@@ -364,9 +364,13 @@ def test_acoustic_pure_solid_device_ring_buffer_matches_petsc(tmp_path, monkeypa
         assert arr_res.runtime["backend"] == "scipy"
         assert petsc_res.runtime["engine"] == "petsc"
         key_y = "sensor_data_y" if observable == "displacement" else "sensor_data_vy"
-        assert np.max(np.abs(arr_res.histories[key_y])) > 0
+        peak = float(np.max(np.abs(petsc_res.histories[key_y])))
+        assert peak > 0
         np.testing.assert_allclose(
-            arr_res.histories[key_y], petsc_res.histories[key_y], rtol=1e-11, atol=1e-16
+            arr_res.histories[key_y],
+            petsc_res.histories[key_y],
+            rtol=1e-11,
+            atol=1e-12 * peak,
         )
     finally:
         problem.destroy()
