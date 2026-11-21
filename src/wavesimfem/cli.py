@@ -75,7 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Construct the ``wavesim`` argument parser."""
     parser = argparse.ArgumentParser(
         prog="wavesim",
-        description="WaveSimFEM: A GPU-accelerated multi-scale finite element framework for acoustic and elastic wave simulation in heterogeneous layered media",
+        description="WaveSimFEM: A GPU-accelerated finite element framework for acoustic and elastic wave propagation in layered media",
         epilog="Options left unset fall back to the configuration file, then built-in defaults.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")

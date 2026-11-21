@@ -1,6 +1,8 @@
+include LICENSE README.md CHANGELOG.md CITATION.cff pyproject.toml
 include environment.yml .pre-commit-config.yaml
+recursive-include .github *.md
 recursive-include assets *.svg
 recursive-include configs *.yaml *.md
+recursive-include notebooks *.ipynb
 recursive-include tools *.py *.sh
 recursive-include tests *.py
-include CHANGELOG.md CITATION.cff

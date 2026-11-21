@@ -1,0 +1,55 @@
+name: Bug Report
+description: Report a bug, numerical discrepancy, or unexpected crash in WaveSimFEM
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug! Please include environment details and a minimal configuration so we can reproduce the issue.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear and concise summary of what went wrong and what you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce & Command
+      description: Exact CLI command or minimal Python snippet that reproduces the issue.
+      placeholder: |
+        wavesim -c my_case.yaml --device cpu
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Minimal YAML Configuration (if applicable)
+      description: Paste a minimal YAML configuration or name one of the files in `configs/`.
+      render: yaml
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error Traceback / Log Output
+      description: Paste the full error message or output from running with `-v/--verbose`.
+      render: shell
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment Details
+      description: Fill in the versions and hardware used.
+      value: |
+        - OS: (e.g., Ubuntu 24.04 / macOS 15 arm64)
+        - Python: (e.g., 3.11.x)
+        - WaveSimFEM (`wavesim --version`):
+        - DOLFINx / PETSc: (e.g., 0.10.0 / 3.24.x)
+        - Backend: (CPU single-rank / MPI N ranks / CUDA + CuPy version)
+    validations:
+      required: true

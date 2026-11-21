@@ -1,4 +1,4 @@
-"""WaveSimFEM: A GPU-accelerated multi-scale finite element framework for acoustic and elastic wave simulation in heterogeneous layered media.
+"""WaveSimFEM: A GPU-accelerated finite element framework for acoustic and elastic wave propagation in layered media.
 
 Public symbols are resolved lazily so that ``import wavesimfem`` (and
 lightweight modules such as :mod:`wavesimfem.config`) do not pull in
@@ -18,10 +18,19 @@ except PackageNotFoundError:  # pragma: no cover - source tree without installat
 
 # Public name -> defining submodule
 _EXPORTS: dict[str, str] = {
+    # acoustics
+    "AcousticProblem": "acoustics",
+    "AcousticSolveResult": "acoustics",
+    "build_acoustic_problem": "acoustics",
+    "run_acoustic_simulation": "acoustics",
+    "solve_acoustic": "acoustics",
     # analysis
     "plot_full_analysis": "analysis",
     "plot_quick_overview": "analysis",
     "bandpass_filter": "analysis",
+    # characterisation
+    "measure_packets": "characterisation",
+    "write_characterisation": "characterisation",
     # config
     "dump_config": "config",
     "flatten_config": "config",
@@ -34,6 +43,9 @@ _EXPORTS: dict[str, str] = {
     "DeviceUnavailableError": "device",
     "detect_available_devices": "device",
     "select_device": "device",
+    # lamb
+    "separate_fundamentals": "lamb",
+    "write_lamb_report": "lamb",
     # materials
     "compute_rayleigh_speed": "materials",
     "preflight_estimate": "materials",
@@ -56,6 +68,9 @@ _EXPORTS: dict[str, str] = {
     "ricker": "sources",
     "source_signal": "sources",
     "tone_burst": "sources",
+    # structure_analysis
+    "reference_dispersion": "structure_analysis",
+    "structure_profile": "structure_analysis",
     # units
     "parse_quantity": "units",
     # solvers
@@ -67,17 +82,25 @@ _EXPORTS: dict[str, str] = {
     "build_sensor_interpolation_matrix": "solvers_gpu",
     "integrate_explicit_rk4": "solvers_gpu",
     "solve_explicit_rk4_device": "solvers_gpu",
+    # wave_reports
+    "write_structure_report": "wave_reports",
+    # wave_spectra
+    "phase_velocity_spectrum": "wave_spectra",
+    "polarization_spectrum": "wave_spectra",
 }
 
 __all__ = [
     "RK4_STABILITY_RADIUS",
     "SOURCE_TYPES",
+    "AcousticProblem",
+    "AcousticSolveResult",
     "DeviceInfo",
     "DeviceUnavailableError",
     "PetscRK4",
     "PointSensors",
     "__version__",
     "bandpass_filter",
+    "build_acoustic_problem",
     "build_problem",
     "build_sensor_interpolation_matrix",
     "compute_rayleigh_speed",
@@ -89,26 +112,37 @@ __all__ = [
     "integrate_explicit_rk4",
     "limit_threads_per_rank",
     "load_config",
+    "measure_packets",
     "operator_bound",
     "parse_and_resolve_config",
     "parse_quantity",
+    "phase_velocity_spectrum",
     "plot_full_analysis",
     "plot_quick_overview",
+    "polarization_spectrum",
     "preflight_estimate",
+    "reference_dispersion",
     "resolve_and_apply_config",
     "ricker",
     "rk4_step",
+    "run_acoustic_simulation",
     "run_simulation",
     "select_device",
+    "separate_fundamentals",
     "set_verbosity",
+    "solve_acoustic",
     "solve_explicit",
     "solve_explicit_rk4_device",
     "solve_implicit",
     "source_signal",
     "structure_from_config",
+    "structure_profile",
     "time_grid",
     "tone_burst",
     "validate_tensor",
+    "write_characterisation",
+    "write_lamb_report",
+    "write_structure_report",
 ]
 
 
@@ -126,7 +160,15 @@ def __dir__() -> list[str]:
 
 
 if TYPE_CHECKING:  # pragma: no cover - static analysers only
+    from wavesimfem.acoustics import (
+        AcousticProblem,
+        AcousticSolveResult,
+        build_acoustic_problem,
+        run_acoustic_simulation,
+        solve_acoustic,
+    )
     from wavesimfem.analysis import bandpass_filter, plot_full_analysis, plot_quick_overview
+    from wavesimfem.characterisation import measure_packets, write_characterisation
     from wavesimfem.config import (
         dump_config,
         flatten_config,
@@ -141,6 +183,7 @@ if TYPE_CHECKING:  # pragma: no cover - static analysers only
         detect_available_devices,
         select_device,
     )
+    from wavesimfem.lamb import separate_fundamentals, write_lamb_report
     from wavesimfem.materials import (
         compute_rayleigh_speed,
         preflight_estimate,
@@ -165,4 +208,7 @@ if TYPE_CHECKING:  # pragma: no cover - static analysers only
         solve_explicit_rk4_device,
     )
     from wavesimfem.sources import SOURCE_TYPES, ricker, source_signal, tone_burst
+    from wavesimfem.structure_analysis import reference_dispersion, structure_profile
     from wavesimfem.units import parse_quantity
+    from wavesimfem.wave_reports import write_structure_report
+    from wavesimfem.wave_spectra import phase_velocity_spectrum, polarization_spectrum
