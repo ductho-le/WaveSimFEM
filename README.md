@@ -9,6 +9,7 @@
 [![MPI / PETSc](https://img.shields.io/badge/MPI-PETSc-2E8B57.svg?style=plastic)](https://petsc.org/)
 [![CUDA / CuPy](https://img.shields.io/badge/CUDA-CuPy-76B900.svg?style=plastic&logo=nvidia&logoColor=white)](https://cupy.dev/)
 <br>
+[![PyPI](https://img.shields.io/pypi/v/wavesimfem?style=plastic&logo=pypi&logoColor=white&color=0073B7&label=PyPI)](https://pypi.org/project/wavesimfem/)
 [![CI](https://img.shields.io/github/actions/workflow/status/ductho-le/WaveSimFEM/tests.yml?branch=main&style=plastic&logo=githubactions&logoColor=white&label=CI)](https://github.com/ductho-le/WaveSimFEM/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=plastic)](https://github.com/ductho-le/WaveSimFEM/blob/main/LICENSE)
 
@@ -59,10 +60,16 @@ conda activate wavesim
 pip install --no-deps -e .
 ```
 
+Already inside a DOLFINx 0.10.0 Conda or Docker environment? Install directly from PyPI:
+
+```bash
+pip install --no-deps wavesimfem
+```
+
 *(Optional)* Add NVIDIA GPU support (CUDA 12.x):
 
 ```bash
-pip install -e ".[cuda]"
+pip install "wavesimfem[cuda]"   # or: pip install -e ".[cuda]" from source
 ```
 
 <details>
