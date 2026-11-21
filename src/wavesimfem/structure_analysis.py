@@ -472,14 +472,15 @@ def structure_profile(data: Mapping[str, Any]) -> dict[str, Any]:
                     "Christoffel speed along x from elastic C; not a guided mode or a viscoelastic phase speed.",
                 )
     sensor_y, load_y = _number(data, "sensor_y"), _number(data, "load_y")
-    sensor_regions = [
-        r["name"]
-        for r in regions
-        if sensor_y is not None
-        and r["y_bot_m"] is not None
-        and r["y_top_m"] is not None
-        and r["y_bot_m"] <= sensor_y <= r["y_top_m"]
-    ]
+    sensor_regions = []
+    for r in regions:
+        if sensor_y is None or r["y_bot_m"] is None or r["y_top_m"] is None:
+            continue
+        tol = 1e-9 * max(
+            abs(r["y_bot_m"]), abs(r["y_top_m"]), abs(r["y_top_m"] - r["y_bot_m"]), 1.0
+        )
+        if r["y_bot_m"] - tol <= sensor_y <= r["y_top_m"] + tol:
+            sensor_regions.append(r["name"])
     sources = [_SOURCES["surface"]]
     if exact:
         sources.append(_SOURCES["lamb"])

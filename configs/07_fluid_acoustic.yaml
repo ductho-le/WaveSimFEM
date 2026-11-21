@@ -1,16 +1,16 @@
 # Scalar-pressure acoustics in a water channel. Numeric values use SI units.
 # Run: python -m wavesimfem -c configs/07_fluid_acoustic.yaml
 # A top-wall normal-acceleration pulse drives pressure; the bottom is rigid.
-# Left/right radiation boundaries are exact only for normally outgoing waves.
+# Lateral sponges and radiation faces truncate the waveguide ends.
 solver:
   type: explicit
   device: cpu
   precision: double
-  CFL: 0.7
-  duration: 25.0e-6
+  CFL: 0.8
+  duration: 180.0e-6
 geometry:
-  sensing_length: 0.025
-  absorb_length: 0.0
+  sensing_length: 0.22
+  absorb_length: 0.02
 structure:
   mode: 1_layer
   single_layer:
@@ -21,8 +21,8 @@ structure:
     rho: 1000.0
     c: 1500.0
 absorbing_boundaries:
-  alpha: 0.0
-  beta: 0.0
+  alpha: null
+  beta: null
 acoustic_boundaries:
   top: rigid
   bottom: rigid
@@ -33,25 +33,29 @@ excitation:
   source_boundary: top
   source_amplitude: 1.0e5      # m/s^2, positive inward normal acceleration
   source_type: ricker
-  f_center: 250.0e3
-  source_x: 3.0e-3
-  excitation_width: 1.0e-3
+  f_center: 1.0e6
+  source_x: null
+  excitation_width: 0.6e-3
 mesh:
-  nx: 100
-  ny_per_region: [8]
+  nx: 1040
+  ny_per_region: [10]
   degree: 2
-  max_frequency: 500.0e3
+  max_frequency: 2.0e6
 sensors:
   observable: pressure
   region: Water
   sensor_y: 1.0e-3
-  n_sensors: 31
-  sensor_offset: 3.0e-3
+  n_sensors: 401
+  sensor_offset: 0.01
   sensor_pitch: 0.5e-3
-  sample_rate: 10 MHz
+  sample_rate: 20 MHz
 postprocess:
   run_postprocess: true
   structure_analysis: true
+  f_min: 0.0
+  f_max: "2 MHz"
+  k_min: 0.0
+  k_max: "6 rad/mm"
 output:
   output_dir: results_07_fluid_acoustic
   history_storage: memory

@@ -163,7 +163,7 @@ def current_thread_policy() -> ThreadPolicy | None:
 
 def describe_thread_state(n_ranks: int, environ: Mapping[str, str] | None = None) -> str:
     """Banner text for the BLAS/OpenMP thread configuration of this run."""
-    if _policy is not None:
+    if _policy is not None and (_policy.applied or n_ranks <= 1 or _policy.ranks_per_node > 1):
         return _policy.describe()
     env = os.environ if environ is None else environ
     user_set = [f"{name}={env[name]}" for name in THREAD_ENV_VARS if env.get(name)]

@@ -211,7 +211,13 @@ def temporal_check():
     result = {}
     for name, integrator in (("explicit", CoupledRK4), ("implicit", CoupledNewmark)):
         mass = (
-            sp.diags(np.asarray(op["Mp"].sum(axis=1)).ravel()) if name == "explicit" else op["Mp"]
+            sp.diags(
+                problem.operators.lumped_mp.array_r
+                if problem.operators.lumped_mp is not None
+                else np.asarray(op["Mp"].sum(axis=1)).ravel()
+            )
+            if name == "explicit"
+            else op["Mp"]
         )
         eigenvalues, modes = la.eigh(op["Kp"].toarray(), mass.toarray(), subset_by_index=[1, 1])
         omega = np.sqrt(eigenvalues[0])
@@ -541,16 +547,42 @@ def modal_speed(problem, reference, length, fixed_bottom=False):
     # raw u/p mass is not. Apply the shift-invert operator explicitly instead.
     ks, ms = stiffness[free][:, free], mass[free][:, free]
     target = (reference * k) ** 2
-    factor = sla.splu((ks - 0.98 * target * ms).tocsc())
-    transform = sla.LinearOperator(ks.shape, matvec=lambda v: factor.solve(ms @ v), dtype=float)
-    eig, vectors = sla.eigs(transform, k=6, which="LM", tol=1e-10)
-    eigenvalues = 0.98 * target + 1 / eig
+    shift = 0.98 * target
+    nuf = int(np.count_nonzero(free < len(problem.u_coords)))
+    ks_block = ks[:nuf, :nuf] - shift * ms[:nuf, :nuf]
+    kp_block = ks[nuf:, nuf:] - shift * ms[nuf:, nuf:]
+    su = (
+        1.0 / np.sqrt(np.asarray(abs(ks_block).max(axis=1).toarray()).ravel())
+        if nuf
+        else np.empty(0)
+    )
+    sp_scale = (
+        np.sqrt(shift) / np.sqrt(np.asarray(abs(kp_block).max(axis=1).toarray()).ravel())
+        if len(free) > nuf
+        else np.empty(0)
+    )
+    row = np.concatenate([su, sp_scale / shift])
+    col = np.concatenate([su, sp_scale])
+    equilibrated = (sp.diags(row) @ (ks - shift * ms) @ sp.diags(col)).tocsc()
+    scaled_ms = (sp.diags(row) @ ms @ sp.diags(col)).tocsr()
+    factor = sla.splu(equilibrated)
+    transform = sla.LinearOperator(
+        ks.shape, matvec=lambda v: factor.solve(scaled_ms @ v), dtype=float
+    )
+    eig, vectors = sla.eigs(
+        transform,
+        k=6,
+        which="LM",
+        tol=1e-14,
+        v0=np.random.default_rng(20261011).standard_normal(ks.shape[0]),
+    )
+    eigenvalues = shift + 1 / eig
     ix = np.argmin(abs(eigenvalues - target))
     frequency_squared = eigenvalues[ix]
     assert abs(frequency_squared.imag) < 1e-7 * abs(frequency_squared.real)
     speed = np.sqrt(frequency_squared.real) / k
     mode = np.zeros(stiffness.shape[0], dtype=complex)
-    mode[free] = vectors[:, ix]
+    mode[free] = col * vectors[:, ix]
     return float(speed), mode
 
 

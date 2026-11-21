@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import csv
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 from scipy.signal import butter, find_peaks, hilbert, sosfiltfilt
@@ -20,15 +21,15 @@ from wavesimfem.storage import atomic_output
 from wavesimfem.units import parse_quantity
 
 
-def validate_options(value):
+def validate_options(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
     """Validate report settings without importing plotting or FEM dependencies."""
     if value is None:
         return None
     if not isinstance(value, Mapping):
         raise ValueError("wave_characterisation must be a mapping or null")
-    defaults = dict(
+    defaults: dict[str, Any] = dict(
         enabled=False,
-        component="y",
+        component=None,
         frequency_band=None,
         time_window=None,
         min_relative_amplitude=0.01,
@@ -36,12 +37,12 @@ def validate_options(value):
     unknown = set(value) - set(defaults)
     if unknown:
         raise ValueError(f"Unknown wave_characterisation settings: {sorted(unknown)}")
-    options = defaults | {k: v for k, v in value.items() if k != "component" or v is not None}
+    options = defaults | dict(value)
     if not isinstance(options["enabled"], (bool, np.bool_)):
         raise ValueError("wave_characterisation.enabled must be boolean")
     options["enabled"] = bool(options["enabled"])
-    if options["component"] not in ("x", "y", "pressure"):
-        raise ValueError("wave_characterisation.component must be x, y or pressure")
+    if options["component"] not in (None, "x", "y", "pressure"):
+        raise ValueError("wave_characterisation.component must be x, y, pressure or null")
     for key in ("frequency_band", "time_window"):
         pair = options[key]
         if pair is None:
@@ -73,7 +74,9 @@ def validate_options(value):
     return options
 
 
-def _peak_measurements(t, envelope):
+def _peak_measurements(
+    t: np.ndarray, envelope: np.ndarray
+) -> tuple[int, float, float | None, float | None]:
     """Interpolate the dominant envelope peak and its connected half-height width."""
     peak = int(np.argmax(envelope))
     amplitude = float(envelope[peak])
@@ -101,7 +104,13 @@ def _peak_measurements(t, envelope):
     return peak, amplitude, arrival, fwhm
 
 
-def measure_packets(times, positions, ux, uy, options=None):
+def measure_packets(
+    times: np.ndarray,
+    positions: np.ndarray,
+    ux: np.ndarray,
+    uy: np.ndarray,
+    options: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]]:
     """Measure isolated packets and report only resolved, coherent spatial fits.
 
     A constant baseline is removed from each complete trace before optional
@@ -112,7 +121,11 @@ def measure_packets(times, positions, ux, uy, options=None):
     three complete packets, R² >= 0.9, and a fitted arrival span >= two samples.
     These are deterministic quality checks, not statistical confidence limits.
     """
-    options = validate_options({} if options is None else options)
+    resolved_options = validate_options({} if options is None else options)
+    assert resolved_options is not None
+    if resolved_options["component"] is None:
+        resolved_options["component"] = "y"
+    options = resolved_options
     times, positions, ux, uy = [np.asarray(a, dtype=float) for a in (times, positions, ux, uy)]
     if times.ndim != 1 or positions.ndim != 1 or len(times) < 32 or len(positions) < 3:
         raise ValueError("Characterisation requires >=32 time samples and >=3 receivers")
@@ -142,9 +155,9 @@ def measure_packets(times, positions, ux, uy, options=None):
         )
         ux, uy = [sosfiltfilt(sos, a, axis=0) for a in (ux, uy)]
     window = options["time_window"] or [float(times[0]), float(times[-1])]
-    if window[0] < times[0] or window[1] > times[-1]:
-        raise ValueError("time_window must lie within the recorded time interval")
     tolerance = 8 * np.finfo(float).eps * max(abs(times[0]), abs(times[-1]), dt[0])
+    if window[0] < times[0] - tolerance or window[1] > times[-1] + tolerance:
+        raise ValueError("time_window must lie within the recorded time interval")
     mask = (times >= window[0] - tolerance) & (times <= window[1] + tolerance)
     if mask.sum() < 16:
         raise ValueError("time_window must contain at least 16 stored samples")
@@ -328,14 +341,21 @@ def measure_packets(times, positions, ux, uy, options=None):
 
 
 def write_characterisation(
-    archive_path, output_dir=None, *, options=None, formats=("png",), usetex=False
-):
+    archive_path: str | Path,
+    output_dir: str | Path | None = None,
+    *,
+    options: Mapping[str, Any] | None = None,
+    formats: Sequence[str] = ("png",),
+    usetex: bool | str = False,
+) -> dict[str, Any]:
     """Write publication panels, a README, receiver CSV, and finite SI-valued metrics."""
     import matplotlib
 
-    from wavesimfem.analysis import _PLOT_LOCK, _rc, resolve_usetex
+    from wavesimfem.analysis import _PLOT_LOCK, _rc, _typography_note, resolve_usetex
     from wavesimfem.characterisation_plots import render_characterisation
 
+    validated_options = validate_options({} if options is None else options)
+    assert validated_options is not None
     with np.load(archive_path, allow_pickle=False) as archive:
         observable = (
             str(np.asarray(archive["sensor_observable"]).item())
@@ -358,23 +378,30 @@ def write_characterisation(
         if missing:
             raise ValueError(f"Characterisation archive is missing {sorted(missing)}")
         if observable == "pressure":
-            if options and options.get("component") in ("x", "y"):
+            if validated_options["component"] in ("x", "y"):
                 raise ValueError(
                     "Pressure archives do not contain horizontal/vertical motion components"
                 )
-            options = {**(options or {}), "component": "pressure"}
+            resolved_options = {**validated_options, "component": "pressure"}
             signal = archive["sensor_data_pressure"]
             report, arrays = measure_packets(
                 archive["times"],
                 archive["sensor_x"],
                 np.zeros_like(signal),
                 signal,
-                options=options,
+                options=resolved_options,
             )
         else:
-            if options and options.get("component") == "pressure":
+            if validated_options["component"] == "pressure":
                 raise ValueError("The selected archive does not contain pressure sensors")
-            report, arrays = measure_packets(*(archive[k] for k in required), options=options)
+            resolved_options = (
+                {**validated_options, "component": "y"}
+                if validated_options["component"] is None
+                else validated_options
+            )
+            report, arrays = measure_packets(
+                *(archive[k] for k in required), options=resolved_options
+            )
         provenance = (
             str(archive["provenance"].item())
             if "provenance" in archive and archive["provenance"].ndim == 0
@@ -407,7 +434,8 @@ def write_characterisation(
         )
     destination = Path(output_dir or Path(archive_path).parent) / "characterisation"
     destination.mkdir(parents=True, exist_ok=True)
-    with _PLOT_LOCK, matplotlib.rc_context(_rc(resolve_usetex(usetex))):
+    tex = resolve_usetex(usetex)
+    with _PLOT_LOCK, matplotlib.rc_context(_rc(tex)):
         paths = render_characterisation(report, arrays, destination, formats)
     report["figures"] = [str(p) for p in paths]
     with atomic_output(destination / "metrics.json") as stream:
@@ -423,7 +451,7 @@ def write_characterisation(
         "",
         f"Source archive: `{report['archive']}`.",
         "",
-        "Figures are exported at 190 mm width with 10 pt LaTeX labels. Panel titles, axes, legends and measurement annotations are retained; interpretation and processing details are recorded here.",
+        f"Figures are exported at 190 mm width with {_typography_note(tex)} labels. Panel titles, axes, legends and measurement annotations are retained; interpretation and processing details are recorded here.",
         "",
         "## Processing and provenance",
         "",

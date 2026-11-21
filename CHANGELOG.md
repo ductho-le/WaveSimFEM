@@ -7,313 +7,60 @@ All notable changes are documented here. Versions follow
 
 ### Changed
 
-- `--generate-config` no longer overwrites an existing file; pass `--force`.
-- `--min-frequency`/`--max-frequency` accept units (`"100 kHz"`), like YAML.
-- `"mhz"`/`"mHZ"`-style spellings are rejected as ambiguous; write `MHz` or
-  `mHz` exactly.
-- An explicit `sensor_sample_rate` below Nyquist for `mesh.max_frequency` is
-  raised so the analysis band stays alias-free (the default rate is unchanged).
-- Configurations that request `postprocess.lamb_modes` or
-  `postprocess.wave_characterisation` with an incompatible structure, receiver
-  count, or `sensors.observable` / `component` fail during validation, not after
-  the solve. LaTeX (`usetex`) availability is checked before solving; dry runs
-  warn instead.
-- Results, sidecars and benchmark reports preserve an existing file's mode when
-  overwriting and otherwise honour the umask (previously 0600).
-- Elastic archives write `schema_version: 1` explicitly.
+- **CLI & units**: `--generate-config` requires `--force` to overwrite; `--min-frequency` / `--max-frequency` accept unit strings; ambiguous `"mhz"`/`"mHZ"` spellings are rejected; `--postprocess` combined with `--dry-run` exits with a usage error.
+- **Fail-fast validation**: incompatible `lamb_modes` / `wave_characterisation` options, missing LaTeX when `usetex: true` (warn-only on `--dry-run`), and acoustic source/boundary/interface/shared-corner conflicts fail during config resolution before mesh assembly. Explicit `sensor_sample_rate` below Nyquist is raised automatically.
+- **Outputs & examples**: elastic archives write `schema_version: 1`; atomic outputs preserve existing file modes or honour the umask; report READMEs reflect the active `usetex` typography mode; Examples 03–08 standardize on broadband Ricker excitation (`1 MHz` for 06–08) and consistent receiver apertures; CI expands the lightweight pure-Python/array-backend test job.
 
 ### Performance
 
-- Sensor sampling uses a cached sparse point-evaluation operator instead of a
-  per-step `Function.eval` pull-back (matches `eval` to round-off; rank-local).
-- Form scalars (material constants, source footprint, sponge geometry, Newmark
-  coefficients) enter as `fem.Constant`, so kernels are reused across
-  parameter sweeps instead of being JIT-compiled per value.
-- Coupled acoustic Newmark factorises the monolithic operator once with a
-  direct solver (MUMPS), falling back to field-split GMRES for large parallel
-  problems; parallel iterative fallbacks use CG + block-Jacobi/ICC.
+- **On-device acoustic recording**: serial explicit runs (`CoupledArrayRK4`) evaluate sensors (`pressure`, `displacement`, `velocity`, including prescribed boundary lifting) and quadratic fluid energy on-device in a chunked ring buffer with zero per-step host syncs; `particle_velocity` interpolates only over probe cells.
+- **Array & GPU kernels**: fused CuPy `ElementwiseKernel` updates (38 → 17 vector launches per RK4 step), FP32-preserving scalar casts, zero-forcing fast paths, and Stage-4 in-place accumulation across `solvers_gpu`, `CoupledArrayRK4`, and `PetscRK4`.
+- **Assembly & sampling**: cached sparse `point_evaluation_matrix` (O(`n_sensors`) DOF clearing) replaces per-step `Function.eval`; `fem.Constant` form scalars allow JIT kernel reuse across sweeps; coupled Newmark factorises the monolithic operator once (MUMPS direct, field-split GMRES / CG+BJacobi/ICC fallback).
 
 ### Fixed
 
-- Lamb reports read archived sectioned frequency bounds from `mesh`, including
-  unit strings, while retaining support for resolved flat configurations.
-- Elastic snapshots use completed-step timestamps across PETSc and array
-  backends and include the initial and final states.
-- Sensor validation and acoustic assembly share mesh-based interface tolerances
-  and material-side selection, accepting unambiguous near-interface receivers.
-- PETSc temporaries are released on error paths during explicit-solver and
-  acoustic-problem setup.
-- `PointSensors.gather` reports the first validation error.
+- **Solvers & numerics**: set `atol=0.0` in iterative PETSc KSP solvers for scale invariance on small right-hand sides; perform acoustic GLL mass lumping before Dirichlet elimination (omitting `Mp_fD` lifting for explicit prescribed pressure); build layered mesh interfaces directly from `y_bot`/`y_top`; check velocity finiteness in PETSc explicit runs.
+- **Resource & MPI safety**: release PETSc temporaries and `HistoryStore` scratch directories on exception paths; avoid reporting `"single rank"` in `describe_thread_state` under unrecognized multi-rank launchers; report the first validation error in `PointSensors.gather`.
+- **Post-processing & timing**: compute scalar pressure colourbar limits without stacking placeholder zeros; read sectioned `mesh` frequency bands, handle `max_frequency < f_center / 5`, and tolerate missing metadata in Lamb reports; tolerate ULP rounding on characterisation `time_window` bounds; align elastic snapshot timestamps to completed steps and share mesh-based interface tolerances.
 
 ## [0.4.0] — 2026-10-10 — acoustic fluids
 
 ### Breaking changes
 
-- Mesh resolution is supplied explicitly as `mesh.nx` and
-  `mesh.ny_per_region`, with one vertical count per region in bottom-to-top
-  order. Material properties and frequency settings no longer refine the mesh.
-  Removed `elems_per_wavelength`, `min_elems_x`, and `min_elems_y`, including
-  regional overrides; legacy inputs raise migration guidance.
-- Explicit simulations require a user-supplied `solver.CFL` in `(0, 1]`.
-  The time step is calculated from the assembled stability bound, then rounded
-  down to fit the recording grid. The validated `solver.dt` override remains
-  available. Implicit Newmark retains its accuracy-based time-step control.
-- Preflight reports actual cell dimensions (`h_x`, `h_y_per_region`) in place
-  of automatically selected `h_target` and `lambda_min`. `mesh.max_frequency`
-  continues to control the analysis/sampling band and implicit accuracy.
-- `material_model: fluid` now defaults to `fluid_formulation: acoustic`:
-  inviscid scalar-pressure acoustics coupled to solid displacement by normal
-  traction and normal acceleration, with tangential slip. Acoustic fluids reject
-  `fluid_shear_reg`; reproduce earlier runs with
-  `fluid_formulation: regularized_elastic`. Archives written by acoustic or
-  field-aware runs use `schema_version: 2` with explicit `sensor_observable`,
-  `sensor_units`, and observable-specific keys (`sensor_data_pressure`,
-  `sensor_data_vx`/`sensor_data_vy`). Older archives keep their legacy-fluid
-  interpretation.
+- **Explicit meshes & CFL**: `mesh.nx` and `mesh.ny_per_region` (bottom-to-top) are required; removed `elems_per_wavelength`, `min_elems_x`, and `min_elems_y`. Explicit runs require `solver.CFL` in `(0, 1]`; preflight reports actual cell sizes (`h_x`, `h_y_per_region`).
+- **Acoustic fluid default**: `material_model: fluid` defaults to inviscid scalar-pressure acoustics (`fluid_formulation: acoustic`, normal coupling with tangential slip) and rejects `fluid_shear_reg` (use `fluid_formulation: regularized_elastic` for legacy runs). Field-aware archives use `schema_version: 2` with explicit `sensor_observable`, `sensor_units`, and observable-specific keys.
 
 ### Added
 
-- Acoustic sources `acoustic_pressure` [Pa], `acoustic_normal_acceleration`
-  [m/s²] and `acoustic_volume` [s⁻²]; `source_boundary`, `source_y` and
-  `source_region` selection; `acoustic_boundaries` (rigid, pressure release,
-  first-order radiation); `sensors.observable` (displacement, velocity,
-  pressure, particle velocity) and `sensors.region`.
-- Coupled PETSc RK4 and Newmark integrators (serial and MPI) and a serial
-  SciPy/CuPy RK4 backend, with a coupling-inclusive explicit stability bound.
-- Independent continuum benchmarks (`tools/verify_acoustics.py`) and examples 07 (pure fluid) and 08
-  (plate loaded by a sponge-terminated water half-space, 81 pressure receivers
-  over a 40 mm aperture for f-k analysis).
-- `SeparableForcing`: loads expressed as fixed vectors times scalar time
-  coefficients. Every coupled integrator accepts it; the array RK4 uploads the
-  vectors once and forms stage loads on its device.
+- Acoustic sources (`acoustic_pressure`, `acoustic_normal_acceleration`, `acoustic_volume`), `source_boundary`/`source_y`/`source_region`, `acoustic_boundaries` (`rigid`, `pressure_release`, `radiation`), and `sensors.observable`/`sensors.region`.
+- Coupled PETSc RK4/Newmark integrators (serial & MPI), serial SciPy/CuPy `CoupledArrayRK4`, `SeparableForcing`, coupling-inclusive explicit stability bounds, continuum verification suite (`tools/verify_acoustics.py`), and Examples 07–08.
+- Structure-aware multi-panel reports (`wave_physics/`) with JSON/CSV/NPZ exports and synthetic preview tools (`tools/preview_structure_reports.py`, `tools/preview_postprocessing.py`).
 
-### Performance
+### Performance & Fixed
 
-- Coupled RK4 (PETSc and array) reuses the end-of-step acceleration as the next
-  first-stage derivative: four instead of five operator evaluations per step,
-  with collective PETSc state checks guarding against external edits.
-- The array RK4 downloads its host mirrors lazily (unsampled steps perform no
-  device-to-host transfer), accumulates stages in place, and keeps separable
-  source terms on the device. Measured CPU loop throughput: example 07
-  2714 → 4195 steps/s, former example 08 1031 → 1500 steps/s (single runs).
-  CUDA behaviour follows the same code path but has not been benchmarked.
-- Fluid energy diagnostics are quadratic forms with matrices assembled once
-  instead of two UFL functional assemblies per recorded sample.
-
-### Robustness
-
-- Field-aware runs share the elastic device policy (`_resolve_device`):
-  implicit runs warn and ignore accelerator/single-precision requests, MPI
-  explicit runs reject non-CPU devices before assembly, and `solve_acoustic`
-  rejects an array-engine `DeviceInfo` on PETSc paths.
-- `build_acoustic_problem` is decomposed into documented helpers (mesh context,
-  interface coupling, sponge profile, field forms, pressure constraints, source
-  location/forms, Dirichlet lifting, sensor layout) with unchanged results.
-
-### Fixed
-
-- The field-aware/acoustic path now uses the documented Gaussian footprint
-  `exp(-(x - x0)² / (2σ²))`, `σ = excitation_width / 3`, identical to the
-  elastic solver. It previously used `exp(-(x - x0)² / σ²)`, so a source was
-  narrower by √2 with √2 less resultant load; selecting only `sensors.region`
-  on a solid changed receiver amplitudes by about 27%.
-- A `source_y` that does not apply to the resolved `top`, `bottom`, `left` or
-  `right` source boundary is rejected instead of silently ignored.
-
-### Changed
-
-- Replace Example 02's aluminium/adhesive sandwich with a 1 mm symmetric
-  T300/914 CFRP cross-ply plate in `configs/02_plate_cfrp.yaml`. Eight elastic
-  anisotropic plies use plane-strain tensors reconstructed from published
-  three-dimensional constants and explicit RK4 integration. Update the example
-  catalogue, structure-report references, and serial/MPI smoke configurations.
-- Rename the CLI launcher executable to `wavesim` for consistent and concise
-  simulation invocation.
-- Standardize all figure exports at 190 mm width with 10-point text,
-  including ticks, legends and colourbars. Compact panel layouts replace figure
-  headers and explanatory annotations; accompanying README files retain the
-  interpretation and provenance. `output.usetex` defaults to `false`, using
-  Matplotlib's bundled serif fonts and mathtext without an external TeX install.
-  Set it to `true` to require LaTeX/dvipng/Ghostscript, or `auto` to use LaTeX
-  when the toolchain is available and built-in rendering otherwise.
-- Add default structure-aware multi-panel reports in `wave_physics/`, selected
-  from archived geometry and material provenance. Free plates, halfspaces,
-  viscoelastic stacks, layered ground and solid–fluid systems receive applicable
-  references and distinct diagnostics, with JSON/CSV/NPZ measurement exports.
-- Phase-velocity imaging screens weak, aliased and ambiguous peaks; polarization
-  requires coherent components. Spatial decay uses untapered Fourier amplitudes
-  to avoid arrival-dependent window bias. Eight explicitly synthetic structure
-  previews are available through `tools/preview_structure_reports.py`.
-- Post-processing figures share consistent typography, physical units and
-  annotated amplitude scales. Dispersion handles arrays left of the source,
-  honours recorded geometry, caps display bounds at sampling limits and retains
-  slow modes when choosing automatic wavenumber bounds.
-- Packet reports screen incomplete or ambiguous arrivals, resolve peak times
-  below sample spacing, qualify velocity/decay fits and export fit residuals,
-  preprocessing and per-receiver exclusion reasons (JSON schema v2).
-- Lamb reports show both propagation directions, sampling/resolution margins,
-  usable bands, shared-scale input/mode/residual maps and reconstruction
-  diagnostics. Report exports are atomic; analytical previews can be generated
-  with `tools/preview_postprocessing.py`.
-- Examples and numerical tests use explicit counts preserving their previous
-  resolved meshes. The resolution comparison tool now refines counts with
-  `--refinement-factor` and time controls with `--step-factor`; resumed runs
-  must match the requested model inputs.
+- Coupled RK4 reuses end-of-step acceleration (4 instead of 5 evaluations/step), downloads host mirrors lazily, and evaluates fluid energy via preassembled quadratic forms.
+- Aligned field-aware Gaussian source footprint to `exp(-(x - x0)² / (2σ²))` (`σ = excitation_width / 3`), matching the elastic solver; rejected mismatched `source_y` on exterior faces.
+- Replaced Example 02 with an 8-ply T300/914 CFRP laminate; renamed CLI executable to `wavesim`; standardized 190 mm / 10 pt figures with `output.usetex: false` default; hardened Lamb, dispersion, and packet-characterisation reports (JSON schema v2, atomic exports).
 
 ## [0.3.0] — 2026-10-03 — production hardening
 
 ### Breaking changes
-- Explicit device requests are strict: `cuda` and `cuda:N` raise
-  `DeviceUnavailableError` (CLI exit code 3) instead of silently falling back to
-  the CPU; invalid device strings raise `ValueError`. `auto` still falls back.
-- Configuration schema is strict: unknown keys (top-level, section, or region),
-  duplicated parameters, non-boolean switches, and constitutive fields ignored by
-  a region's `material_model` (e.g. `Cv` without `viscoelastic`) are rejected.
-- `1_layer` mode rejects multiple layers; `absorb_depth` is only accepted on halfspaces.
-- Removed backend-specific legacy solver wrappers and library-availability
-  globals (use `integrate_explicit_rk4` or the retained `solve_explicit_rk4_device`).
-  Private helpers `_normalize_structure`/`_canonicalize_mode` are now public as
-  `normalize_structure`/`structure_from_config`/`canonicalize_mode`.
-- Physical units are SI throughout the public API: `dispersion_spectrum` returns
-  frequencies in Hz and wavenumbers in rad/m; `plot_full_analysis` takes
-  `f_min/f_max/k_min/k_max` (SI numbers or unit strings such as `"2 MHz"`,
-  `"3 rad/mm"`) instead of `f_min_disp_MHz`/`k_max_disp`; the CLI flags
-  `--f-min/--f-max/--k-min/--k-max` take SI numbers or unit strings.
-- Postprocess keys renamed to `postprocess.f_min/f_max/k_min/k_max` (SI or unit
-  strings, `null` = automatic). The legacy `f_*_disp_MHz`/`k_*_disp` keys and
-  archive fields are still read and converted; giving both forms is an error.
-- Defaults now scale with the problem: sponge `alpha/beta` (`null`) scale with
-  `f_center` (`alpha` unchanged at 1 MHz) and the default duration adds the pulse
-  length.
-- Source and sensor geometry defaults (`excitation_width`, `source_x`,
-  `sensor_offset`, `sensor_pitch`, `n_sensors`) are now `null` and derived from the
-  reference wavelength `λ_ref = c_slow / f_center` (width `λ/2`, sponge gap `λ`,
-  offset `2λ`, pitch `λ/8`, sensors filling the sensing region up to 1001), each
-  capped by a fraction of `sensing_length`. The former fixed millimetre defaults
-  (2 mm width, 5 mm gap, 50 mm
-  offset, 301 sensors at 0.5 mm) were meaningless at seismic scale.
-  Configurations that relied on them should set the values explicitly.
-- Implicit Newmark step is accuracy-driven: `Δt = 1 / (steps_per_period ·
-  max_frequency)` with the new `solver.steps_per_period` (default 40). It replaces
-  the element-size/CFL rule, which made thin layers force needlessly small steps
-  (example 02: 2,160 instead of about 11,200 steps). `CFL` now applies to the explicit
-  solver only. `materials.implicit_time_step` changed signature accordingly and
-  `explicit_time_step_heuristic` was removed.
-- Sensor archives are decimated: `times` and `sensor_data_*` hold every
-  `runtime.sample_stride`-th step (default 20 samples per period of
-  `max_frequency`, Nyquist kept above 1.25× the plotted band, ≥ 32 samples),
-  instead of every solver step. `sensors.sample_rate` sets the rate explicitly.
-- Default stiffness-proportional sponge damping lowered from 1e-8 s to 1e-9 s at
-  1 MHz: it contributed < 4 % of the damping at `f_center` but made the explicit
-  step damping-limited (4-33× more steps in the examples). The solver now warns
-  when damping, rather than wave speed, sets the explicit step.
-- Example configurations replaced (see *Examples* below).
 
-### Fixed
-- Explicit RK4 step limit: `Δt_crit` now uses the RK4 half-disk stability radius
-  `R = 2.6` (largest left half-disk in the RK4 stability region, 2.6156) instead
-  of 1, so the step is 2.6× larger while remaining rigorous. Example 03 runs
-  4,512 instead of 11,727 steps with an unchanged Rayleigh speed (2982 m/s vs
-  `c_R` = 2981 m/s).
-- Preflight explicit step now evaluates the same Gershgorin bound per element
-  before meshing (`materials.element_operator_bounds`), so it is a guaranteed
-  lower estimate of the solver step instead of a wave-speed heuristic.
-- BLAS/OpenMP oversubscription under MPI: `wavesim` and `python -m
-  wavesimfem` cap threads per rank at `cpus // ranks_per_node` unless the user
-  set them (`wavesimfem.parallel`); the setting is shown in the run banner.
-- White strip in dispersion maps at the plot-limit edges (frequency/wavenumber
-  masks now include the boundary bins).
-- Fluid-layer detection in the analysis used an absolute `c_T < 50 m/s`
-  threshold; it is now relative (`c_T < 0.01 c_L`), so slow solids such as soft
-  soils are no longer misclassified.
-- `solver.device` and `solver.precision` in sectioned configs were ignored.
-- A shipped example silently dropped the bone viscosity tensor (now rejected by
-  the strict material schema).
-- Figure titles rendered literal `\textbf{...}` when LaTeX was unavailable;
-  plotting no longer mutates global `rcParams`, the Matplotlib backend, or `PATH`.
-- Preflight estimates now share the solver's mesh-layout and time-step code.
-- `--dry-run` without `-c` now errors instead of crashing; postprocess-only runs
-  honor the plot limits stored in the archive.
-- Invalid or missing configuration files and missing sensor archives now produce a
-  one-line `wavesim: error:` message with exit code 2 instead of a traceback
-  (`-v` re-raises for debugging).
+- **Strict devices & schema**: explicit `cuda`/`cuda:N` raises `DeviceUnavailableError` (exit code 3) instead of falling back; unknown/duplicate/ignored config keys and multi-layer `1_layer` definitions are rejected; `absorb_depth` applies only to halfspaces; legacy backend wrappers removed.
+- **SI units & adaptive defaults**: public API, CLI flags (`--f-min`/`--f-max`/`--k-min`/`--k-max`), and `postprocess` keys use SI or unit strings; sponge damping, source/sensor layout, and duration default to wavelength/frequency-scaled values; implicit Newmark uses `solver.steps_per_period` (default 40); sensor histories are decimated (`sensors.sample_rate`); default `absorb_beta` lowered to `1e-9 s` at 1 MHz.
 
 ### Added
-- Hann-windowed N-cycle tone burst excitation (`excitation.source_type:
-  tone_burst`, `excitation.n_cycles`) next to the Ricker wavelet; the source type
-  is recorded in the archive and shown in the preflight and quick-look figure.
-- Scale awareness (`wavesimfem.units`): logs, the preflight box, and figures
-  pick units from the data (s/ms/μs, m/mm, Hz/kHz/MHz, rad/m or rad/mm), so the
-  same tool serves seismic and ultrasonic problems; `parse_quantity` parses
-  `"40 Hz"`-style inputs. The band-pass filter no longer has a fixed 100 Hz floor.
-- `clean-junk` and `forbid-junk` pre-commit hooks backed by `tools/clean_junk.py`
-  (safe removal of caches, build artifacts, and OS/editor files; staged junk is
-  rejected). Ruff is pinned to the same version in pre-commit and CI.
-- Unified, backend-agnostic single-process RK4 engine (SciPy/CuPy): stacked
-  `[K|C]` operator, allocation-free stages, chunked device-resident sensor
-  history, periodic non-finite detection; verified against the PETSc engine.
-- Config keys `output.compress_output`, `output.figure_formats`, `output.usetex`;
-  `substrate`/`superstrate` aliases; "did you mean" suggestions.
-- `logging`-based console output (`wavesimfem` logger), `-q/--quiet`,
-  `-v/--verbose`, `--version`, `set_verbosity()`.
-- Runtime provenance records package version, engine, device, and precision.
-- Tests: configuration schema, figures, engine-vs-reference RK4, MPI `Gatherv`,
-  CLI paths, and an end-to-end physics check (S0 plate velocity, ≈0.1 % error).
 
-### Changed
-- Implicit solver: `K + c₁M + c₁c₅C` is assembled once and the right-hand side
-  is formed from two SpMVs with preassembled `M` and `C` (no per-step form
-  assembly; 2.1× faster per step in example 02, bit-identical results). GAMG
-  receives the rigid-body near-nullspace.
-- Distributed explicit solver: allocation-free `PetscRK4` integrator with fused
-  vector kernels; sensors are interpolated and gathered only at sample steps;
-  explicitly stored zeros are dropped from the damping matrix, so its SpMV
-  scales with the sponge volume.
-- Lazy package exports: `import wavesimfem` no longer imports DOLFINx/MPI.
-- Vectorized `operator_bound` (≈100× faster on large meshes); sensor histories
-  are collected with `Gatherv` instead of pickled object gathers.
-- Packaging: SPDX license metadata, classifiers, URLs, `dev` extra, `py.typed`,
-  version single-sourced from package metadata; stricter Ruff rule set + formatter.
-- CI: least-privilege token, SHA-pinned actions, lint/test/build jobs, coverage,
-  MPI and CLI smoke tests. Removed unused conda dependencies.
-- Documentation: corrected GPU claims, documented device semantics, regularized
-  fluid limitations, conservative explicit time step, and degree-independent
-  mesh sizing.
+- Hann-windowed `tone_burst` excitation; scale-adaptive units (`wavesimfem.units`); unified SciPy/CuPy explicit RK4 engine with chunked device-resident sensor ring buffer; `logging` output (`-q`, `-v`, `--version`); `output.compress_output`/`figure_formats`/`usetex`; `substrate`/`superstrate` aliases; `tools/clean_junk.py` pre-commit hooks; curated Examples 01–06.
 
-### Examples
-- `configs/` holds documented benchmark examples covering every structure mode,
-  each with real materials and references (enforced by a test):
-  `01_plate_aluminum_lamb` (`1_layer`, Lamb-wave NDE),
-  `02_layers_bonded_joint` (`N_layers`, Al/viscoelastic epoxy/Al, tone burst),
-  `03_halfspace_steel_rayleigh` (`halfspace`, rail steel Rayleigh waves),
-  `04_plate_on_halfspace_soil_bedrock` (`plate_on_halfspace`, seismic MASW at 15 Hz),
-  `05_layers_bone_qus` (`N_layers`, stratified solid-fluid plate: bone marrow / cortical bone / soft tissue, Le et al. 2025),
-  `06_plate_in_halfspaces_immersed_water` (`plate_in_halfspaces`, aluminium plate immersed in water).
-- Removed the previous examples 01-11 (including the TOML/JSON copies of 01 and the
-  BoneDC benchmark cases). TOML and JSON remain supported formats.
+### Changed & Fixed
+
+- **Solvers**: RK4 stability radius `R = 2.6` (2.6× larger rigorous step) with matching element-level preflight bounds; once-assembled implicit Newmark operator (2.1× faster, GAMG rigid-body near-nullspace); allocation-free `PetscRK4` with zero-dropped damping; vectorized `operator_bound` (~100× faster); MPI `Gatherv` sensor collection; lazy top-level imports.
+- **Runtime & plotting**: automatic BLAS/OpenMP thread capping per MPI rank (`wavesimfem.parallel`); relative fluid-layer threshold (`c_T < 0.01 c_L`); isolated Matplotlib `rcParams` and clean no-TeX fallbacks; clean exit-code-2 CLI errors; hardened CI and SPDX packaging.
 
 ## [0.2.0] — numerical robustness update
 
-- Replace first-order damped Verlet with fourth-order explicit RK4.
-- Replace random fixed-count spectral iteration with conservative assembled
-  operator bounds; preserve requested damping and fit the exact final time.
-- Evaluate sensors at exact FE points; store only owned sensor histories per rank.
-- Correct FFT plotting coordinates and add Hann tapering/twofold padding.
-- Correct B-scan spatio-temporal pixel extents with half-cell boundaries, pulse peak offset, and adaptive axis ticks.
-- Add preflight resource estimator and `--dry-run` CLI mode to preview mesh, DOF counts, time steps, and RAM before allocation.
-- Add runtime numerical CLI overrides: `--max-frequency`, `--duration`, `--dt`, and `--cfl`.
-- Eliminate cumulative time drift in simulation loop using integer step multiplication.
-- Validate material energy, geometry, sampling and integration parameters.
-- Record actual damping, mesh, step, dependency versions and source hashes via module-relative paths.
-- Check PETSc convergence and fail fast on MPI runtime exceptions with detailed process failure diagnostics.
-- Make `--no-postprocess` disable all plotting and honor archived plot limits.
-- Add installable CLI, pinned FEM API versions, regression tests and CI.
-- Reorganize codebase into a modular Python package (`src/wavesimfem/`) with dedicated modules for configuration, materials, numerics, solvers, analysis, and CLI.
-
-Numerical results intentionally differ from 0.1: integrator, sensor interpolation,
-automatic mesh-sizing frequency, default implicit sponge damping and FFT windows
-have changed. Existing output files are not migrated or overwritten by tests.
-
-The regularized elastic fluid model remains an approximation. Acoustic-interface
-validation and publication-scale convergence/scaling studies remain separate
-scientific verification work; successful software regressions are not a substitute.
+- Replaced damped Verlet with fourth-order explicit RK4 using conservative assembled stability bounds and drift-free integer time stepping.
+- Added exact FE point-sensor evaluation with rank-owned histories, Hann-tapered/padded dispersion FFTs, and corrected B-scan extents.
+- Added preflight resource estimation (`--dry-run`), CLI numerical overrides (`--max-frequency`, `--duration`, `--dt`, `--cfl`, `--no-postprocess`), strict input validation, PETSc convergence checks, and MPI fail-fast diagnostics.
+- Reorganized codebase into the `src/wavesimfem/` package with an installable CLI, regression tests, and CI.

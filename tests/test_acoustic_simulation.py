@@ -317,3 +317,268 @@ def test_separable_source_reproduces_physical_forcing(tmp_path):
         fs.destroy()
         fp.destroy()
         problem.destroy()
+
+
+@pytest.mark.parametrize("observable", ["displacement", "velocity"])
+def test_acoustic_pure_solid_device_ring_buffer_matches_petsc(tmp_path, monkeypatch, observable):
+    from wavesimfem.acoustics import build_acoustic_problem, solve_acoustic
+    from wavesimfem.config import parse_and_resolve_config
+    from wavesimfem.device import CPU_DEVICE
+
+    cfg = {
+        "solver_type": "explicit",
+        "device": "cpu",
+        "CFL": 0.6,
+        "sensing_length": 0.01,
+        "absorb_length": 0.002,
+        "f_center": 1e5,
+        "source_x": 0.004,
+        "sensor_offset": 0.001,
+        "sensor_pitch": 0.001,
+        "n_sensors": 4,
+        "duration": 1.5e-5,
+        "nx": 10,
+        "ny_per_region": [2],
+        "degree": 1,
+        "run_postprocess": False,
+        "structure_mode": "1_layer",
+        "single_layer": {
+            "name": "aluminium",
+            "thickness": 0.001,
+            "material_model": "isotropic",
+            "rho": 2700.0,
+            "E": 70e9,
+            "nu": 0.33,
+        },
+        "source_kind": "traction",
+        "sensor_observable": observable,
+        "absorb_alpha": 0.0,
+        "absorb_beta": 0.0,
+    }
+    problem = build_acoustic_problem(parse_and_resolve_config(custom_cfg=cfg))
+    try:
+        arr_res = solve_acoustic(problem, device=CPU_DEVICE)
+        monkeypatch.setattr("wavesimfem.solvers._resolve_device", lambda *a, **kw: None)
+        petsc_res = solve_acoustic(problem, device=None)
+        assert arr_res.runtime["engine"] == "scipy"
+        assert arr_res.runtime["backend"] == "scipy"
+        assert petsc_res.runtime["engine"] == "petsc"
+        key_y = "sensor_data_y" if observable == "displacement" else "sensor_data_vy"
+        assert np.max(np.abs(arr_res.histories[key_y])) > 0
+        np.testing.assert_allclose(
+            arr_res.histories[key_y], petsc_res.histories[key_y], rtol=1e-11, atol=1e-16
+        )
+    finally:
+        problem.destroy()
+
+
+def test_direct_solvers_handle_write_vtx_with_none_output_dir(tmp_path, monkeypatch):
+    from wavesimfem.acoustics import build_acoustic_problem, solve_acoustic
+    from wavesimfem.config import parse_and_resolve_config
+    from wavesimfem.solvers import build_problem, solve_explicit
+
+    monkeypatch.chdir(tmp_path)
+    cfg_elastic = parse_and_resolve_config(
+        custom_cfg={
+            "solver_type": "explicit",
+            "device": "cpu",
+            "CFL": 0.6,
+            "sensing_length": 0.01,
+            "absorb_length": 0.002,
+            "f_center": 1e5,
+            "n_sensors": 3,
+            "duration": 2e-6,
+            "nx": 8,
+            "ny_per_region": [2],
+            "degree": 1,
+            "structure_mode": "1_layer",
+            "single_layer": {
+                "name": "aluminium",
+                "thickness": 0.001,
+                "material_model": "isotropic",
+                "rho": 2700.0,
+                "E": 70e9,
+                "nu": 0.33,
+            },
+            "write_vtx": True,
+            "output_dir": None,
+            "run_postprocess": False,
+        }
+    )
+    prob_e = build_problem(cfg_elastic)
+    solve_explicit(prob_e)
+    assert (tmp_path / "results_wavesim_explicit" / "guided_wave.bp").exists()
+
+    cfg_ac = parse_and_resolve_config(
+        custom_cfg={
+            **small_config(tmp_path),
+            "write_vtx": True,
+            "output_dir": None,
+            "duration": 2e-6,
+        }
+    )
+    prob_a = build_acoustic_problem(cfg_ac)
+    try:
+        res_a = solve_acoustic(prob_a, solver_type="implicit")
+        assert "linear_solver" in res_a.runtime
+        assert (tmp_path / "results_wavesim_implicit" / "acoustic_pressure.bp").exists()
+    finally:
+        prob_a.destroy()
+
+
+def test_particle_velocity_probe_cell_interpolation_matches_full_mesh(tmp_path):
+    from wavesimfem.acoustic_time import CoupledRK4
+    from wavesimfem.acoustics import AcousticSampler, build_acoustic_problem
+    from wavesimfem.config import parse_and_resolve_config
+
+    cfg = small_config(tmp_path, mixed=True)
+    cfg.update(sensor_observable="particle_velocity", sensor_y=0.0005)
+    problem = build_acoustic_problem(parse_and_resolve_config(custom_cfg=cfg))
+    stepper = CoupledRK4(problem.operators, forcing=problem.forcing)
+    sampler = AcousticSampler(problem)
+    try:
+        dt = 0.5 * stepper.stable_dt()
+        for i in range(10):
+            stepper.step(i * dt, dt)
+        sampled = sampler.update(stepper, 10 * dt, 0.0)
+        # Full-mesh interpolation must match restricted cells0 interpolation identically.
+        sampler.fluid_velocity.interpolate(sampler.velocity_expression)
+        sampler.fluid_velocity.x.scatter_forward()
+        expected = problem.probes.sample(sampler.fluid_velocity)
+        np.testing.assert_allclose(sampled, expected, rtol=1e-14, atol=1e-18)
+        # Skipping sensors avoids sampling while updating only requested fields.
+        empty = sampler.update(
+            stepper, 10 * dt, 0.0, need_sensors=False, need_energy=False, need_vtx=False
+        )
+        assert empty.shape == (0, 2)
+    finally:
+        sampler.destroy()
+        stepper.destroy()
+        problem.destroy()
+
+
+@pytest.mark.parametrize(
+    "observable,sensor_y",
+    [("pressure", 0.0005), ("displacement", 0.002), ("velocity", 0.002)],
+)
+def test_coupled_acoustic_device_recorder_matches_petsc_without_host_sync(
+    tmp_path, monkeypatch, observable, sensor_y
+):
+    from wavesimfem.acoustics import AcousticSampler, build_acoustic_problem, solve_acoustic
+    from wavesimfem.config import parse_and_resolve_config
+    from wavesimfem.device import CPU_DEVICE
+
+    cfg = small_config(tmp_path, mixed=True)
+    cfg.update(
+        sensor_observable=observable,
+        sensor_y=sensor_y,
+        duration=1.2e-5,
+        absorb_alpha=0.0,
+        absorb_beta=0.0,
+    )
+    problem = build_acoustic_problem(parse_and_resolve_config(custom_cfg=cfg))
+    try:
+        update_calls = []
+        orig_update = AcousticSampler.update
+
+        def tracked_update(self, *args, **kwargs):
+            update_calls.append(args[1])
+            return orig_update(self, *args, **kwargs)
+
+        monkeypatch.setattr(AcousticSampler, "update", tracked_update)
+        arr_res = solve_acoustic(problem, device=CPU_DEVICE)
+        # Only t=0 uses AcousticSampler.update; all stepped samples run on device.
+        assert update_calls == [0.0]
+
+        monkeypatch.setattr(AcousticSampler, "update", orig_update)
+        monkeypatch.setattr("wavesimfem.solvers._resolve_device", lambda *a, **kw: None)
+        petsc_res = solve_acoustic(problem, device=None)
+        for key in arr_res.histories:
+            assert np.max(np.abs(petsc_res.histories[key])) > 0
+            np.testing.assert_allclose(
+                arr_res.histories[key], petsc_res.histories[key], rtol=1e-11, atol=1e-16
+            )
+        assert np.max(petsc_res.fluid_energy) > 0
+        np.testing.assert_allclose(
+            arr_res.fluid_energy, petsc_res.fluid_energy, rtol=1e-11, atol=1e-16
+        )
+    finally:
+        problem.destroy()
+
+
+@pytest.mark.parametrize(
+    "precision,rtol,atol_rel", [("double", 1e-11, 1e-12), ("single", 2e-5, 1e-5)]
+)
+def test_prescribed_pressure_device_recorder_multi_flush_matches_petsc(
+    tmp_path, monkeypatch, precision, rtol, atol_rel
+):
+    from wavesimfem import storage
+    from wavesimfem.acoustics import build_acoustic_problem, solve_acoustic
+    from wavesimfem.config import parse_and_resolve_config
+    from wavesimfem.device import CPU_DEVICE
+
+    raw = {
+        "solver": {
+            "type": "explicit",
+            "device": "cpu",
+            "precision": precision,
+            "CFL": 0.5,
+            "duration": 1.2e-5,
+        },
+        "output": {"history_storage": "disk"},
+        "geometry": {"sensing_length": 0.015, "absorb_length": 0.0},
+        "absorbing_boundaries": {"alpha": 0.0, "beta": 0.0},
+        "structure": {
+            "mode": "1_layer",
+            "single_layer": {
+                "name": "water",
+                "thickness": 0.003,
+                "rho": 1000.0,
+                "c": 1500.0,
+                "material_model": "fluid",
+            },
+        },
+        "acoustic_boundaries": {"right": "pressure_release"},
+        "excitation": {
+            "source_kind": "acoustic_pressure",
+            "source_boundary": "left",
+            "source_region": "water",
+            "source_amplitude": 5e4,
+            "source_type": "tone_burst",
+            "n_cycles": 3,
+            "f_center": 2e5,
+        },
+        "mesh": {"nx": 16, "ny_per_region": [3], "degree": 2, "max_frequency": 4e5},
+        # First sensor lies directly on the driven x=0 boundary to exercise s_prescribed.
+        "sensors": {
+            "observable": "pressure",
+            "n_sensors": 4,
+            "sensor_offset": 0.0,
+            "sensor_pitch": 0.003,
+        },
+        "postprocess": {"run_postprocess": False},
+    }
+    problem = build_acoustic_problem(parse_and_resolve_config(custom_cfg=raw))
+    try:
+        # Force frequent ring-buffer flushes (chunk_rows ~ 5)
+        monkeypatch.setattr(storage, "HISTORY_CHUNK_BYTES", 256)
+        with storage.HistoryStore("disk", tmp_path) as store:
+            arr_res = solve_acoustic(problem, device=CPU_DEVICE, history_store=store)
+            arr_p = np.array(arr_res.histories["sensor_data_pressure"], copy=True)
+            arr_e = arr_res.fluid_energy.copy()
+        monkeypatch.setattr("wavesimfem.solvers._resolve_device", lambda *a, **kw: None)
+        petsc_res = solve_acoustic(problem, device=None)
+        petsc_p = petsc_res.histories["sensor_data_pressure"]
+        assert np.max(np.abs(petsc_p[:, 0])) > 1e4  # driven boundary sensor is active
+        assert np.max(np.abs(petsc_p[:, 1:])) > 0
+        np.testing.assert_allclose(
+            arr_p, petsc_p, rtol=rtol, atol=atol_rel * np.max(np.abs(petsc_p))
+        )
+        np.testing.assert_allclose(
+            arr_e,
+            petsc_res.fluid_energy,
+            rtol=rtol,
+            atol=atol_rel * np.max(petsc_res.fluid_energy),
+        )
+    finally:
+        problem.destroy()

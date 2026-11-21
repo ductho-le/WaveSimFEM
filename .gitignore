@@ -53,6 +53,7 @@ Thumbs.db
 /results_*/
 *.bp/
 *.npz
+/.cache/
 .pytest_cache/
 .ruff_cache/
 .coverage
@@ -62,4 +63,6 @@ htmlcov/
 
 # Development materials & local scratch
 /.dev/
-/manuscript/
+
+# Manuscript
+/manuscript

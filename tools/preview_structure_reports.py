@@ -245,7 +245,7 @@ def create_synthetic_archive(config_path: Path, output_dir: Path) -> tuple[Path,
         sensor_y=sensor_y,
         sensor_observable=observable,
         duration=float(duration),
-        sample_rate=float(1 / times[1]),
+        sensor_sample_rate=float(1 / times[1]),
     )
     provenance = "SYNTHETIC prescribed wave packets; report demonstration, not an FEM result"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -275,6 +275,7 @@ def create_synthetic_archive(config_path: Path, output_dir: Path) -> tuple[Path,
         optional_speeds["c_T"] = structure["c_T_plate_top"]
     np.savez(
         archive_path,
+        schema_version=2,
         times=times,
         sensor_x=positions,
         sensor_y=sensor_y,

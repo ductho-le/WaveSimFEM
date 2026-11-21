@@ -210,3 +210,29 @@ def test_invalid_reference_frequencies_fail_clearly(frequencies):
     profile = _profile(dict(structure_mode="1_layer", single_layer=_isotropic()))
     with pytest.raises(ValueError):
         reference_dispersion(profile, frequencies)
+
+
+def test_sensor_regions_include_floating_point_interface_tolerance():
+    profile = structure_profile(
+        {
+            "simulation_config_yaml": yaml.safe_dump(
+                {
+                    "structure": {
+                        "mode": "N_layers",
+                        "layers": [
+                            {
+                                "name": "Water",
+                                "thickness": 0.002,
+                                "material_model": "fluid",
+                                "rho": 1000.0,
+                                "c": 1500.0,
+                            },
+                            _isotropic(),
+                        ],
+                    }
+                }
+            ),
+            "sensor_y": 0.002 - 1e-12,
+        }
+    )
+    assert set(profile["sensor_regions"]) == {"Water", "Solid"}

@@ -9,10 +9,13 @@ from __future__ import annotations
 
 import csv
 import json
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 import matplotlib
 import numpy as np
+from matplotlib.axes import Axes
 from matplotlib.ticker import MaxNLocator
 
 from wavesimfem.analysis import (
@@ -23,12 +26,14 @@ from wavesimfem.analysis import (
     _rc,
     _robust_limit,
     _save,
+    _typography_note,
     resolve_usetex,
 )
 from wavesimfem.reporting import log
 from wavesimfem.storage import atomic_output
 from wavesimfem.structure_analysis import _scalar, reference_dispersion, structure_profile
 from wavesimfem.units import (
+    Unit,
     frequency_unit,
     length_unit,
     observable_unit,
@@ -43,11 +48,13 @@ _INK, _MUTED = "#233044", "#667085"
 _COLORS = (_BLUE, _ORANGE, _PURPLE, _GREEN)
 
 
-def _finite(value):
+def _finite(value: Any) -> float | None:
     return float(value) if np.isfinite(value) else None
 
 
-def _read_record(path):
+def _read_record(
+    path: str | Path,
+) -> tuple[dict[str, Any], np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     with np.load(path, allow_pickle=False) as archive:
         data = dict(archive)
     observable = str(_scalar(data, "sensor_observable", "displacement"))
@@ -91,7 +98,7 @@ def _read_record(path):
     return data, t, x, arrays[0], arrays[1]
 
 
-def _unavailable_polarization(frequencies, reason):
+def _unavailable_polarization(frequencies: np.ndarray, reason: str) -> dict[str, Any]:
     return dict(
         frequencies=frequencies,
         vertical_horizontal_ratio=np.full_like(frequencies, np.nan),
@@ -102,7 +109,7 @@ def _unavailable_polarization(frequencies, reason):
     )
 
 
-def _one_side(data, x):
+def _one_side(data: Mapping[str, Any], x: np.ndarray) -> tuple[np.ndarray, int, str, bool]:
     if "source_x" not in data:
         return np.arange(len(x)), 1, "Source x unavailable; +x selected", False
     source = float(data["source_x"])
@@ -116,11 +123,16 @@ def _one_side(data, x):
     return np.arange(len(x)), 1, "No one-sided aperture of >=3 receivers", False
 
 
-def _frequency_band(data, t, f_min, f_max):
+def _frequency_band(
+    data: Mapping[str, Any],
+    t: np.ndarray,
+    f_min: float | str | None,
+    f_max: float | str | None,
+) -> tuple[float, float]:
     nyquist = 0.5 / (t[1] - t[0])
     f0 = float(data.get("f_center", nyquist / 4))
 
-    def bound(value, key, legacy, default):
+    def bound(value: float | str | None, key: str, legacy: str, default: float) -> float:
         if value is not None:
             return parse_quantity(value, "frequency")
         if key in data:
@@ -139,7 +151,13 @@ def _frequency_band(data, t, f_min, f_max):
     return (lo, hi)
 
 
-def _array_spectra(t, x, ux, uy, band):
+def _array_spectra(
+    t: np.ndarray,
+    x: np.ndarray,
+    ux: np.ndarray,
+    uy: np.ndarray,
+    band: tuple[float, float],
+) -> dict[str, Any]:
     """Unpadded temporal spectrum and signed, spatially tapered Fourier image."""
     scale = max(float(np.max(np.abs(ux))), float(np.max(np.abs(uy)))) or 1.0
     dt, pitch = t[1] - t[0], x[1] - x[0]
@@ -168,7 +186,9 @@ def _array_spectra(t, x, ux, uy, band):
     )
 
 
-def _decay_spectrum(spectra, x, direction):
+def _decay_spectrum(
+    spectra: Mapping[str, Any], x: np.ndarray, direction: int
+) -> list[dict[str, Any]]:
     """Apparent Fourier-amplitude slope; no compensation for mode interference."""
     f = spectra["frequency"]
     direction_x = direction * (x - x.mean())
@@ -212,7 +232,9 @@ def _decay_spectrum(spectra, x, direction):
     return rows
 
 
-def _reference_selection(profile, curves):
+def _reference_selection(
+    profile: Mapping[str, Any], curves: Sequence[Mapping[str, Any]]
+) -> list[Mapping[str, Any]]:
     priority = (
         "lamb",
         "rayleigh",
@@ -236,7 +258,7 @@ def _reference_selection(profile, curves):
     return chosen[:4]
 
 
-def _short_reference(curve, profile):
+def _short_reference(curve: Mapping[str, Any], profile: Mapping[str, Any]) -> str:
     base = (
         curve["label"]
         .split(" · ")[0]
@@ -252,7 +274,14 @@ def _short_reference(curve, profile):
     return base.replace("c_f", "$c_f$").replace("A0", "$A_0$").replace("S0", "$S_0$")
 
 
-def _physics_diagnostic(ax, profile, scan, pol, decay, fu):
+def _physics_diagnostic(
+    ax: Axes,
+    profile: Mapping[str, Any],
+    scan: Mapping[str, Any],
+    pol: Mapping[str, Any],
+    decay: Sequence[Mapping[str, Any]],
+    fu: Unit,
+) -> tuple[str, str]:
     family = profile["family"]
     f, cp = scan["frequencies"], scan["ridge_velocity"]
     fluids = [r for r in profile["regions"] if r["is_fluid"] and r.get("c_fluid_m_s")]
@@ -369,7 +398,7 @@ def _physics_diagnostic(ax, profile, scan, pol, decay, fu):
     return kind, note
 
 
-def _write_readme(destination, report):
+def _write_readme(destination: Path, report: Mapping[str, Any], *, usetex: bool = False) -> None:
     """Keep figure captions, provenance and interpretation beside each export."""
     profile, summary = report["profile"], report["summary"]
     observable = summary.get("sensor_observable", "displacement")
@@ -391,7 +420,7 @@ def _write_readme(destination, report):
         f"Archive: `{report['archive']}`.",
         f"Structure identification: `{profile['provenance']}`; family: `{profile['family']}`.",
         "",
-        "Figures use a fixed 190 mm export width and 10 pt LaTeX text throughout. "
+        f"Figures use a fixed 190 mm export width and {_typography_note(usetex)} text throughout. "
         "Titles identify panels only; captions, interpretation and limitations are recorded here.",
         "",
         "## Structure and wave families",
@@ -503,16 +532,16 @@ def _write_readme(destination, report):
 
 
 def write_structure_report(
-    archive_path,
-    output_dir=None,
+    archive_path: str | Path,
+    output_dir: str | Path | None = None,
     *,
-    formats=("png", "pdf"),
-    usetex=False,
-    f_min=None,
-    f_max=None,
-    k_min=None,
-    k_max=None,
-):
+    formats: Sequence[str] = ("png", "pdf"),
+    usetex: bool | str = False,
+    f_min: float | str | None = None,
+    f_max: float | str | None = None,
+    k_min: float | str | None = None,
+    k_max: float | str | None = None,
+) -> dict[str, Any]:
     """Write two physics-aware multi-panel figures plus reproducible measurements.
 
     Files live in ``wave_physics/``. Physical identification comes exclusively
@@ -630,7 +659,8 @@ def write_structure_report(
         frequency_band_hz=list(band),
     )
     log(f"  Structure-aware report: {profile['title']}")
-    with _PLOT_LOCK, matplotlib.rc_context(_rc(resolve_usetex(usetex))):
+    tex = resolve_usetex(usetex)
+    with _PLOT_LOCK, matplotlib.rc_context(_rc(tex)):
         fig = _figure(145)
         gs = fig.add_gridspec(
             2, 2, left=0.095, right=0.89, top=0.955, bottom=0.085, hspace=0.32, wspace=0.46
@@ -757,7 +787,7 @@ def write_structure_report(
         axes = [fig.add_subplot(gs[i, j]) for i in range(2) for j in range(2)]
         colour_ax = fig.add_subplot(outer[1].subgridspec(2, 1, hspace=0.32)[0])
         uu = observable_unit(max(np.max(np.abs(ux)), np.max(np.abs(uy))), observable)
-        limit = _robust_limit(np.stack((uu(ux), uu(uy))))
+        limit = _robust_limit(uu(uy) if scalar else np.stack((uu(ux), uu(uy))))
         norm = matplotlib.colors.Normalize(vmin=-limit, vmax=limit)
         component_names = (
             ("Horizontal $u_1$", "Vertical $u_2$")
@@ -927,5 +957,5 @@ def write_structure_report(
     with atomic_output(destination / "report.json") as stream:
         json.dump(report, stream, indent=2, allow_nan=False)
         stream.write("\n")
-    _write_readme(destination, report)
+    _write_readme(destination, report, usetex=tex)
     return report

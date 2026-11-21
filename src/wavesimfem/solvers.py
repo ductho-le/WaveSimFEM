@@ -203,9 +203,8 @@ def _create_layered_mesh(summary: dict[str, Any], layout: MeshLayout) -> tuple[A
     tdim = domain.topology.dim
 
     # Piecewise-linear stretching maps uniform element rows onto region interfaces.
-    thicknesses = [r["thickness"] for r in regions]
     frac_grid = np.concatenate([[0.0], np.cumsum(layout.ny_per_region) / layout.ny])
-    interfaces = np.concatenate([[y_min], y_min + np.cumsum(thicknesses)])
+    interfaces = np.array([*(r["y_bot"] for r in regions), regions[-1]["y_top"]], dtype=float)
     y_frac = np.clip((domain.geometry.x[:, 1] - y_min) / summary["H_domain"], 0.0, 1.0)
     domain.geometry.x[:, 1] = np.interp(y_frac, frac_grid, interfaces)
 
@@ -429,10 +428,16 @@ def _drop_zero_entries(matrix: Any) -> Any:
     proportional to the sponge (and viscoelastic) volume only.
     """
     indptr, indices, values = matrix.getValuesCSR()
+    n_rows = len(indptr) - 1
     keep = values != 0.0
-    rows = np.repeat(np.arange(len(indptr) - 1), np.diff(indptr))
-    counts = np.bincount(rows[keep], minlength=len(indptr) - 1)
-    new_indptr = np.concatenate([[0], np.cumsum(counts)]).astype(PETSc.IntType)
+    counts = np.zeros(n_rows, dtype=np.int64)
+    if n_rows > 0:
+        nonempty = indptr[:-1] < indptr[1:]
+        if np.any(nonempty):
+            counts[nonempty] = np.add.reduceat(keep, indptr[:-1][nonempty], dtype=np.int64)
+    new_indptr = np.zeros(n_rows + 1, dtype=PETSc.IntType)
+    if n_rows > 0:
+        np.cumsum(counts, out=new_indptr[1:])
     filtered = PETSc.Mat().createAIJ(
         size=matrix.getSizes(),
         csr=(new_indptr, indices[keep].astype(PETSc.IntType), values[keep]),
@@ -470,7 +475,14 @@ def _rigid_body_near_nullspace(V: Any) -> tuple[Any, list[Any]]:
 def _vtx_writer(stack: contextlib.ExitStack, problem: WaveProblem, function: Any) -> Any | None:
     if not problem.cfg["write_vtx"]:
         return None
-    path = os.path.join(problem.cfg["output_dir"], "guided_wave.bp")
+    out_dir = (
+        problem.cfg.get("output_dir")
+        or f"results_wavesim_{problem.cfg.get('solver_type', 'explicit')}"
+    )
+    if rank == 0:
+        os.makedirs(out_dir, exist_ok=True)
+    comm.Barrier()
+    path = os.path.join(out_dir, "guided_wave.bp")
     writer = io.VTXWriter(comm, path, [function], engine="BP4")
     stack.callback(writer.close)
     return writer
@@ -489,7 +501,7 @@ def _configure_ksp(solver: Any, ndofs_global: int, near_nullspace: Any | None = 
     if ndofs_global >= ITERATIVE_DOF_THRESHOLD:
         solver.setType(PETSc.KSP.Type.CG)
         pc.setType(PETSc.PC.Type.GAMG)
-        solver.setTolerances(rtol=1e-8, atol=1e-14, max_it=2000)
+        solver.setTolerances(rtol=1e-10, atol=0.0, max_it=2000)
         if near_nullspace is not None:
             solver.getOperators()[0].setNearNullSpace(near_nullspace)
             return f"CG + GAMG with rigid-body near-nullspace (iterative, {ndofs_global} DOFs)"
@@ -512,7 +524,7 @@ def _fallback_bjacobi(solver: Any, ndofs_global: int) -> str:
     solver.setType(PETSc.KSP.Type.CG)
     pc = solver.getPC()
     pc.setType(PETSc.PC.Type.BJACOBI)
-    solver.setTolerances(rtol=1e-10, atol=1e-14, max_it=2000)
+    solver.setTolerances(rtol=1e-10, atol=0.0, max_it=2000)
     pc.setUp()
     for sub in pc.getBJacobiSubKSP():
         sub.getPC().setType(PETSc.PC.Type.ICC)
@@ -614,6 +626,9 @@ def solve_implicit(
         near_nullspace, _nullspace_storage = None, []
         if problem.ndofs_global >= ITERATIVE_DOF_THRESHOLD:
             near_nullspace, _nullspace_storage = _rigid_body_near_nullspace(V)
+            for obj in _nullspace_storage:
+                if hasattr(obj, "destroy"):
+                    stack.callback(obj.destroy)
             stack.callback(near_nullspace.destroy)
         solver = PETSc.KSP().create(comm)
         stack.callback(solver.destroy)
@@ -911,10 +926,13 @@ def solve_explicit(
                     sensor_y[step // stride] = values[:, 1]
                 if snapshot_now:
                     vtx.write(step * dt_val)
-            if step % report_every == 0:
-                if comm.allreduce(not np.isfinite(stepper.u.array_r).all(), op=MPI.LOR):
+            if step % report_every == 0 or step == n_steps:
+                local_bad = not (
+                    np.isfinite(stepper.u.array_r).all() and np.isfinite(stepper.v.array_r).all()
+                )
+                if comm.allreduce(local_bad, op=MPI.LOR):
                     raise FloatingPointError(f"Non-finite state at step {step}/{n_steps}")
-                if rank == 0:
+                if rank == 0 and step % report_every == 0:
                     _progress(step, n_steps, t_loop)
         loop_seconds = pytime.perf_counter() - t_loop
 

@@ -12,12 +12,12 @@ then establish convergence for the quantities required by your study.
 | [`template.yaml`](template.yaml) | Complete parameter reference; 1 mm free aluminium plate | Ricker, 500 kHz | 1 MHz |
 | [`01_plate_aluminum_lamb.yaml`](01_plate_aluminum_lamb.yaml) | 3 mm aluminium plate; Lamb-wave NDE and structural health monitoring | Ricker, 1 MHz | 2 MHz |
 | [`02_plate_cfrp.yaml`](02_plate_cfrp.yaml) | 1 mm T300/914 CFRP cross-ply plate, `[0/90/0/90]_s`; anisotropic laminate dispersion | Ricker, 1 MHz | 2 MHz |
-| [`03_halfspace_steel_rayleigh.yaml`](03_halfspace_steel_rayleigh.yaml) | Truncated steel halfspace; Rayleigh-wave velocity measurement | Five-cycle Hann burst, 1 MHz | 1.5 MHz |
+| [`03_halfspace_steel_rayleigh.yaml`](03_halfspace_steel_rayleigh.yaml) | Truncated steel halfspace; Rayleigh-wave velocity measurement | Ricker, 1 MHz | 2 MHz |
 | [`04_plate_on_halfspace_soil_bedrock.yaml`](04_plate_on_halfspace_soil_bedrock.yaml) | 10 m soil layer over bedrock; seismic surface-wave analysis | Ricker, 15 Hz | 30 Hz |
 | [`05_layers_bone_qus.yaml`](05_layers_bone_qus.yaml) | Marrow / cortical bone / tissue; axial-transmission ultrasound | Ricker, 500 kHz | 1 MHz |
-| [`06_plate_in_halfspaces_immersed_water.yaml`](06_plate_in_halfspaces_immersed_water.yaml) | Aluminium plate between water regions; immersion loading | Ricker, 500 kHz | 1 MHz |
-| [`07_fluid_acoustic.yaml`](07_fluid_acoustic.yaml) | Water channel; scalar pressure and outgoing radiation | Ricker, 250 kHz | 500 kHz |
-| [`08_fluid_solid_acoustic.yaml`](08_fluid_solid_acoustic.yaml) | Aluminium on a sponge-terminated water half-space; interface traction and an 81-receiver fluid pressure array | Ricker, 200 kHz | 500 kHz |
+| [`06_plate_in_halfspaces_immersed_water.yaml`](06_plate_in_halfspaces_immersed_water.yaml) | 1.5 mm aluminium plate between water half-spaces; immersion loading | Ricker, 1 MHz | 2 MHz |
+| [`07_fluid_acoustic.yaml`](07_fluid_acoustic.yaml) | Water channel; scalar pressure and outgoing radiation | Ricker, 1 MHz | 2 MHz |
+| [`08_fluid_solid_acoustic.yaml`](08_fluid_solid_acoustic.yaml) | Aluminium on a sponge-terminated water half-space; interface traction and an 801-receiver fluid pressure array | Ricker, 1 MHz | 2 MHz |
 
 The examples cover all supported structure modes and the isotropic, anisotropic,
 viscoelastic, and fluid material models. The examples use explicit RK4 integration;
@@ -217,9 +217,9 @@ analytical continuum validation benchmarks.
 
 ### Excitation
 
-`ricker` provides a broadband pulse for dispersion studies; example 02 uses it
-at 1 MHz. `tone_burst` provides a Hann-windowed sinusoid with duration
-`n_cycles / f_center`. Example 03 uses five cycles at 1 MHz, giving a 5 µs pulse.
+`ricker` provides a broadband pulse for dispersion studies; examples 01–08 all use it
+by default. `tone_burst` provides a Hann-windowed sinusoid with duration
+`n_cycles / f_center` (for example, five cycles at 1 MHz gives a 5 µs narrowband pulse).
 
 The Gaussian traction footprint has `sigma = excitation_width / 3`. The vector
 `(source_fx, source_fy)` is normalised, and `traction_max` sets the resultant
@@ -235,9 +235,9 @@ theory-guided A0/S0 displacement reconstructions. Example 01 enables this report
 and disables generic mixed-packet fits. Its PNG and PDF figures are saved under
 `lamb_modes/`: `modal_separation` overlays Rayleigh–Lamb branches and shows modal
 propagation maps; `modal_waveforms` compares the tapered input, A0, S0, and residual
-at three interior receivers. Time, distance, and displacement use scale-adaptive
-units. Propagation maps share a colour limit at the input's 99th absolute
-percentile, with extended colourbars indicating clipping.
+at three interior receivers; `modal_resolution` plots the spatial-resolution margin
+and Nyquist overlap diagnostics. Time, distance, and displacement use scale-adaptive
+units. Propagation maps share a colour limit at the input's 99th absolute percentile.
 
 `modal_signals.npz` contains both displacement-component reconstructions and
 `diagnostics.json` records the archived model, frequency band, mask width, and
@@ -278,12 +278,12 @@ superstrate where present. Sponge depths do not create additional regions.
 | Template | 640 | `[6]` | 0.219 mm |
 | 01 | 1440 | `[12]` | 0.236 mm |
 | 02 | 3300 | `[2, 2, 2, 2, 2, 2, 2, 2]` | 0.121 mm |
-| 03 | 920 | `[60]` | 0.283 mm |
-| 04 | 180 | `[30, 10]` | 1 m |
-| 05 | 757 | `[6, 22, 6]` | 0.185 mm |
-| 06 | 600 | `[25, 6, 25]` | 0.233 mm |
-| 07 | 100 | `[8]` | 0.250 mm |
-| 08 | 320 | `[32, 4]` | 0.250 mm |
+| 03 | 960 | `[45]` | 0.3125 mm |
+| 04 | 560 | `[25, 10]` | 1 m |
+| 05 | 800 | `[4, 12, 4]` | 0.325 mm |
+| 06 | 1200 | `[40, 4, 40]` | 0.217 mm |
+| 07 | 1040 | `[10]` | 0.250 mm |
+| 08 | 1625 | `[96, 4]` | 0.160 mm |
 
 A useful initial Q2 resolution is 6–10 elements per shortest retained physical
 wavelength, with sufficient rows to resolve through-thickness gradients. Guided
@@ -334,9 +334,10 @@ resolution is `2*pi/aperture`; zero padding does not improve physical resolution
 Spatial Nyquist requires `sensor_pitch < lambda_min/2`; a quarter-wavelength pitch
 provides additional margin.
 
-Examples 01/02 use 200 mm apertures; 03/05/06 use 60 mm; example 04 uses 60 m.
-Example 02 uses 801 receivers at 0.25 mm pitch, with spatial Nyquist
-12.57 rad/mm, while the displayed range ends at 6 rad/mm. Check the independently
+Examples 01–03 and 05–08 use 200 mm apertures; example 04 uses 400 m; the template uses 60 mm.
+Examples 02, 06, and 08 use 801 receivers at 0.25 mm pitch, with spatial Nyquist
+12.57 rad/mm (example 07 uses 401 receivers at 0.5 mm pitch, spatial Nyquist 6.28 rad/mm),
+exceeding their displayed wavenumber limits. Check the independently
 calculated CFRP wavelengths over the excited band and reduce pitch if needed,
 increasing receiver count to preserve aperture. Unresolved modes can alias into the displayed range;
 plot limits do not prevent aliasing.
@@ -379,7 +380,7 @@ free-plate Lamb references, halfspace Rayleigh/polarization comparisons,
 layered-ground wavelength/thickness, viscoelastic spatial-decay fits, or
 solid–fluid sound-line comparisons. Qualified measurements, exclusion reasons
 and physical references accompany the figures in CSV, JSON and NPZ files.
-The [main post-processing guide](../README.md#outputs-and-post-processing)
+The [main output artifacts guide](../README.md#-output-artifacts)
 describes the sampling checks and limits of each measurement.
 
 Examples 03–06 enable the receiver report in `postprocess`. Example 01 uses the
@@ -406,10 +407,10 @@ The supplied starting bands are:
 | Template | 0.3–0.8 MHz |
 | 01 aluminium plate (disabled) | 0–2 MHz |
 | 02 CFRP plate (disabled) | 0–2 MHz |
-| 03 steel halfspace | 0.7–1.3 MHz |
+| 03 steel halfspace | 0.5–1.5 MHz |
 | 04 soil/bedrock | 8–25 Hz |
 | 05 bone | 0.3–0.8 MHz |
-| 06 immersed plate | 0.3–0.8 MHz |
+| 06 immersed plate | 0.5–1.5 MHz |
 
 These bands support initial inspection; they do not guarantee isolation of a
 particular mode. All examples select the vertical component and initially use
@@ -448,8 +449,9 @@ values. It includes interference and radiation, not only material loss. Pulse
 width is the envelope-energy RMS width. Inspect the plotted picks and fit
 diagnostics before interpreting a measurement.
 
-Particle-motion plots use both displacement components at the first, middle, and
-last receivers. Spectrogram power is normalised separately at each receiver.
+Particle-motion plots use both displacement components at up to four evenly spaced
+receivers across the array. Spectrogram power uses a shared decibel reference across
+the displayed receivers.
 Reports require both components, at least 32 uniform time samples, and at least
 three increasing receiver coordinates. Gates require at least 16 samples and
 frequency bands must lie below stored-data Nyquist. Unavailable fits are JSON

@@ -626,6 +626,75 @@ def test_distributed_coupled_newmark_iterative_fallback(monkeypatch):
         np.testing.assert_allclose(
             solver.p.array_r, pressure * np.cos(np.sqrt(lam) * end), atol=2e-3, rtol=0
         )
+        assert "GMRES + FieldSplit" in solver.linear_solver_description
     finally:
         solver.destroy()
+        _destroy(ops)
+
+
+def test_array_rk4_init_cleans_up_on_precision_overflow():
+    ops = _operators(damping=0.2)
+    destroyed: list[bool] = []
+    orig_destroy = CoupledArrayRK4.destroy
+
+    def spy_destroy(self):
+        destroyed.append(True)
+        orig_destroy(self)
+
+    CoupledArrayRK4.destroy = spy_destroy  # type: ignore[method-assign]
+    try:
+        with pytest.raises(ValueError, match="precision"):
+            CoupledArrayRK4(ops, initial={"u": np.array([1e40])}, precision="single")
+        assert destroyed == [True]
+    finally:
+        CoupledArrayRK4.destroy = orig_destroy  # type: ignore[method-assign]
+        _destroy(ops)
+
+
+@pytest.mark.parametrize("active_field", ["solid", "fluid"])
+def test_array_rk4_single_field_matches_petsc_and_expm(active_field):
+    if active_field == "solid":
+        ops = AcousticOperators(
+            _matrix([[1.0]]),
+            _matrix([[4.0]]),
+            _matrix([[0.2]]),
+            _matrix(np.zeros((0, 0))),
+            _matrix(np.zeros((0, 0))),
+            None,
+            _matrix(np.zeros((1, 0))),
+        )
+        initial = {"u": np.array([1.0]), "v": np.array([0.0])}
+        A = np.array([[0.0, 1.0], [-4.0, -0.2]])
+    else:
+        ops = AcousticOperators(
+            _matrix(np.zeros((0, 0))),
+            _matrix(np.zeros((0, 0))),
+            None,
+            _matrix([[1.0]]),
+            _matrix([[9.0]]),
+            _matrix([[0.3]]),
+            _matrix(np.zeros((0, 1))),
+        )
+        initial = {"p": np.array([1.0]), "pdot": np.array([0.0])}
+        A = np.array([[0.0, 1.0], [-9.0, -0.3]])
+    ref = CoupledRK4(ops, initial=initial)
+    arr = CoupledArrayRK4(ops, initial=initial)
+    try:
+        dt = 0.01
+        for i in range(40):
+            ref.step(i * dt, dt)
+            arr.step(i * dt, dt)
+        assert arr.all_finite() and ref.all_finite()
+        y_exact = expm(A * 0.4) @ np.array([1.0, 0.0])
+        if active_field == "solid":
+            np.testing.assert_allclose(arr.u.array_r, ref.u.array_r, atol=1e-13)
+            np.testing.assert_allclose(arr.u.array_r, [y_exact[0]], atol=1e-7)
+        else:
+            np.testing.assert_allclose(arr.p.array_r, ref.p.array_r, atol=1e-13)
+            np.testing.assert_allclose(arr.p.array_r, [y_exact[0]], atol=1e-6)
+        arr._array_state[0 if active_field == "solid" else 2][:] = np.nan
+        assert not arr.all_finite()
+    finally:
+        arr.destroy()
+        ref.destroy()
         _destroy(ops)

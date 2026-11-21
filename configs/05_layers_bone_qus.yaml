@@ -12,7 +12,7 @@
 #   Flat 2D plane-strain surrogate with anisotropic Kelvin-Voigt cortical bone.
 #   Fluids use inviscid pressure acoustics with normal coupling and tangential slip.
 #   Skin measurements are particle velocity [m/s], replacing legacy displacement.
-#   The sizing band is 0.1-1 MHz and the skin-surface receiver aperture is 60 mm.
+#   The sizing band is 0.1-1 MHz and the skin-surface receiver aperture is 200 mm.
 #   Q2 spacing gives approximately eight elements per band-edge acoustic wavelength;
 #   shorter guided modes require a dispersion-based resolution check. Establish
 #   mesh, time-step, and arrival-window convergence using the same material tensors
@@ -41,12 +41,12 @@ solver:
   device: cpu                  # Float64 baseline for comparing small attenuation changes
   precision: double
   dt: null                     # Includes both elastic and viscous stability restrictions
-  duration: null               # Bulk-speed heuristic; slow interface modes may arrive later
+  duration: 160.0e-6           # Full guided-mode window across the 200 mm aperture
   time_factor: 1.2             # Travel-time multiplier for automatic duration
 
 geometry:
-  sensing_length: 0.08          # [m]
-  absorb_length: 0.03           # [m]
+  sensing_length: 0.22          # [m]
+  absorb_length: 0.02           # [m]
 
 structure:
   mode: "N_layers"
@@ -64,7 +64,7 @@ structure:
       rho: 1948.0               # [kg/m^3]
       # Plane-strain Voigt order [C11, C12, C16, C22, C26, C66]
       C: [31.7e9, 13.4e9, 0.0, 20.2e9, 0.0, 6.38e9]   # [Pa]
-      Cv: [157.0, 121.0, 0.0, 109.0, 0.0, 18.0]        # [Pa*s]
+      Cv: [15.7, 12.1, 0.0, 10.9, 0.0, 1.8]           # [Pa*s]
 
     - name: "Soft tissue"
       thickness: 1.0e-3         # [m]
@@ -90,12 +90,12 @@ excitation:
   source_amplitude: 1.0e6      # [Pa] Compression-positive pressure pulse
   source_type: "ricker"
   f_center: 500.0e3             # [Hz]
-  excitation_width: 2.0e-3      # [m]
+  excitation_width: 1.0e-3      # [m]
   source_x: null               # [m] Automatic source position inside the sensing region
 
 mesh:
-  nx: 757                      # Full 140 mm domain; dx = 0.185 mm
-  ny_per_region: [6, 22, 6]     # Bone marrow, cortical bone, soft tissue
+  nx: 800                      # Full 260 mm domain; dx = 0.325 mm
+  ny_per_region: [4, 12, 4]     # Bone marrow, cortical bone, soft tissue
   degree: 2
   max_frequency: 1.0e6          # [Hz]
   min_frequency: 0.1e6          # [Hz] Arrival-sizing edge, not a high-pass filter
@@ -104,9 +104,9 @@ mesh:
 sensors:
   observable: "particle_velocity"
   region: "Soft tissue"
-  n_sensors: 241
+  n_sensors: 401
   sensor_offset: 0.01           # [m]
-  sensor_pitch: 0.25e-3         # [m]
+  sensor_pitch: 0.5e-3          # [m]; 200 mm aperture
   sensor_y: null                # Skin surface, y = 6 mm
   sample_rate: "10 MHz"        # Requested storage rate: 10 samples per band-edge period
 

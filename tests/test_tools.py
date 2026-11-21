@@ -312,3 +312,24 @@ def test_structure_preview_creates_pressure_archive(tmp_path, monkeypatch, confi
     )
     with np.load(archive_path, allow_pickle=False) as data:
         assert "sensor_data_pressure" in data.files
+        assert int(data["schema_version"]) == 2
+        saved_cfg = yaml.safe_load(str(data["simulation_config_yaml"]))
+        assert "sensor_sample_rate" in saved_cfg and "sample_rate" not in saved_cfg
+        from wavesimfem.config import parse_and_resolve_config
+
+        resolved = parse_and_resolve_config(custom_cfg=saved_cfg, validate_simulation=False)
+        assert resolved["sensor_sample_rate"] > 0
+
+
+def test_benchmark_write_report_uses_atomic_json(tmp_path):
+    import json
+
+    bench_spec = importlib.util.spec_from_file_location(
+        "benchmark", REPO / "tools" / "benchmark.py"
+    )
+    benchmark = importlib.util.module_from_spec(bench_spec)
+    bench_spec.loader.exec_module(benchmark)
+
+    out = tmp_path / "benchmark.json"
+    benchmark.write_report(out, {"b": 2, "a": 1})
+    assert json.loads(out.read_text(encoding="utf-8")) == {"a": 1, "b": 2}

@@ -1,18 +1,18 @@
 # Aluminium plate immersed in water (bilateral fluid loading / immersion NDE)
 # Loading and sensing are at the upper plate-water interface, y = 1.5 mm.
-# Lateral sponges absorb guided waves; top and bottom sponges absorb radiation.
+# Lateral sponges absorb guided waves; top and bottom sponges backed by plane-wave
+# radiation boundaries absorb acoustic radiation into both water halfspaces.
 # Water uses scalar-pressure inviscid acoustics coupled to plate displacement
 # by normal traction and acceleration; tangential slip is allowed.
 #
 # Application
 #   Fluid-loading effects on plate dispersion in ultrasonic immersion inspection.
 # Model and numerical scope
-#   Linear 2D plane-strain plate between truncated water regions, with direct
-#   interface traction. The sizing band is 0.1-1 MHz. Q2 spacing gives approximately
-#   six elements per band-edge water wavelength and six rows through aluminium.
-#   Establish mesh and time-step convergence, then vary water depth and sponge
-#   thickness at fixed spacing. Low-frequency radiation and quantitative leakage
-#   require comparison with an independent fluid-loaded plate solution.
+#   Linear 2D plane-strain 1.5 mm plate between truncated water halfspaces, excited
+#   by a 1 MHz Ricker interface traction (analysed to 2 MHz). The 200 mm, 801-receiver
+#   array (0.25 mm pitch, spatial Nyquist 12.57 rad/mm) resolves leaky Lamb and
+#   subsonic quasi-Scholte branches without spatial aliasing. Each 10 mm water region
+#   provides 6 mm clear water plus a 4 mm quintic sponge backed by a radiation impedance.
 # Usage
 #   sh tools/run_cpu4.sh -c configs/06_plate_in_halfspaces_immersed_water.yaml
 #   Add --dry-run to inspect resource estimates. Run from the repository root.
@@ -33,12 +33,12 @@ solver:
   device: cpu
   precision: double
   dt: null                     # [s] Use the assembled RK4 stability bound
-  duration: null               # Estimated window; verify slower interface-wave arrivals
+  duration: 160.0e-6           # Full guided-mode window across the 200 mm aperture
   time_factor: 1.2             # Travel-time multiplier for automatic duration
 
 geometry:
-  sensing_length: 0.08          # [m]
-  absorb_length: 0.03           # [m]
+  sensing_length: 0.22          # [m]
+  absorb_length: 0.02           # [m]
 
 structure:
   mode: "plate_in_halfspaces"
@@ -52,7 +52,7 @@ structure:
 
   substrate:
     name: "Water (bottom halfspace)"
-    thickness: 6.0e-3           # [m] Truncation depth
+    thickness: 10.0e-3          # [m] Truncation depth (6.0 mm clear water + 4.0 mm sponge)
     absorb_depth: 4.0e-3        # [m] Sponge inside the truncation depth
     material_model: "fluid"
     fluid_formulation: "acoustic"
@@ -61,7 +61,7 @@ structure:
 
   superstrate:
     name: "Water (top halfspace)"
-    thickness: 6.0e-3           # [m] Truncation height
+    thickness: 10.0e-3          # [m] Truncation height (6.0 mm clear water + 4.0 mm sponge)
     absorb_depth: 4.0e-3        # [m]
     material_model: "fluid"
     fluid_formulation: "acoustic"
@@ -72,51 +72,57 @@ absorbing_boundaries:
   alpha: null                  # Frequency-scaled lateral and outer-water sponges
   beta: null
 
+acoustic_boundaries:
+  top: radiation               # Plane-wave impedance backing behind outer-water sponges
+  bottom: radiation
+  left: radiation
+  right: radiation
+
 excitation:
   source_kind: "traction"
   source_boundary: "interface"
   source_y: 1.5e-3             # [m] Upper plate-water interface
   source_region: "Aluminium plate"
   source_type: "ricker"
-  f_center: 500.0e3             # [Hz]
-  traction_max: 1.0e6           # [Pa]
-  excitation_width: 2.0e-3      # [m]
+  f_center: 1.0e6              # [Hz]
+  traction_max: 1.0e6          # [Pa]
+  excitation_width: 0.5e-3     # [m]
   source_x: null               # [m] Automatic source position inside the sensing region
-  source_fx: 0.0
+  source_fx: 1.0
   source_fy: 1.0
 
 mesh:
-  nx: 600                      # Full 140 mm domain; dx = 0.233 mm
-  ny_per_region: [25, 6, 25]    # Bottom water / Al / top water; dy = 0.24/0.25/0.24 mm
+  nx: 1200                     # Full 260 mm domain; dx = 0.217 mm
+  ny_per_region: [40, 4, 40]   # Bottom water (dy=0.25 mm) / Al (dy=0.375 mm) / top water
   degree: 2
-  max_frequency: 1.0e6          # [Hz]
-  min_frequency: 0.1e6          # [Hz] Arrival-sizing lower edge, not a filter
-  min_wavelength: null          # Replace with a validated guided/interface-mode bound
+  max_frequency: 2.0e6         # [Hz]
+  min_frequency: 0.1e6         # [Hz] Arrival-sizing lower edge, not a filter
+  min_wavelength: null         # Replace with a validated guided/interface-mode bound
 
 sensors:
   observable: "displacement"
-  region: "Aluminium plate"   # Select the solid side of the interface
-  n_sensors: 241
-  sensor_offset: 0.01           # [m]
-  sensor_pitch: 0.25e-3         # [m]
-  sensor_y: null                # Upper plate-water interface, y = 1.5 mm
-  sample_rate: "10 MHz"        # 10 samples per band-edge period
+  region: "Aluminium plate"    # Select the solid side of the interface
+  n_sensors: 801
+  sensor_offset: 0.01          # [m]
+  sensor_pitch: 0.25e-3        # [m]; 200 mm aperture (spatial Nyquist 12.57 rad/mm)
+  sensor_y: null               # Upper plate-water interface, y = 1.5 mm
+  sample_rate: "20 MHz"        # 10 samples per 2 MHz band-edge period
 
 # Display limits do not filter the excitation or recorded histories.
 postprocess:
-  structure_analysis: true    # Structure-specific dispersion, wave references and transport panels
+  structure_analysis: true     # Structure-specific dispersion, wave references and transport panels
   run_postprocess: true
   # Receiver reports: apparent attenuation includes radiation leakage into water.
   wave_characterisation:
     enabled: true
     component: y
-    frequency_band: ["0.3 MHz", "0.8 MHz"]
+    frequency_band: ["0.5 MHz", "1.5 MHz"]
     time_window: null          # Full record; specify [start, end] in seconds to isolate a mode
     min_relative_amplitude: 0.01 # Exclude peaks below 1% of the array maximum
   f_min: 0.0
-  f_max: "1 MHz"
+  f_max: "2 MHz"
   k_min: 0.0
-  k_max: "4 rad/mm"
+  k_max: "8.5 rad/mm"
 
 # Receiver histories and figures; full-field output is optional.
 output:

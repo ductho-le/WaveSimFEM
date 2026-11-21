@@ -124,7 +124,7 @@ def test_report_contains_sampling_and_reconstruction_evidence(tmp_path, monkeypa
     readme = (tmp_path / "lamb_modes" / "README.md").read_text()
     assert "Synthetic analytical travelling wave; not a FEM solve" in readme
     assert "190 mm" in readme
-    assert "10 pt LaTeX" in readme
+    assert "10 pt built-in serif/mathtext" in readme
     assert "not mechanical energy" in readme
     assert "99th absolute percentile" in readme
     assert "edge ringing" in readme
@@ -217,3 +217,46 @@ def test_report_accepts_sectioned_config_and_unit_strings(tmp_path, monkeypatch,
     report = write_lamb_report(sectioned_archive, output_dir=tmp_path / "sec_out", formats=())
     assert report["band_hz"] == ([1.2e5, 2.8e5] if flat_override else [1e5, 3e5])
     assert report["usable_frequency_bins"] > 0
+
+
+def test_s0_wavenumber_caches_and_readme_records_usetex(tmp_path, monkeypatch):
+    from wavesimfem.lamb import _cached_s0_wavenumber
+
+    _cached_s0_wavenumber.cache_clear()
+    first = s0_wavenumber(2e5, 0.003, 6200.0, 3120.0)
+    second = s0_wavenumber(2e5, 0.003, 6200.0, 3120.0)
+    assert first == second
+    assert _cached_s0_wavenumber.cache_info().hits >= 1
+
+    monkeypatch.setattr("wavesimfem.analysis.latex_available", lambda: True)
+    monkeypatch.setattr("wavesimfem.analysis._save", lambda *args: [])
+    archive, _, _ = _report_archive(tmp_path)
+    write_lamb_report(archive, output_dir=tmp_path / "tex_out", formats=(), usetex=True)
+    readme = (tmp_path / "tex_out" / "lamb_modes" / "README.md").read_text()
+    assert "10 pt external LaTeX" in readme
+
+
+def test_lamb_report_handles_low_max_frequency_and_omitted_archive_metadata(tmp_path, monkeypatch):
+    monkeypatch.setattr("wavesimfem.analysis._save", lambda *args: [])
+    archive, _, _ = _report_archive(tmp_path)
+    with np.load(archive) as orig:
+        payload = {k: orig[k] for k in orig.files if k not in ("c_L", "c_T", "source_x")}
+    cfg = {
+        "structure": {
+            "mode": "1_layer",
+            "single_layer": {"thickness": 0.003, "rho": 2700, "E": 70e9, "nu": 0.33},
+        },
+        "excitation": {"f_center": "500 kHz"},
+        # Intentionally below f_center / 5 = 100 kHz with min_frequency unset.
+        "mesh": {"max_frequency": "80 kHz"},
+    }
+    payload["simulation_config_yaml"] = yaml.safe_dump(cfg)
+    low_band_archive = tmp_path / "low_band.npz"
+    np.savez(low_band_archive, **payload)
+
+    report = write_lamb_report(low_band_archive, output_dir=tmp_path / "low_out", formats=())
+    assert report["band_hz"] == [4e4, 8e4]
+    assert report["frequency_bins"] > 0
+    with np.load(tmp_path / "low_out" / "lamb_modes" / "modal_signals.npz") as signals:
+        assert np.isfinite(signals["curves"]).all()
+        assert (signals["curves"][:, 1:3] > 0).all()

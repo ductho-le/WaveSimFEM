@@ -376,3 +376,25 @@ def test_legacy_fluid_detection_is_relative(tmp_path, monkeypatch, c_l, c_t, flu
     joined = " ".join(texts)
     assert ("fluid" in joined) is fluid
     assert ("c_T" in joined) is not fluid
+
+
+def test_plot_full_analysis_missing_keys_and_readme_metadata(tmp_path, monkeypatch):
+    bad = tmp_path / "incomplete.npz"
+    np.savez(bad, times=np.arange(32) * 1e-7)
+    with pytest.raises(ValueError, match="missing required key"):
+        analysis.plot_full_analysis(str(bad), str(tmp_path))
+
+    good = _archive(tmp_path / "good.npz")
+    analysis.plot_full_analysis(
+        good, str(tmp_path / "low_dpi"), usetex=False, formats=["png"], dpi=72
+    )
+    readme_no_tex = (tmp_path / "low_dpi" / "full_analysis_README.md").read_text()
+    assert "10 pt built-in serif/mathtext" in readme_no_tex
+    assert "72 dpi" in readme_no_tex
+
+    monkeypatch.setattr(analysis, "latex_available", lambda: True)
+    monkeypatch.setattr("matplotlib.figure.Figure.savefig", lambda *a, **k: None)
+    analysis.plot_full_analysis(good, str(tmp_path / "tex"), usetex=True, formats=["png"], dpi=600)
+    readme_tex = (tmp_path / "tex" / "full_analysis_README.md").read_text()
+    assert "10 pt external LaTeX" in readme_tex
+    assert "600 dpi" in readme_tex

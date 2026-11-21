@@ -61,64 +61,18 @@ def build_sensor_interpolation_matrix(
     """
     import dolfinx
 
-    points = np.asarray(points, dtype=float).reshape(-1, 3)
+    from wavesimfem.numerics import point_evaluation_matrix
+
+    points = np.asarray(points, dtype=V.mesh.geometry.x.dtype).reshape(-1, 3)
     cells = np.asarray(active_cells, dtype=np.int32)
     n_pts = len(points)
     if n_pts == 0:
         return sp.csr_matrix((0, n_owned_dofs), dtype=np.float64)
-    if np.any(cells < 0):
-        raise ValueError("All sensor points must have a valid local cell")
-
-    bs = V.dofmap.index_map_bs
-    unique_cells = np.unique(cells)
-    cell_nodes = {int(c): np.asarray(V.dofmap.cell_dofs(int(c))) for c in unique_cells}
-
-    # Greedy colouring: cells within a colour share no DOF nodes.
-    colour_nodes: list[set[int]] = []
-    colour_of: dict[int, int] = {}
-    for c in unique_cells:
-        nodes = set(cell_nodes[int(c)].tolist())
-        for k, used in enumerate(colour_nodes):
-            if used.isdisjoint(nodes):
-                used.update(nodes)
-                colour_of[int(c)] = k
-                break
-        else:
-            colour_nodes.append(nodes)
-            colour_of[int(c)] = len(colour_nodes) - 1
-
-    probe = dolfinx.fem.Function(V)
-    n_cell_nodes = len(next(iter(cell_nodes.values())))
-    rows: list[np.ndarray] = []
-    cols: list[np.ndarray] = []
-    data: list[np.ndarray] = []
-    point_colour = np.array([colour_of[int(c)] for c in cells])
-
-    for k in range(len(colour_nodes)):
-        sel = np.flatnonzero(point_colour == k)
-        sel_cells = cells[sel]
-        node_table = np.stack([cell_nodes[int(c)] for c in sel_cells])  # (m, n_cell_nodes)
-        group_cells = np.unique(sel_cells)
-        group_nodes = np.stack([cell_nodes[int(c)] for c in group_cells])
-        for j in range(n_cell_nodes):
-            for comp in range(bs):
-                probe.x.array[:] = 0.0
-                probe.x.array[group_nodes[:, j] * bs + comp] = 1.0
-                values = probe.eval(points[sel], sel_cells).reshape(len(sel), -1)
-                dofs = node_table[:, j] * bs + comp
-                owned = dofs < n_owned_dofs
-                for out_comp in range(2):
-                    w = values[:, out_comp]
-                    keep = owned & (np.abs(w) > 1e-14)
-                    rows.append(2 * sel[keep] + out_comp)
-                    cols.append(dofs[keep])
-                    data.append(w[keep])
-
-    return sp.csr_matrix(
-        (np.concatenate(data), (np.concatenate(rows), np.concatenate(cols))),
-        shape=(2 * n_pts, n_owned_dofs),
-        dtype=np.float64,
-    )
+    matrix = point_evaluation_matrix(dolfinx.fem.Function(V), points, cells)[:, :n_owned_dofs]
+    matrix = matrix.tocsr().astype(np.float64, copy=False)
+    matrix.data[np.abs(matrix.data) <= 1e-14] = 0.0
+    matrix.eliminate_zeros()
+    return matrix
 
 
 # ---------------------------------------------------------------------------
@@ -160,18 +114,25 @@ class _NumpyLikeBackend:
 
     def axpy(self, out: Any, x: Any, a: float, y: Any) -> None:
         """``out = x + a*y`` (``out`` must not alias ``x`` or ``y``)."""
-        self.xp.multiply(y, a, out=out)
+        self.xp.multiply(y, self.dtype.type(a), out=out)
         self.xp.add(out, x, out=out)
 
     def add_scaled(self, acc: Any, a: float, y: Any, scratch: Any) -> None:
         """``acc += a*y`` using ``scratch`` (same shape) as workspace."""
-        self.xp.multiply(y, a, out=scratch)
+        self.xp.multiply(y, self.dtype.type(a), out=scratch)
         self.xp.add(acc, scratch, out=acc)
+
+    def add_inplace(self, acc: Any, y: Any) -> None:
+        """``acc += y`` in place without workspace."""
+        self.xp.add(acc, y, out=acc)
 
     def force_balance(self, out: Any, f: float, load: Any, r: Any, inv_mass: Any) -> None:
         """``out = (f*load - r) * inv_mass``."""
-        self.xp.multiply(load, f, out=out)
-        self.xp.subtract(out, r, out=out)
+        if f == 0.0:
+            self.xp.negative(r, out=out)
+        else:
+            self.xp.multiply(load, self.dtype.type(f), out=out)
+            self.xp.subtract(out, r, out=out)
         self.xp.multiply(out, inv_mass, out=out)
 
     def all_finite(self, array: Any) -> bool:
@@ -189,6 +150,31 @@ class _CupyBackend(_NumpyLikeBackend):
         self.xp = cp
         self._cpsp = cpsp
         self.device_id = device_id
+        c_type = "float" if self.dtype == np.dtype(np.float32) else "double"
+        self._axpy_kernel = cp.ElementwiseKernel(
+            f"{c_type} x, {c_type} a, {c_type} y",
+            f"{c_type} out",
+            "out = x + a * y",
+            f"wavesim_axpy_{c_type}",
+        )
+        self._add_scaled_kernel = cp.ElementwiseKernel(
+            f"{c_type} a, {c_type} y",
+            f"{c_type} acc",
+            "acc += a * y",
+            f"wavesim_add_scaled_{c_type}",
+        )
+        self._force_balance_kernel = cp.ElementwiseKernel(
+            f"{c_type} f, {c_type} load, {c_type} r, {c_type} inv_mass",
+            f"{c_type} out",
+            "out = (f * load - r) * inv_mass",
+            f"wavesim_force_balance_{c_type}",
+        )
+        self._force_balance_zero_kernel = cp.ElementwiseKernel(
+            f"{c_type} r, {c_type} inv_mass",
+            f"{c_type} out",
+            "out = -r * inv_mass",
+            f"wavesim_force_balance_zero_{c_type}",
+        )
 
     def context(self) -> contextlib.AbstractContextManager[Any]:
         return self.xp.cuda.Device(self.device_id)
@@ -201,6 +187,18 @@ class _CupyBackend(_NumpyLikeBackend):
 
     def to_host(self, array: Any) -> np.ndarray:
         return self.xp.asnumpy(array)
+
+    def axpy(self, out: Any, x: Any, a: float, y: Any) -> None:
+        self._axpy_kernel(x, self.dtype.type(a), y, out)
+
+    def add_scaled(self, acc: Any, a: float, y: Any, scratch: Any) -> None:
+        self._add_scaled_kernel(self.dtype.type(a), y, acc)
+
+    def force_balance(self, out: Any, f: float, load: Any, r: Any, inv_mass: Any) -> None:
+        if f == 0.0:
+            self._force_balance_zero_kernel(r, inv_mass, out)
+        else:
+            self._force_balance_kernel(self.dtype.type(f), load, r, inv_mass, out)
 
 
 def resolve_precision(precision: str) -> np.dtype:
@@ -367,6 +365,16 @@ def integrate_explicit_rk4(
         S_dev = backend.csr(S) if n_rows else None
         inv_m = backend.from_host(inv_mass)
         load = backend.from_host(load_shape)
+        if not (
+            backend.all_finite(A.data)
+            and backend.all_finite(inv_m)
+            and backend.all_finite(load)
+            and (S_dev is None or backend.all_finite(S_dev.data))
+            and bool((inv_m > 0).all())
+        ):
+            raise ValueError(
+                "Operators or inverse mass overflow/underflow the requested floating-point precision"
+            )
 
         z = backend.zeros(2 * n)  # state [u; v]
         zt = backend.zeros(2 * n)  # stage state
@@ -432,8 +440,8 @@ def integrate_explicit_rk4(
             backend.axpy(ut, u, dt, vt)
             backend.axpy(vt, v, dt, a)
             acceleration(zt, t + dt)
-            backend.add_scaled(du, 1.0, vt, scratch[:n])
-            backend.add_scaled(dv, 1.0, a, a_scr)
+            backend.add_inplace(du, vt)
+            backend.add_inplace(dv, a)
             # z += dt/6 * acc
             backend.add_scaled(z, dt / 6.0, acc, scratch)
 

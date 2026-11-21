@@ -262,3 +262,130 @@ def test_package_namespace_exports():
         "dispersion_spectrum",
     ):
         assert hasattr(ws, name) and callable(getattr(ws, name))
+
+
+@pytest.mark.parametrize(
+    "indptr,values,expected",
+    [
+        ([0], [], []),
+        ([0, 0, 0], [], [0.0, 0.0]),
+        ([0, 0, 2, 2, 3, 3], [-1.0, 2.5, -4.0], [0.0, 3.5, 0.0, 4.0, 0.0]),
+    ],
+)
+def test_csr_row_abs_sums_edge_cases(indptr, values, expected):
+    from wavesimfem.numerics import csr_row_abs_sums
+
+    np.testing.assert_allclose(
+        csr_row_abs_sums(np.asarray(indptr), np.asarray(values, dtype=float)),
+        np.asarray(expected, dtype=float),
+    )
+
+
+def test_drop_zero_entries_handles_empty_rows():
+    from petsc4py import PETSc
+
+    from wavesimfem.solvers import _drop_zero_entries
+
+    indptr = np.array([0, 0, 2, 2, 4, 4], dtype=PETSc.IntType)
+    indices = np.array([0, 1, 1, 2], dtype=PETSc.IntType)
+    values = np.array([0.0, -2.0, 0.0, 0.0], dtype=PETSc.ScalarType)
+    mat = PETSc.Mat().createAIJ(size=(5, 3), csr=(indptr, indices, values), comm=PETSc.COMM_SELF)
+    mat.assemble()
+    filtered = _drop_zero_entries(mat)
+    try:
+        out_indptr, out_indices, out_values = filtered.getValuesCSR()
+        assert list(out_indptr) == [0, 0, 1, 1, 1, 1]
+        assert list(out_indices) == [1]
+        np.testing.assert_allclose(out_values, [-2.0])
+        np.testing.assert_allclose(
+            filtered.convert("dense", out=PETSc.Mat()).getDenseArray(),
+            mat.convert("dense", out=PETSc.Mat()).getDenseArray(),
+        )
+    finally:
+        filtered.destroy()
+        mat.destroy()
+
+
+def test_petsc_ksp_is_scale_invariant_for_tiny_rhs():
+    from petsc4py import PETSc
+
+    from wavesimfem.solvers import ITERATIVE_DOF_THRESHOLD, _configure_ksp, _fallback_bjacobi
+
+    n = 6
+    mat = PETSc.Mat().createAIJ(size=(n, n), comm=PETSc.COMM_SELF)
+    for i in range(n):
+        mat.setValue(i, i, 4.0)
+        if i > 0:
+            mat.setValue(i, i - 1, -1.0)
+        if i + 1 < n:
+            mat.setValue(i, i + 1, -1.0)
+    mat.assemble()
+    rhs = mat.createVecLeft()
+    sol = mat.createVecRight()
+    ksp = PETSc.KSP().create(PETSc.COMM_SELF)
+    try:
+        ksp.setOperators(mat)
+        _configure_ksp(ksp, ITERATIVE_DOF_THRESHOLD)
+        assert ksp.getTolerances()[1] == 0.0
+        _fallback_bjacobi(ksp, ITERATIVE_DOF_THRESHOLD)
+        # Tiny RHS below 1e-14 must still solve accurately (atol=0.0).
+        rhs.set(1e-18)
+        sol.set(0.0)
+        ksp.solve(rhs, sol)
+        assert ksp.getConvergedReason() > 0
+        expected = np.linalg.solve(
+            mat.convert("dense", out=PETSc.Mat()).getDenseArray(), np.full(n, 1e-18)
+        )
+        np.testing.assert_allclose(sol.array_r, expected, rtol=1e-8, atol=0.0)
+        # Zero RHS converges cleanly to zero.
+        rhs.set(0.0)
+        sol.set(1.0)
+        ksp.solve(rhs, sol)
+        assert ksp.getConvergedReason() > 0
+        np.testing.assert_array_equal(sol.array_r, np.zeros(n))
+        assert ksp.getTolerances()[1] == 0.0
+    finally:
+        ksp.destroy()
+        rhs.destroy()
+        sol.destroy()
+        mat.destroy()
+
+
+def test_history_store_close_cleans_scratch_even_if_mmap_close_fails(tmp_path):
+    import types
+    from pathlib import Path
+
+    from wavesimfem.storage import HistoryStore
+
+    store = HistoryStore("disk", tmp_path)
+    arr = store.zeros((4, 3))
+    assert arr.shape == (4, 3)
+    scratch_path = Path(store._scratch.name)
+    assert scratch_path.exists()
+
+    class BrokenMmap:
+        def close(self) -> None:
+            raise OSError("close failed")
+
+    store._maps.append(types.SimpleNamespace(_mmap=BrokenMmap()))
+    with pytest.raises(OSError, match="close failed"):
+        store.close()
+    assert not scratch_path.exists()
+    assert store._scratch is None
+
+
+def test_describe_thread_state_does_not_report_single_rank_on_multi_rank(monkeypatch):
+    from wavesimfem import parallel
+
+    monkeypatch.setattr(
+        parallel,
+        "_policy",
+        parallel.ThreadPolicy(
+            ranks_per_node=1,
+            threads_per_rank=None,
+            applied=False,
+            reason="single rank",
+        ),
+    )
+    assert "single rank" not in parallel.describe_thread_state(4)
+    assert "single rank" in parallel.describe_thread_state(1)

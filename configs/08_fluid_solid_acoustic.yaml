@@ -1,22 +1,24 @@
 # Aluminium plate loaded on one side by a water half-space, with independent
 # pressure and displacement DOFs (leaky Lamb / quasi-Scholte waves).
 # Run: python -m wavesimfem -c configs/08_fluid_solid_acoustic.yaml
-# A normal traction on the plate side of the plate-water interface (y = 0)
-# excites the plate; receivers measure fluid pressure 0.25 mm below it.
-# The 40 mm, 81-receiver line array spans several A0 and water wavelengths, so
-# the f-k analysis resolves the fluid-loaded plate modes. The water depth ends
-# in a sponge, so obliquely leaking radiation is absorbed rather than reflected
-# by a plane-wave impedance face. The plate's upper surface is traction-free.
+# A 45-degree traction on the plate side of the plate-water interface (y = 0)
+# excites the plate; receivers measure fluid pressure 0.10 mm below it.
+# The 200 mm, 801-receiver line array (0.25 mm pitch, spatial Nyquist 12.57 rad/mm)
+# spans several S0, A1, quasi-Scholte and water wavelengths across the 1 MHz Ricker
+# bandwidth (analysed to 2 MHz). A 16 mm truncated water depth (10.5 mm clear water
+# plus a 5.5 mm quintic sponge backed by a plane-wave radiation boundary) isolates
+# the quasi-Scholte evanescent tail and suppresses grazing bottom reflections.
+# The plate's upper surface is traction-free.
 # Change solver.type to implicit to use the coupled Newmark method.
 solver:
   type: explicit
   device: cpu
   precision: double
-  CFL: 0.7
-  duration: 50.0e-6
+  CFL: 0.8
+  duration: 160.0e-6
 geometry:
-  sensing_length: 0.060
-  absorb_length: 0.010
+  sensing_length: 0.22
+  absorb_length: 0.02
 structure:
   mode: plate_on_halfspace
   layers:
@@ -28,8 +30,8 @@ structure:
       nu: 0.33
   substrate:
     name: Water
-    thickness: 8.0e-3          # [m] Truncation depth
-    absorb_depth: 5.0e-3       # [m] Sponge inside the truncation depth
+    thickness: 16.0e-3         # [m] Truncation depth (10.5 mm clear water + 5.5 mm sponge)
+    absorb_depth: 5.5e-3       # [m] Sponge inside the truncation depth
     material_model: fluid
     fluid_formulation: acoustic
     rho: 1000.0
@@ -38,7 +40,7 @@ absorbing_boundaries:
   alpha: null                  # Frequency-scaled lateral and half-space sponges
   beta: null
 acoustic_boundaries:
-  bottom: rigid                # Behind the half-space sponge
+  bottom: radiation            # Plane-wave impedance backing behind the half-space sponge
   left: radiation
   right: radiation
 excitation:
@@ -47,28 +49,32 @@ excitation:
   source_region: Aluminium
   source_y: 0.0
   traction_max: 1.0e6          # Pa
-  source_fx: 0.0
+  source_fx: 1.0
   source_fy: 1.0
   source_type: ricker
-  f_center: 200.0e3
-  source_x: 14.0e-3
-  excitation_width: 1.0e-3
+  f_center: 1.0e6
+  source_x: null
+  excitation_width: 0.5e-3
 mesh:
-  nx: 320                      # dx = 0.25 mm
-  ny_per_region: [32, 4]       # Water / aluminium; dy = 0.25 mm
+  nx: 1625                     # dx = 0.16 mm
+  ny_per_region: [96, 4]       # Water (dy = 0.167 mm) / aluminium (dy = 0.25 mm)
   degree: 2
-  max_frequency: 500.0e3
+  max_frequency: 2.0e6
 sensors:
   observable: pressure
   region: Water
-  sensor_y: -0.25e-3
-  n_sensors: 81
-  sensor_offset: 4.0e-3
-  sensor_pitch: 0.5e-3
-  sample_rate: 5 MHz
+  sensor_y: -0.10e-3
+  n_sensors: 801
+  sensor_offset: 0.01
+  sensor_pitch: 0.25e-3
+  sample_rate: 20 MHz
 postprocess:
   run_postprocess: true
   structure_analysis: true
+  f_min: 0.0
+  f_max: "2 MHz"
+  k_min: 0.0
+  k_max: "8.5 rad/mm"
 output:
   output_dir: results_08_fluid_solid_acoustic
   history_storage: memory

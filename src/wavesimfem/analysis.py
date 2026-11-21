@@ -112,9 +112,14 @@ _AMPLITUDE_LABELS = {
 }
 
 
-def _figure(height_mm: float, **kwargs) -> Figure:
+def _figure(height_mm: float, **kwargs: Any) -> Figure:
     """Build a publication canvas at its final physical size, before layout."""
     return Figure(figsize=(FIGURE_WIDTH_IN, height_mm / 25.4), **kwargs)
+
+
+def _typography_note(usetex: bool) -> str:
+    """Accurate prose description matching the resolved Matplotlib text mode."""
+    return "10 pt external LaTeX" if usetex else "10 pt built-in serif/mathtext"
 
 
 def _line_axes(ax: Axes) -> None:
@@ -316,7 +321,8 @@ def plot_quick_overview(
     uu = observable_unit(np.max(np.abs(filtered)), observable)
     amplitude_label = _AMPLITUDE_LABELS[observable]
     td, xd, ud = tu(times), xu(offsets), uu(filtered)
-    with _PLOT_LOCK, matplotlib.rc_context(_rc(resolve_usetex(usetex))):
+    tex = resolve_usetex(usetex)
+    with _PLOT_LOCK, matplotlib.rc_context(_rc(tex)):
         fig = _figure(135, layout="constrained")
         fig.get_layout_engine().set(w_pad=0.035, h_pad=0.035, wspace=0.035, hspace=0.035)
         gs = fig.add_gridspec(2, 2, height_ratios=[0.85, 1.4])
@@ -386,7 +392,7 @@ def plot_quick_overview(
                 f"the robust display limits of +/-{limit:.6g} {uu.label}; "
                 "recorded amplitudes are unchanged. "
                 "Empty fields indicate no recorded dynamic signal.\n\n"
-                "Export: 190 mm width, 10-point LaTeX text, 300 dpi raster.\n"
+                f"Export: 190 mm width, {_typography_note(tex)} text, 300 dpi raster.\n"
             )
     log(f"  Quick visualisation saved: {paths[0]}")
     return paths[0]
@@ -472,8 +478,6 @@ def plot_full_analysis(
     with np.load(sensor_data_filepath, allow_pickle=False) as archive:
         data = {key: archive[key] for key in archive.files}
 
-    times = np.asarray(data["times"], dtype=float)
-    sensor_x = np.asarray(data["sensor_x"], dtype=float)
     observable = str(data.get("sensor_observable", "displacement"))
     keys = {
         "displacement": ("sensor_data_x", "sensor_data_y"),
@@ -484,6 +488,12 @@ def plot_full_analysis(
     if observable not in keys:
         raise ValueError(f"Unsupported sensor observable {observable!r}")
     key_x, key_y = keys[observable]
+    required = ("times", "sensor_x", key_y, "f_center", "c_L")
+    missing = set(required) - set(data)
+    if missing:
+        raise ValueError(f"Archive is missing required key(s): {sorted(missing)}")
+    times = np.asarray(data["times"], dtype=float)
+    sensor_x = np.asarray(data["sensor_x"], dtype=float)
     sensor_data_y = np.asarray(data[key_y], dtype=float)
     sensor_data_x = np.asarray(data[key_x], dtype=float) if key_x in data else None
     f_center = float(data["f_center"])
@@ -581,7 +591,7 @@ def plot_full_analysis(
     direction = "-x" if leftward else "+x"
     fft_positions = -sensor_x[::-1] if leftward else sensor_x
 
-    def spectrum(values):
+    def spectrum(values: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         return dispersion_spectrum(values[:, ::-1] if leftward else values, times, fft_positions)
 
     freqs, wavenumbers, power_u2 = spectrum(dy)
@@ -742,7 +752,7 @@ def plot_full_analysis(
         k_lo, k_hi = k_u(limits["k_min"]), k_u(limits["k_max"])
         f_lo, f_hi = f_u(limits["f_min"]), f_u(limits["f_max"])
 
-        def _dispersion_axes(ax: Axes, image: np.ndarray | None, title: str):
+        def _dispersion_axes(ax: Axes, image: np.ndarray | None, title: str) -> Any:
             im = None
             if image is not None:
                 im = ax.imshow(
@@ -830,6 +840,6 @@ def plot_full_analysis(
                 "recorded amplitudes are unchanged. "
                 "Absent components are blank; zero signals remain at the spectral floor.\n\n"
                 f"Archive provenance: {data.get('provenance', 'Recorded simulation archive')}.\n\n"
-                "Export: 190 mm width and 10-point LaTeX text.\n"
+                f"Export: 190 mm width, {_typography_note(tex)} text, {dpi} dpi raster.\n"
             )
     return paths[0]

@@ -15,12 +15,16 @@ https://docs.scipy.org/doc/scipy/reference/generated/scipy.signal.csd.html
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 from scipy.signal import csd, find_peaks, welch
 
 
-def _validate_records(times, *records):
+def _validate_records(
+    times: np.ndarray, *records: np.ndarray
+) -> tuple[np.ndarray, list[np.ndarray], float]:
     times = np.asarray(times, dtype=float)
     arrays = [np.asarray(record, dtype=float) for record in records]
     if times.ndim != 1 or len(times) < 32:
@@ -46,7 +50,7 @@ def _validate_records(times, *records):
     return times, arrays, float(spacing[0])
 
 
-def _band_indices(frequencies, band):
+def _band_indices(frequencies: np.ndarray, band: Sequence[float] | np.ndarray | None) -> np.ndarray:
     selected = frequencies > 0
     if band is not None:
         bounds = np.asarray(band, dtype=float)
@@ -64,7 +68,7 @@ def _band_indices(frequencies, band):
     return indices
 
 
-def _spectral_support(power):
+def _spectral_support(power: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Return an explicitly uncalibrated spectral-contrast proxy and support.
 
     No quiet/noise-only record is available, so this is deliberately not called
@@ -82,15 +86,15 @@ def _spectral_support(power):
 
 
 def phase_velocity_spectrum(
-    times,
-    positions,
-    values,
-    phase_velocities,
+    times: np.ndarray,
+    positions: np.ndarray,
+    values: np.ndarray,
+    phase_velocities: Sequence[float] | np.ndarray,
     *,
-    frequency_band=None,
-    direction=1,
-    max_frequencies=320,
-):
+    frequency_band: Sequence[float] | np.ndarray | None = None,
+    direction: int = 1,
+    max_frequencies: int = 320,
+) -> dict[str, Any]:
     """Return a measured frequency--velocity image and qualified peak samples.
 
     Input histories have shape ``(time, receiver)``. Coordinates are in seconds
@@ -296,7 +300,13 @@ def phase_velocity_spectrum(
     }
 
 
-def polarization_spectrum(times, ux, uy, *, frequency_band=None):
+def polarization_spectrum(
+    times: np.ndarray,
+    ux: np.ndarray,
+    uy: np.ndarray,
+    *,
+    frequency_band: Sequence[float] | np.ndarray | None = None,
+) -> dict[str, Any]:
     """Measure surface V/H displacement ratio and phase of vertical vs horizontal.
 
     Welch spectra (Hann, 50% overlap, >=3 segments) are averaged across receivers

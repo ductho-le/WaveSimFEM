@@ -26,6 +26,7 @@ from wavesimfem.materials import (
     DEFAULT_STEPS_PER_PERIOD,
     canonicalize_mode,
     mesh_resolution,
+    mesh_vertical_tolerance,
     resolve_sensor_region,
     sizing_wavelength,
     structure_from_config,
@@ -579,7 +580,7 @@ def _validate_acoustic_options(cfg: dict[str, Any], summary: dict[str, Any]) -> 
         raise ValueError("source_boundary: interface requires excitation.source_y")
     names = {r["name"]: r for r in summary["all_regions"]}
     if len(names) != len(summary["all_regions"]) and (
-        cfg.get("source_region") or cfg.get("sensor_region")
+        cfg.get("source_region") is not None or cfg.get("sensor_region") is not None
     ):
         raise ValueError(
             "Material region names must be unique when selecting a source or sensor region"
@@ -629,6 +630,87 @@ def _validate_acoustic_options(cfg: dict[str, Any], summary: dict[str, Any]) -> 
     if any(value not in ("rigid", "pressure_release", "radiation") for value in resolved.values()):
         raise ValueError("Acoustic boundary types must be rigid, pressure_release or radiation")
     cfg["acoustic_boundaries"] = resolved
+
+    # Validate source location, material compatibility, and boundary-condition
+    # conflicts here so --dry-run catches invalid setups before mesh assembly.
+    regions = summary["all_regions"]
+    tol = mesh_vertical_tolerance(cfg, summary)
+    source_face = (
+        "interface"
+        if boundary == "auto" and kind == "traction" and summary["has_top_halfspace"]
+        else ("top" if boundary == "auto" else boundary)
+    )
+    if kind != "acoustic_volume":
+        source_y = cfg.get("source_y")
+        if source_face == "interface":
+            source_y = summary["H_plate"] if source_y is None else source_y
+            if not any(np.isclose(source_y, r["y_top"], atol=tol, rtol=0) for r in regions[:-1]):
+                raise ValueError("source_y must identify an internal material interface")
+            if kind != "traction":
+                raise ValueError(
+                    "Internal coupled interfaces accept solid traction sources; "
+                    "acoustic boundary drives must be exterior"
+                )
+        else:
+            face_y = {"bottom": summary["y_min"], "top": summary["y_max"]}.get(source_face)
+            if source_y is not None and (
+                face_y is None or not np.isclose(source_y, face_y, atol=tol, rtol=0)
+            ):
+                raise ValueError(
+                    f"source_y={source_y:g} m does not apply to source_boundary {source_face!r}; "
+                    "use source_boundary: interface for an internal load or remove source_y"
+                )
+            source_y = face_y if face_y is not None else 0.5 * (summary["y_min"] + summary["y_max"])
+        source_region = cfg.get("source_region")
+        target = [r for r in regions if source_region is None or r["name"] == source_region]
+
+        def touching(fluid: bool) -> list[dict[str, Any]]:
+            return [
+                r
+                for r in target
+                if bool(r.get("is_acoustic")) == fluid
+                and (
+                    source_face in ("left", "right")
+                    or r["y_bot"] - tol <= source_y <= r["y_top"] + tol
+                )
+            ]
+
+        if kind == "traction":
+            if not touching(fluid=False):
+                raise ValueError(
+                    "A traction source must act on a solid or explicitly regularized_elastic "
+                    "region; choose an acoustic source_kind for fluid"
+                )
+        elif kind in ("acoustic_pressure", "acoustic_normal_acceleration"):
+            eligible = touching(fluid=True)
+            if not eligible:
+                raise ValueError("Acoustic boundary source does not touch an acoustic fluid")
+            if resolved[source_face] != "rigid":
+                raise ValueError(
+                    "A driven pressure face must not also specify pressure_release or radiation"
+                    if kind == "acoustic_pressure"
+                    else "A prescribed normal-acceleration face cannot also specify pressure release or radiation"
+                )
+            if kind == "acoustic_pressure":
+                if source_face in ("top", "bottom"):
+                    intersects = (
+                        resolved["left"] == "pressure_release"
+                        or resolved["right"] == "pressure_release"
+                    )
+                else:
+                    intersects = any(
+                        resolved[adj] == "pressure_release"
+                        and any(r["y_bot"] - tol <= adj_y <= r["y_top"] + tol for r in eligible)
+                        for adj, adj_y in (
+                            ("bottom", summary["y_min"]),
+                            ("top", summary["y_max"]),
+                        )
+                    )
+                if intersects:
+                    raise ValueError(
+                        "Driven pressure intersects a pressure-release boundary; "
+                        "prescribe compatible boundary data on shared nodes"
+                    )
 
 
 def _resolve_automatic_values(cfg: dict[str, Any], summary: Mapping[str, Any]) -> None:
@@ -743,16 +825,19 @@ def _validate_simulation(cfg: dict[str, Any], source: str) -> None:
         raise ValueError(
             f"'steps_per_period' must be >= {MIN_STEPS_PER_PERIOD:g}, got {cfg['steps_per_period']}"
         )
-    for key in (
-        "dt",
-        "duration",
-        "max_frequency",
-        "min_frequency",
-        "min_wavelength",
-        "min_group_velocity",
-    ):
+    for key in ("dt", "duration", "min_wavelength", "min_group_velocity"):
         if cfg.get(key) is not None:
             _float(cfg, key, positive=True)
+    for key in ("max_frequency", "min_frequency"):
+        if cfg.get(key) is None:
+            continue
+        try:
+            freq = parse_quantity(cfg[key], "frequency")
+        except ValueError as exc:
+            raise ValueError(f"'mesh.{key}': {exc}") from None
+        if not freq > 0:
+            raise ValueError(f"'mesh.{key}' must be positive, got {freq}")
+        cfg[key] = freq
     max_freq = cfg.get("max_frequency") or 3 * cfg["f_center"]
     min_freq = cfg.get("min_frequency") or min(cfg["f_center"] / 5, 0.5 * max_freq)
     if min_freq >= max_freq:
@@ -851,7 +936,9 @@ def _apply_cli_overrides(resolved: dict[str, Any], args: argparse.Namespace) -> 
         min_f = resolved.get("min_frequency")
         if min_f is not None:
             try:
-                if float(min_f) >= resolved["max_frequency"]:
+                if parse_quantity(min_f, "frequency") >= parse_quantity(
+                    resolved["max_frequency"], "frequency"
+                ):
                     resolved["min_frequency"] = None
             except (ValueError, TypeError):
                 pass
@@ -924,9 +1011,7 @@ def parse_and_resolve_config(
     _validate_output_options(resolved)
     from wavesimfem.characterisation import validate_options
 
-    raw_wc = resolved["wave_characterisation"]
-    explicit_wc_component = raw_wc.get("component") if isinstance(raw_wc, Mapping) else None
-    resolved["wave_characterisation"] = validate_options(raw_wc)
+    resolved["wave_characterisation"] = validate_options(resolved["wave_characterisation"])
     if not isinstance(resolved["lamb_modes"], (bool, np.bool_)):
         raise ValueError("postprocess.lamb_modes must be boolean")
     resolved["lamb_modes"] = bool(resolved["lamb_modes"])
@@ -944,17 +1029,19 @@ def parse_and_resolve_config(
             if wc and wc["enabled"]:
                 observable = _effective_sensor_observable(resolved, structure_from_config(resolved))
                 if observable == "pressure":
-                    if explicit_wc_component in ("x", "y"):
+                    if wc["component"] in ("x", "y"):
                         raise ValueError(
                             "postprocess.wave_characterisation: Pressure archives do not "
                             "contain horizontal/vertical motion components"
                         )
                     wc["component"] = "pressure"
-                elif explicit_wc_component == "pressure":
+                elif wc["component"] == "pressure":
                     raise ValueError(
                         "postprocess.wave_characterisation: The selected archive does not "
                         "contain pressure sensors"
                     )
+                elif wc["component"] is None:
+                    wc["component"] = "y"
     return resolved
 
 

@@ -101,7 +101,7 @@ def test_structure_selects_matching_analysis_and_persists_measurements(
     assert json.loads((output / "report.json").read_text()) == result
     readme = (output / "README.md").read_text()
     assert "Synthetic analytical verification" in readme
-    assert "190 mm export width and 10 pt LaTeX" in readme
+    assert "190 mm export width and 10 pt built-in serif/mathtext" in readme
     assert "Grey cells fail signal or wavelength support" in readme
     assert result["interpretation"] in readme
     assert "no receiver-by-receiver amplitude normalization" in readme
@@ -322,3 +322,57 @@ def test_buried_receiver_does_not_receive_surface_rayleigh_ellipticity_reference
     _run(archive)
     axis = next(ax for ax in captured_figures[0].axes if ax.get_title().startswith("(d)"))
     assert not any("Surface Rayleigh" in line.get_label() for line in axis.lines)
+
+
+def test_structure_report_readme_tracks_usetex_mode(tmp_path, captured_figures, monkeypatch):
+    monkeypatch.setattr("wavesimfem.analysis.latex_available", lambda: True)
+    archive = tmp_path / "wave.npz"
+    _archive(archive)
+    wave_reports.write_structure_report(archive, formats=("png",), usetex=True)
+    readme = (tmp_path / "wave_physics" / "README.md").read_text()
+    assert "190 mm export width and 10 pt external LaTeX" in readme
+
+
+def test_scalar_pressure_propagation_colorbar_uses_pressure_only(tmp_path, captured_figures):
+    t = np.arange(512) * 1e-7
+    x = 0.02 + np.arange(24) * 1e-3
+    # Build a zero-mean sparse high-amplitude burst (8/512 = 1.56% of samples):
+    # pressure-only 99th percentile is 100 Pa, whereas stacking a zero placeholder
+    # drops the tail fraction to 0.78% (< 1%) and collapses the limit to ~1 Pa.
+    pressure = np.zeros((len(t), len(x)))
+    pressure[:4, :] = 100.0
+    pressure[4:8, :] = -100.0
+    pressure[8::2, :] = 1.0
+    pressure[9::2, :] = -1.0
+    archive = tmp_path / "pressure.npz"
+    np.savez(
+        archive,
+        schema_version=2,
+        times=t,
+        sensor_x=x,
+        sensor_y=0.005,
+        source_x=0.0,
+        f_center=1e5,
+        disp_f_max=1.5e5,
+        c_fluid=1500.0,
+        c_L=1500.0,
+        sensor_observable="pressure",
+        sensor_units="Pa",
+        sensor_data_pressure=pressure,
+        simulation_config_yaml=yaml.safe_dump(
+            {
+                "structure_mode": "1_layer",
+                "single_layer": {
+                    "name": "Water",
+                    "thickness": 0.01,
+                    "rho": 1000.0,
+                    "c": 1500.0,
+                    "material_model": "fluid",
+                },
+            }
+        ),
+    )
+    wave_reports.write_structure_report(archive, formats=("png",), usetex=False)
+    pressure_ax = next(ax for ax in captured_figures[1].axes if "Pressure" in ax.get_title())
+    vmax = pressure_ax.collections[0].get_clim()[1]
+    assert vmax == pytest.approx(100.0, rel=1e-6)

@@ -278,3 +278,108 @@ def test_cupy_backend_matches_reference():
         backend=make_backend(gpu, "double"),
     )
     np.testing.assert_allclose(result.sensor_data_x, ref[:, 0::2], rtol=1e-10, atol=1e-14)
+
+
+@pytest.mark.parametrize(
+    "case", ["stiffness_overflow", "inv_mass_overflow", "inv_mass_underflow", "load_overflow"]
+)
+def test_engine_rejects_single_precision_overflow_and_underflow(case):
+    K, C, inv_mass, load, S = _random_damped_system()
+    if case == "stiffness_overflow":
+        K = K * 1e40
+    elif case == "inv_mass_overflow":
+        inv_mass = inv_mass * 1e40
+    elif case == "inv_mass_underflow":
+        inv_mass = inv_mass * 1e-46
+    elif case == "load_overflow":
+        load = load * 1e40
+    with pytest.raises(ValueError, match="precision"):
+        integrate_explicit_rk4(
+            K,
+            C,
+            inv_mass,
+            load,
+            S,
+            dt=2e-3,
+            n_steps=2,
+            source=_source,
+            backend=make_backend(CPU_DEVICE, "single"),
+        )
+
+
+@pytest.mark.parametrize("precision,expected_c", [("single", "float"), ("double", "double")])
+def test_cupy_backend_fused_kernels_and_precision_preservation(monkeypatch, precision, expected_c):
+    import contextlib
+    import sys
+    import types
+
+    from wavesimfem.solvers_gpu import _CupyBackend, resolve_precision
+
+    created_kernels: dict[str, tuple[str, str, str]] = {}
+    calls: list[str] = []
+
+    class FakeElementwiseKernel:
+        def __init__(self, in_params: str, out_params: str, operation: str, name: str) -> None:
+            created_kernels[name] = (in_params, out_params, operation)
+            self.name = name
+
+        def __call__(self, *args) -> None:
+            calls.append(self.name)
+            if self.name.startswith("wavesim_axpy_"):
+                x, a, y, out = args
+                assert a.dtype == x.dtype
+                np.add(x, a * y, out=out)
+            elif self.name.startswith("wavesim_add_scaled_"):
+                a, y, acc = args
+                assert a.dtype == acc.dtype
+                acc += a * y
+            elif self.name.startswith("wavesim_force_balance_zero_"):
+                r, inv_mass, out = args
+                np.multiply(-r, inv_mass, out=out)
+            elif self.name.startswith("wavesim_force_balance_"):
+                f, load, r, inv_mass, out = args
+                assert f.dtype == out.dtype
+                np.multiply(f * load - r, inv_mass, out=out)
+
+    fake_cp = types.ModuleType("cupy")
+    fake_cp.ElementwiseKernel = FakeElementwiseKernel
+    fake_cp.asarray = np.asarray
+    fake_cp.asnumpy = lambda arr: np.array(arr, copy=True)
+    fake_cp.zeros = np.zeros
+    fake_cp.add = np.add
+    fake_cp.isfinite = np.isfinite
+    fake_cp.cuda = types.SimpleNamespace(
+        Device=lambda _id: contextlib.nullcontext(),
+        get_current_stream=lambda: types.SimpleNamespace(synchronize=lambda: None),
+    )
+    fake_cpsp = types.ModuleType("cupyx.scipy.sparse")
+    fake_cpsp.csr_matrix = sp.csr_matrix
+    fake_cupyx = types.ModuleType("cupyx")
+    fake_cupyx_scipy = types.ModuleType("cupyx.scipy")
+    monkeypatch.setitem(sys.modules, "cupy", fake_cp)
+    monkeypatch.setitem(sys.modules, "cupyx", fake_cupyx)
+    monkeypatch.setitem(sys.modules, "cupyx.scipy", fake_cupyx_scipy)
+    monkeypatch.setitem(sys.modules, "cupyx.scipy.sparse", fake_cpsp)
+
+    dtype = resolve_precision(precision)
+    backend = _CupyBackend(dtype, device_id=0)
+    assert set(created_kernels) == {
+        f"wavesim_axpy_{expected_c}",
+        f"wavesim_add_scaled_{expected_c}",
+        f"wavesim_force_balance_{expected_c}",
+        f"wavesim_force_balance_zero_{expected_c}",
+    }
+    x = backend.from_host(np.array([1.0, 2.0, 3.0]))
+    y = backend.from_host(np.array([4.0, 5.0, 6.0]))
+    out = backend.zeros(3)
+    backend.axpy(out, x, 2.5, y)
+    assert out.dtype == dtype
+    np.testing.assert_allclose(out, [11.0, 14.5, 18.0], rtol=1e-6)
+    backend.add_scaled(out, 0.5, x, backend.zeros(3))
+    np.testing.assert_allclose(out, [11.5, 15.5, 19.5], rtol=1e-6)
+    backend.force_balance(out, 0.0, x, y, backend.from_host(np.array([2.0, 2.0, 2.0])))
+    assert calls[-1] == f"wavesim_force_balance_zero_{expected_c}"
+    np.testing.assert_allclose(out, [-8.0, -10.0, -12.0], rtol=1e-6)
+    backend.force_balance(out, 3.0, x, y, backend.from_host(np.array([0.5, 0.5, 0.5])))
+    assert calls[-1] == f"wavesim_force_balance_{expected_c}"
+    np.testing.assert_allclose(out, [-0.5, 0.5, 1.5], rtol=1e-6)

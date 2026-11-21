@@ -145,7 +145,9 @@ class PetscRK4:
         self.K.mult(u, a)
         self.C.multAdd(v, a, a)  # a = K u + C v
         a.scale(-1.0)
-        a.axpy(float(self.source(t)), self._load)
+        scale = float(self.source(t))
+        if scale != 0.0:
+            a.axpy(scale, self._load)
         a.pointwiseMult(a, self._inv_mass)
         return a
 
@@ -208,8 +210,13 @@ def csr_row_abs_sums(indptr: np.ndarray, values: np.ndarray) -> np.ndarray:
     """Vectorized absolute row sums of a CSR matrix (empty rows give 0)."""
     indptr = np.asarray(indptr)
     n_rows = len(indptr) - 1
-    rows = np.repeat(np.arange(n_rows), np.diff(indptr))
-    return np.bincount(rows, weights=np.abs(values), minlength=n_rows)
+    if n_rows <= 0:
+        return np.empty(0, dtype=np.float64)
+    sums = np.zeros(n_rows, dtype=np.float64)
+    nonempty = indptr[:-1] < indptr[1:]
+    if np.any(nonempty):
+        sums[nonempty] = np.add.reduceat(np.abs(values), indptr[:-1][nonempty])
+    return sums
 
 
 def operator_bound(matrix: Any, mass: np.ndarray) -> float:
@@ -284,14 +291,15 @@ def point_evaluation_matrix(function: Any, points: np.ndarray, cells: np.ndarray
     rows, cols, data = [], [], []
     saved = array.copy()
     try:
+        array[:] = 0.0
         for k in range(len(colour_nodes)):
             sel = np.flatnonzero(point_colour == k)
             for j in range(nodes.shape[1]):
                 for comp in range(bs):
                     dofs = nodes[sel, j] * bs + comp
-                    array[:] = 0.0
                     array[dofs] = 1.0
                     values = function.eval(points[sel], cells[sel]).reshape(len(sel), value_size)
+                    array[dofs] = 0.0
                     for out in range(value_size):
                         weights = values[:, out]
                         keep = weights != 0.0

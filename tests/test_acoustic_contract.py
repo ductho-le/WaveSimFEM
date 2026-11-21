@@ -218,3 +218,139 @@ def test_reports_use_selected_observable_units_and_withhold_scalar_polarization(
         assert json.load(stream)["summary"]["sensor_units"] == data["sensor_units"]
     for figure in captured:
         figure.clear()
+
+
+@pytest.mark.parametrize(
+    "updates,match",
+    [
+        (
+            {
+                "excitation": {
+                    "source_kind": "traction",
+                    "source_amplitude": None,
+                    "source_region": None,
+                }
+            },
+            "traction source must act on a solid",
+        ),
+        (
+            {
+                "excitation": {
+                    "source_kind": "acoustic_pressure",
+                    "source_boundary": "top",
+                },
+                "acoustic_boundaries": {"top": "pressure_release"},
+            },
+            "driven pressure face",
+        ),
+        (
+            {
+                "excitation": {
+                    "source_kind": "acoustic_normal_acceleration",
+                    "source_boundary": "top",
+                },
+                "acoustic_boundaries": {"top": "radiation"},
+            },
+            "normal-acceleration face",
+        ),
+        (
+            {
+                "structure": {"mode": "N_layers", "layers": [dict(WATER), dict(SOLID)]},
+                "mesh": {"ny_per_region": [2, 2]},
+                "excitation": {
+                    "source_kind": "acoustic_pressure",
+                    "source_boundary": "top",
+                    "source_region": None,
+                },
+            },
+            "does not touch an acoustic fluid",
+        ),
+        (
+            {
+                "excitation": {
+                    "source_kind": "acoustic_pressure",
+                    "source_boundary": "left",
+                    "source_y": 0.005,
+                },
+            },
+            "does not apply to source_boundary 'left'",
+        ),
+        (
+            {
+                "structure": {"mode": "N_layers", "layers": [dict(WATER), dict(SOLID)]},
+                "mesh": {"ny_per_region": [2, 2]},
+                "excitation": {
+                    "source_kind": "traction",
+                    "source_amplitude": None,
+                    "source_boundary": "interface",
+                    "source_y": 0.005,
+                    "source_region": None,
+                },
+            },
+            "internal material interface",
+        ),
+        (
+            {
+                "structure": {"mode": "N_layers", "layers": [dict(WATER), dict(SOLID)]},
+                "mesh": {"ny_per_region": [2, 2]},
+                "excitation": {
+                    "source_kind": "acoustic_pressure",
+                    "source_boundary": "interface",
+                    "source_y": 0.01,
+                    "source_region": None,
+                },
+            },
+            "Internal coupled interfaces accept solid traction",
+        ),
+        (
+            {
+                "excitation": {
+                    "source_kind": "acoustic_pressure",
+                    "source_boundary": "top",
+                },
+                "acoustic_boundaries": {"left": "pressure_release"},
+            },
+            "Driven pressure intersects a pressure-release boundary",
+        ),
+    ],
+)
+def test_fail_fast_acoustic_source_and_boundary_validation(updates, match):
+    raw = _config()
+    for section, values in updates.items():
+        if isinstance(values, dict) and isinstance(raw.get(section), dict):
+            raw[section].update(values)
+        else:
+            raw[section] = values
+    with pytest.raises(ValueError, match=match):
+        parse_and_resolve_config(custom_cfg=raw)
+
+
+def test_non_intersecting_lateral_pressure_drive_and_release_face_is_accepted():
+    raw = _config()
+    raw["structure"] = {
+        "mode": "N_layers",
+        "layers": [dict(WATER, name="WaterBot"), dict(SOLID), dict(WATER, name="WaterTop")],
+    }
+    raw["mesh"]["ny_per_region"] = [2, 2, 2]
+    raw["excitation"].update(
+        source_kind="acoustic_pressure",
+        source_boundary="left",
+        source_region="WaterBot",
+    )
+    raw["acoustic_boundaries"] = {"top": "pressure_release"}
+    raw["sensors"]["region"] = "WaterBot"
+    raw["sensors"]["sensor_y"] = 0.005
+    cfg = parse_and_resolve_config(custom_cfg=raw)
+    assert cfg["acoustic_boundaries"]["top"] == "pressure_release"
+
+
+def test_cli_max_frequency_string_override_clears_incompatible_file_min_frequency():
+    import argparse
+
+    raw = _config()
+    raw["mesh"]["min_frequency"] = "200 kHz"
+    raw["mesh"]["max_frequency"] = "400 kHz"
+    args = argparse.Namespace(max_frequency="150 kHz", min_frequency=None)
+    cfg = parse_and_resolve_config(custom_cfg=raw, args=args)
+    assert cfg["max_frequency"] == pytest.approx(1.5e5)
+    assert cfg["min_frequency"] is None

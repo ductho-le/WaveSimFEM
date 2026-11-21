@@ -1,7 +1,7 @@
 # Rayleigh surface waves on steel (rail / weld / surface-crack NDE)
 # A normal surface load radiates bulk waves and a non-dispersive Rayleigh wave
 # (c_R ≈ 2.98 km/s), giving a straight dispersion branch f = c_R k / (2 pi).
-# A five-cycle Hann-windowed traction pulse excites the surface at 1 MHz.
+# A broadband Ricker traction pulse excites the surface at 1 MHz.
 # The 5 mm undamped depth is approximately 1.7 Rayleigh wavelengths at that
 # frequency; penetration and bottom-boundary effects require a depth study.
 #
@@ -9,10 +9,10 @@
 #   Rayleigh-wave velocity measurement for steel surface inspection.
 # Model and numerical scope
 #   Flat, homogeneous 2D plane-strain halfspace approximation. The sizing band
-#   extends from 0.5 to 1.5 MHz; figures display 0 to 2 MHz around the pulse peak.
+#   extends from 0.2 to 2 MHz; figures display 0-2 MHz around the pulse peak.
 #   Q2 elements discretise the truncated depth and lateral absorbing regions.
 #   Compare the measured speed with c_R ~ 2.98 km/s and establish mesh, time-step,
-#   and truncation-depth convergence over the 120-180 mm source-receiver offsets.
+#   and truncation-depth convergence over the 20-220 mm source-receiver offsets.
 # Usage
 #   sh tools/run_cpu4.sh -c configs/03_halfspace_steel_rayleigh.yaml
 #   Add --dry-run to inspect resource estimates. Run from the repository root.
@@ -33,11 +33,11 @@ solver:
   device: cpu
   precision: double
   dt: null                     # Automatic assembled stability certificate
-  duration: null               # Automatic Rayleigh travel time plus source duration
+  duration: 110.0e-6           # Full Rayleigh traversal across the 200 mm array
   time_factor: 1.2             # Travel-time multiplier for automatic duration
 
 geometry:
-  sensing_length: 0.2           # [m] Observation region, excluding lateral sponges
+  sensing_length: 0.24          # [m] Observation region, excluding lateral sponges
   absorb_length: 0.03           # [m] 30 mm lateral sponges (10 Rayleigh wavelengths)
 
 structure:
@@ -56,27 +56,26 @@ absorbing_boundaries:
   beta: null
 
 excitation:
-  source_type: "tone_burst"     # Hann-windowed sinusoidal traction
-  n_cycles: 5                  # Five cycles; pulse duration = 5 us at 1 MHz
+  source_type: "ricker"         # Broadband traction pulse for full-band Rayleigh dispersion
   f_center: 1.0e6               # [Hz]
   traction_max: 1.0e6           # [Pa]
-  excitation_width: 2.0e-3      # [m]
+  excitation_width: 1.0e-3      # [m]
   source_x: null               # [m] Automatic source position inside the sensing region
   source_fx: 0.0
   source_fy: 1.0
 
 mesh:
-  nx: 920                      # Full 260 mm domain; dx = 0.283 mm
-  ny_per_region: [60]           # Steel halfspace, including bottom sponge
+  nx: 960                      # Full 300 mm domain; dx = 0.3125 mm
+  ny_per_region: [45]           # Steel halfspace, including bottom sponge
   degree: 2
-  max_frequency: 1.5e6          # [Hz] Accuracy/sampling band edge; not a source filter
-  min_frequency: 0.5e6          # [Hz] Longest target Rayleigh wavelength ~6 mm
+  max_frequency: 2.0e6          # [Hz] Accuracy/sampling band edge; not a source filter
+  min_frequency: 0.2e6          # [Hz] Longest target Rayleigh wavelength
   min_wavelength: null          # Homogeneous Rayleigh estimate is available
 
 sensors:
-  n_sensors: 241                # Free surface, y = 0
-  sensor_offset: 0.12           # [m]
-  sensor_pitch: 0.25e-3         # [m]
+  n_sensors: 401                # Free surface, y = 0
+  sensor_offset: 0.02           # [m]
+  sensor_pitch: 0.5e-3          # [m]; 200 mm aperture
   sensor_y: null                # Free surface y = 0
   sample_rate: "20 MHz"         # 10 samples/period at 2 MHz
 
@@ -88,11 +87,11 @@ postprocess:
   wave_characterisation:
     enabled: true
     component: y
-    frequency_band: ["0.7 MHz", "1.3 MHz"]
+    frequency_band: ["0.5 MHz", "1.5 MHz"]
     time_window: null          # Full record; specify [start, end] in seconds to isolate a packet
     min_relative_amplitude: 0.01 # Exclude peaks below 1% of the array maximum
-  f_min: "0.5 MHz"
-  f_max: "1.5 MHz"
+  f_min: 0.0
+  f_max: "2.0 MHz"
   k_min: 0.0
   k_max: "4.5 rad/mm"           # k_R(2 MHz) ≈ 4.2 rad/mm
 

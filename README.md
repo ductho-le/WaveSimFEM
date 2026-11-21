@@ -131,12 +131,12 @@ WaveSimFEM includes 8 research-ready configurations under [`configs/`](configs/)
 | :--- | :--- | :--- | :--- |
 | [`01 · Aluminum plate`](configs/01_plate_aluminum_lamb.yaml) | 3 mm isotropic plate | Lamb waves & NDT inspection | 1 MHz Ricker |
 | [`02 · CFRP composite`](configs/02_plate_cfrp.yaml) | 8-ply `[0/90/0/90]_s` laminate | Anisotropic guided-wave dispersion | 1 MHz Ricker |
-| [`03 · Steel halfspace`](configs/03_halfspace_steel_rayleigh.yaml) | Truncated elastic halfspace | Rayleigh surface waves | 1 MHz Tone burst |
+| [`03 · Steel halfspace`](configs/03_halfspace_steel_rayleigh.yaml) | Truncated elastic halfspace | Rayleigh surface waves | 1 MHz Ricker |
 | [`04 · Soil over bedrock`](configs/04_plate_on_halfspace_soil_bedrock.yaml) | 10 m soil layer on bedrock | Seismic surface-wave dispersion | 15 Hz Ricker |
 | [`05 · Cortical bone`](configs/05_layers_bone_qus.yaml) | Soft tissue / bone / marrow | Axial-transmission ultrasound | 500 kHz Ricker |
-| [`06 · Immersed plate`](configs/06_plate_in_halfspaces_immersed_water.yaml) | Aluminum plate in water | Leaky Lamb & Scholte waves | 500 kHz Ricker |
-| [`07 · Water channel`](configs/07_fluid_acoustic.yaml) | Acoustic water cavity | Pure acoustic pressure waves | 250 kHz Ricker |
-| [`08 · Coupled fluid–solid`](configs/08_fluid_solid_acoustic.yaml) | Aluminum plate on water | Fluid–structure interaction | 200 kHz Ricker |
+| [`06 · Immersed plate`](configs/06_plate_in_halfspaces_immersed_water.yaml) | Aluminum plate in water | Leaky Lamb & Scholte waves | 1 MHz Ricker |
+| [`07 · Water channel`](configs/07_fluid_acoustic.yaml) | Acoustic water cavity | Pure acoustic pressure waves | 1 MHz Ricker |
+| [`08 · Coupled fluid–solid`](configs/08_fluid_solid_acoustic.yaml) | Aluminum plate on water | Fluid–structure interaction | 1 MHz Ricker |
 
 ---
 

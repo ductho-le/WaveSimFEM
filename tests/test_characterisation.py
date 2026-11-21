@@ -86,7 +86,7 @@ def test_report_outputs(tmp_path):
     assert saved["summary"]["velocity"]["signed_m_per_s"] == pytest.approx(200, rel=0.02)
     assert (tmp_path / "characterisation/receivers.csv").exists()
     readme = (tmp_path / "characterisation/README.md").read_text()
-    assert "190 mm width with 10 pt LaTeX" in readme
+    assert "190 mm width with 10 pt built-in serif/mathtext" in readme
     assert "Apparent decay includes spreading" in readme
     assert "Unpadded STFT frequency spacing" in readme
     assert saved["figure_parameters"]["export_width_mm"] == 190
@@ -247,3 +247,47 @@ def test_packet_figures_have_only_panel_content_and_fixed_width(tmp_path, monkey
     # Four receiver panels use two columns at the publication width.
     assert len(captured[2].axes) == len(captured[3].axes) == 5
     assert report["figure_parameters"]["font_size_pt"] == 10
+
+
+def test_pressure_characterisation_defaults_component_and_tracks_usetex(tmp_path, monkeypatch):
+    t, x, _, sig = packet()
+    archive = tmp_path / "pressure.npz"
+    np.savez(
+        archive,
+        times=t,
+        sensor_x=x,
+        sensor_data_pressure=sig,
+        sensor_observable="pressure",
+        sensor_units="Pa",
+    )
+    opts = validate_options({"enabled": True})
+    assert opts is not None and opts["component"] is None
+    report = write_characterisation(archive, tmp_path / "auto_out", options=opts, formats=("png",))
+    assert report["options"]["component"] == "pressure"
+    assert report["observable"] == "pressure"
+    assert report["summary"]["velocity"]["signed_m_per_s"] == pytest.approx(200, rel=0.02)
+
+    monkeypatch.setattr("wavesimfem.analysis.latex_available", lambda: True)
+    monkeypatch.setattr("wavesimfem.characterisation_plots._save", lambda *args: [])
+    write_characterisation(archive, tmp_path / "tex_out", formats=("png",), usetex=True)
+    readme_tex = (tmp_path / "tex_out" / "characterisation" / "README.md").read_text()
+    assert "190 mm width with 10 pt external LaTeX" in readme_tex
+
+
+def test_measure_packets_tolerates_ulp_rounding_on_time_window():
+    t, x, ux, uy = packet()
+    t_shifted = t + 1e-4
+    eps = np.finfo(float).eps * abs(t_shifted[-1])
+    result, _ = measure_packets(
+        t_shifted,
+        x,
+        ux,
+        uy,
+        {
+            "time_window": [t_shifted[0] - 2 * eps, t_shifted[-1] + 2 * eps],
+            "frequency_band": [1000.0, 7000.0],
+        },
+    )
+    assert result["summary"]["velocity"]["signed_m_per_s"] == pytest.approx(200, rel=0.02)
+    with pytest.raises(ValueError, match="time_window"):
+        measure_packets(t_shifted, x, ux, uy, {"time_window": [t_shifted[0], t_shifted[-1] + 1e-3]})

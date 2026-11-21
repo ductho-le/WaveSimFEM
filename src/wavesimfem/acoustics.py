@@ -68,7 +68,7 @@ def acoustic_waveform(t: float, cfg: dict[str, Any]) -> tuple[float, float, floa
 class RegionSensors(PointSensors):
     """Point evaluation on a specified material side, with unique MPI owners."""
 
-    def __init__(self, domain: Any, points: np.ndarray, cells: np.ndarray):
+    def __init__(self, domain: Any, points: np.ndarray, cells: np.ndarray) -> None:
         self.comm = domain.comm
         tree = geometry.bb_tree(domain, domain.topology.dim, entities=cells, padding=1e-12)
         candidates = geometry.compute_collisions_points(tree, points)
@@ -561,65 +561,13 @@ def _restricted_load(full: Any, dofs: np.ndarray, template: Any) -> Any:
     return result
 
 
-def _separable_forcing(
-    cfg: dict[str, Any],
-    full: list[Any],
-    coupling: Any,
-    loads: tuple[Any, Any],
-    prescribed: Any,
-    dofs: tuple[np.ndarray, np.ndarray],
-    ops: Any,
-) -> tuple[Any, list[Any]]:
-    """Fixed load vectors multiplying ``(g, -g'', -g')`` after Dirichlet elimination.
-
-    With prescribed pressure ``g(t) P`` the eliminated columns contribute
-    ``-g C P`` to the solid and ``-g Kp P - g' Dp P - g'' Mp P`` to the fluid.
-    Identically zero blocks (a collective infinity-norm test) become ``None``.
-    Returns the forcing and the vectors it references (caller-owned).
-    """
-    from wavesimfem.acoustic_time import SeparableForcing
-
-    (u_dofs, p_dofs), (mp, kp, dp) = dofs, full[3:6]
-    templates = (ops.Ms.createVecRight(), ops.Mp.createVecRight())
-
-    def lifted(matrix: Any, rows: np.ndarray, template: Any) -> Any:
-        work = matrix.createVecLeft()
-        try:
-            matrix.mult(prescribed.x.petsc_vec, work)
-            return _restricted_load(work, rows, template)
-        finally:
-            work.destroy()
-
+def _lifted_load(matrix: Any, prescribed: Any, rows: np.ndarray, template: Any) -> Any:
+    work = matrix.createVecLeft()
     try:
-        terms = []
-        for load, matrix, rows, template in (
-            (loads[0], coupling, u_dofs, templates[0]),
-            (loads[1], kp, p_dofs, templates[1]),
-        ):
-            vector, correction = (
-                _restricted_load(load, rows, template),
-                lifted(matrix, rows, template),
-            )
-            vector.axpy(-1.0, correction)
-            correction.destroy()
-            terms.append(vector)
-        terms += [lifted(mp, p_dofs, templates[1]), lifted(dp, p_dofs, templates[1])]
+        matrix.mult(prescribed.x.petsc_vec, work)
+        return _restricted_load(work, rows, template)
     finally:
-        for template in templates:
-            template.destroy()
-    kept: list[Any] = []
-    for vector in terms:
-        if vector.norm(PETSc.NormType.NORM_INFINITY) > 0.0:
-            kept.append(vector)
-        else:
-            vector.destroy()
-            kept.append(None)
-    forcing = SeparableForcing(
-        solid=(kept[0], None, None),
-        pressure=(kept[1], kept[2], kept[3]),
-        coefficients=partial(_source_coefficients, cfg),
-    )
-    return forcing, [v for v in kept if v is not None]
+        work.destroy()
 
 
 def _sensor_layout(
@@ -642,7 +590,10 @@ def build_acoustic_problem(
     cfg: dict[str, Any], summary: dict[str, Any] | None = None
 ) -> AcousticProblem:
     """Assemble the physical field blocks, removing inactive/Dirichlet DOFs."""
-    from wavesimfem.acoustic_time import AcousticOperators
+    import contextlib
+
+    from wavesimfem.acoustic_time import AcousticOperators, SeparableForcing
+    from wavesimfem.solvers import _drop_zero_entries
 
     ctx = _mesh_context(cfg, summary or structure_from_config(cfg))
     degree = int(cfg["degree"])
@@ -654,8 +605,6 @@ def build_acoustic_problem(
     location = _source_location(ctx)
     ls, lp, prescribed, drive, source_y = _source_forms(ctx, V, Q, location, coords_p, constrained)
     constrained |= drive
-
-    import contextlib
 
     coords_u = V.tabulate_dof_coordinates()
     # Objects that the problem will own: released here only if building fails.
@@ -673,40 +622,94 @@ def build_acoustic_problem(
             temp(pi)
             energy_dofs, ei = _restriction(Q, active_p)
             temp(ei)
-            coupling_full = temp(_interface_coupling(ctx, V, Q))
-            full = [temp(_assemble(form)) for form in _field_forms(ctx, V, Q)]
             loads = (temp(_vector(ls)), temp(_vector(lp)))
 
-            from wavesimfem.solvers import _drop_zero_entries
+            restricted: list[Any] = []
+            tpl_s = tpl_p = lumped_mp = energy_mass = energy_stiffness = None
+            lift_c = lift_kp = lift_mp = lift_dp = None
+            pending: list[Any] = []
+            try:
+                for i, form in enumerate(_field_forms(ctx, V, Q)):
+                    with contextlib.ExitStack() as mat_stack:
+                        full_mat = _assemble(form)
+                        mat_stack.callback(full_mat.destroy)
+                        rows = ui if i < 3 else pi
+                        sub = full_mat.createSubMatrix(rows, rows)
+                        if i in (2, 5) and sub.getSize()[0] > 0:
+                            raw = sub
+                            try:
+                                sub = _drop_zero_entries(raw)
+                            finally:
+                                raw.destroy()
+                        restricted.append(sub)
+                        owned.append(sub)
+                        if i == 0:
+                            tpl_s = temp(sub.createVecRight())
+                        elif i == 3:
+                            tpl_p = temp(sub.createVecRight())
+                            ones_q = full_mat.createVecRight()
+                            mat_stack.callback(ones_q.destroy)
+                            full_lumped_mp = full_mat.createVecLeft()
+                            mat_stack.callback(full_lumped_mp.destroy)
+                            ones_q.set(1.0)
+                            full_mat.mult(ones_q, full_lumped_mp)
+                            lumped_mp = _restricted_load(full_lumped_mp, p_dofs, tpl_p)
+                            owned.append(lumped_mp)
+                            energy_mass = full_mat.createSubMatrix(ei, ei)
+                            owned.append(energy_mass)
+                            lift_mp = _lifted_load(full_mat, prescribed, p_dofs, tpl_p)
+                            pending.append(lift_mp)
+                        elif i == 4:
+                            energy_stiffness = full_mat.createSubMatrix(ei, ei)
+                            owned.append(energy_stiffness)
+                            lift_kp = _lifted_load(full_mat, prescribed, p_dofs, tpl_p)
+                            pending.append(lift_kp)
+                        elif i == 5:
+                            lift_dp = _lifted_load(full_mat, prescribed, p_dofs, tpl_p)
+                            pending.append(lift_dp)
 
-            restricted = []
-            for i, a in enumerate(full):
-                rows = ui if i < 3 else pi
-                restricted.append(a.createSubMatrix(rows, rows))
-                owned.append(restricted[-1])
-            for idx in (2, 5):
-                if restricted[idx].getSize()[0] > 0:
-                    raw = restricted[idx]
-                    restricted[idx] = owned[idx] = _drop_zero_entries(raw)
-                    raw.destroy()
-            coupling = coupling_full.createSubMatrix(ui, pi)
-            owned.append(coupling)
-            ops = AcousticOperators(*restricted, coupling)
-            energy_mass = full[3].createSubMatrix(ei, ei)
-            owned.append(energy_mass)
-            energy_stiffness = full[4].createSubMatrix(ei, ei)
-            owned.append(energy_stiffness)
-            energy = (energy_mass, energy_stiffness)
-            forcing, source_vectors = _separable_forcing(
-                cfg,
-                full,
-                coupling_full,
-                loads,
-                prescribed,
-                (u_dofs, p_dofs),
-                ops,
-            )
-            owned.extend(source_vectors)
+                with contextlib.ExitStack() as mat_stack:
+                    coupling_full = _interface_coupling(ctx, V, Q)
+                    mat_stack.callback(coupling_full.destroy)
+                    coupling = coupling_full.createSubMatrix(ui, pi)
+                    owned.append(coupling)
+                    lift_c = _lifted_load(coupling_full, prescribed, u_dofs, tpl_s)
+                    pending.append(lift_c)
+
+                ops = AcousticOperators(*restricted, coupling, lumped_mp=lumped_mp)
+                energy = (energy_mass, energy_stiffness)
+
+                solid_0 = _restricted_load(loads[0], u_dofs, tpl_s)
+                pending.append(solid_0)
+                solid_0.axpy(-1.0, lift_c)
+                pending.remove(lift_c)
+                lift_c.destroy()
+
+                press_0 = _restricted_load(loads[1], p_dofs, tpl_p)
+                pending.append(press_0)
+                press_0.axpy(-1.0, lift_kp)
+                pending.remove(lift_kp)
+                lift_kp.destroy()
+
+                kept: list[Any] = []
+                for vector in (solid_0, press_0, lift_mp, lift_dp):
+                    pending.remove(vector)
+                    if vector.norm(PETSc.NormType.NORM_INFINITY) > 0.0:
+                        kept.append(vector)
+                        owned.append(vector)
+                    else:
+                        vector.destroy()
+                        kept.append(None)
+                forcing = SeparableForcing(
+                    solid=(kept[0], None, None),
+                    pressure=(kept[1], kept[2], kept[3]),
+                    coefficients=partial(_source_coefficients, cfg),
+                    lumped_pressure=(kept[1], None, kept[3]),
+                )
+            except BaseException:
+                for vec in reversed(pending):
+                    vec.destroy()
+                raise
 
         sensor_x, sensor_y, observable, selected, probes = _sensor_layout(ctx)
         result = AcousticProblem(
@@ -746,7 +749,7 @@ def build_acoustic_problem(
 class AcousticSampler:
     """Map distributed active states to physical fields and material-side sensors."""
 
-    def __init__(self, problem: AcousticProblem):
+    def __init__(self, problem: AcousticProblem) -> None:
         self.problem = problem
         self.displacement = fem.Function(problem.V, name="solid_displacement")
         self.solid_velocity = fem.Function(problem.V, name="solid_velocity")
@@ -754,6 +757,10 @@ class AcousticSampler:
         self.integral = fem.Function(problem.Q)
         self.fluid_velocity = None
         self.velocity_expression = None
+        self._has_solid = problem.operators.Ms.getSize()[0] > 0
+        self._has_fluid = problem.operators.Mp.getSize()[0] > 0
+        self._has_energy = problem.energy_operators[0].getSize()[0] > 0
+        self._probe_cells = np.empty(0, dtype=np.int32)
         if problem.observable == "particle_velocity":
             W = fem.functionspace(problem.domain, ("DG", int(problem.cfg["degree"]), (2,)))
             self.fluid_velocity = fem.Function(W, name="fluid_particle_velocity")
@@ -762,28 +769,57 @@ class AcousticSampler:
                 -ufl.grad(self.integral) / rho,
                 W.element.interpolation_points,
             )
+            if len(problem.probes.cells):
+                self._probe_cells = np.unique(problem.probes.cells).astype(np.int32)
         mass = problem.energy_operators[0]
         self._energy_vectors = (mass.createVecRight(), mass.createVecLeft())
 
-    def update(self, stepper: Any, t: float, prescribed_integral: float) -> np.ndarray:
+    def update(
+        self,
+        stepper: Any,
+        t: float,
+        prescribed_integral: float,
+        *,
+        need_sensors: bool = True,
+        need_energy: bool = True,
+        need_vtx: bool = True,
+    ) -> np.ndarray:
         p = self.problem
-        for f, values, dofs in (
-            (self.displacement, stepper.u, p.u_dofs),
-            (self.solid_velocity, stepper.v, p.u_dofs),
-            (self.pressure, stepper.p, p.p_dofs),
-            (self.integral, stepper.pressure_integral, p.p_dofs),
+        need_u = (need_vtx and self._has_solid) or (need_sensors and p.observable == "displacement")
+        need_v = need_sensors and p.observable == "velocity"
+        need_p = (
+            (need_vtx and self._has_fluid)
+            or (need_energy and self._has_energy)
+            or (need_sensors and p.observable == "pressure")
+        )
+        need_i = (need_energy and self._has_energy) or (
+            need_sensors and p.observable == "particle_velocity"
+        )
+        has_prescribed = p.cfg["source_kind"] == "acoustic_pressure"
+        for active, f, values, dofs in (
+            (need_u, self.displacement, stepper.u if need_u else None, p.u_dofs),
+            (need_v, self.solid_velocity, stepper.v if need_v else None, p.u_dofs),
+            (need_p, self.pressure, stepper.p if need_p else None, p.p_dofs),
+            (need_i, self.integral, stepper.pressure_integral if need_i else None, p.p_dofs),
         ):
+            if not active:
+                continue
             f.x.array[:] = 0.0
             f.x.array[dofs] = values.array_r
-        if p.cfg["source_kind"] == "acoustic_pressure":
-            self.pressure.x.array[:] += (
-                p.cfg["source_amplitude"] * acoustic_waveform(t, p.cfg)[0] * p.prescribed.x.array
-            )
-            self.integral.x.array[:] += prescribed_integral * p.prescribed.x.array
-        for f in (self.displacement, self.solid_velocity, self.pressure, self.integral):
+            if has_prescribed and f is self.pressure:
+                f.x.array[:] += (
+                    p.cfg["source_amplitude"]
+                    * acoustic_waveform(t, p.cfg)[0]
+                    * p.prescribed.x.array
+                )
+            elif has_prescribed and f is self.integral:
+                f.x.array[:] += prescribed_integral * p.prescribed.x.array
             f.x.scatter_forward()
+        if not need_sensors:
+            return np.empty((0, 1 if p.observable == "pressure" else 2), dtype=float)
         if p.observable == "particle_velocity":
-            self.fluid_velocity.interpolate(self.velocity_expression)
+            if len(self._probe_cells):
+                self.fluid_velocity.interpolate(self.velocity_expression, cells0=self._probe_cells)
             self.fluid_velocity.x.scatter_forward()
             selected = self.fluid_velocity
         else:
@@ -818,6 +854,217 @@ class AcousticSampler:
     def destroy(self) -> None:
         for vector in self._energy_vectors:
             vector.destroy()
+
+
+class _DeviceAcousticRecorder:
+    """Bounded on-device ring buffer for serial explicit acoustic sensors and fluid energy.
+
+    Keeps both point-sensor evaluation and quadratic fluid-energy accumulation
+    resident on the array backend (SciPy or CuPy) so recorded steps require no
+    per-step device-to-host synchronization, mirror rescaling, or DOLFINx
+    function scatter.
+    """
+
+    def __init__(
+        self,
+        problem: AcousticProblem,
+        stepper: Any,
+        sampler: AcousticSampler,
+        local: list[np.ndarray],
+        fluid_energy: np.ndarray,
+        n_samples: int,
+        chunk_bytes: int,
+    ) -> None:
+        import scipy.sparse as sp
+
+        from wavesimfem.numerics import point_evaluation_matrix
+
+        def _petsc_to_csr(mat: Any) -> sp.csr_matrix:
+            indptr, indices, values = mat.getValuesCSR()
+            return sp.csr_matrix((values, indices, indptr), shape=mat.getSize(), copy=True)
+
+        self._backend = stepper.backend
+        self._local = local
+        self._fluid_energy = fluid_energy
+        self._cfg = problem.cfg
+        self._observable = problem.observable
+        self._has_prescribed = problem.cfg["source_kind"] == "acoustic_pressure"
+        self._ncomp = 1 if self._observable == "pressure" else 2
+        self._pending = 0
+        self._row = 0
+
+        if self._observable in ("displacement", "velocity"):
+            template_fn = (
+                sampler.displacement
+                if self._observable == "displacement"
+                else sampler.solid_velocity
+            )
+            dofs = problem.u_dofs
+            inv_sqrt = stepper._inv_sqrt_ms
+            self._state = stepper._array_state[0 if self._observable == "displacement" else 1]
+        else:
+            template_fn = sampler.pressure
+            dofs = problem.p_dofs
+            inv_sqrt = stepper._inv_sqrt_mp
+            self._state = stepper._array_state[2]
+
+        s_full = point_evaluation_matrix(
+            template_fn, problem.probes.points, problem.probes.cells
+        ).tocsr()
+        s_full.data[np.abs(s_full.data) <= 1e-14] = 0.0
+        s_full.eliminate_zeros()
+        s_host = (s_full[:, dofs] @ sp.diags(inv_sqrt, shape=(len(dofs), len(dofs)))).tocsr()
+        s_host.eliminate_zeros()
+        self._n_sensor_rows = s_host.shape[0]
+
+        backend = self._backend
+        with backend.context():
+            self._sensor_op = backend.csr(s_host)
+            if self._sensor_op.nnz > 0 and not backend.all_finite(self._sensor_op.data):
+                raise ValueError(
+                    "Acoustic sensor operator exceeds the requested floating-point precision"
+                )
+            self._s_prescribed: Any = None
+            self._sensor_scratch: Any = None
+            if self._has_prescribed and self._observable == "pressure":
+                s_pres_host = np.asarray(s_full @ problem.prescribed.x.array, dtype=np.float64)
+                if np.any(s_pres_host != 0.0):
+                    s_pres_dev = backend.from_host(s_pres_host)
+                    if not backend.all_finite(s_pres_dev):
+                        raise ValueError(
+                            "Acoustic sensor operator exceeds the requested floating-point precision"
+                        )
+                    self._s_prescribed = s_pres_dev
+                    self._sensor_scratch = backend.zeros(self._n_sensor_rows)
+
+            self._mp_op: Any = None
+            self._kp_op: Any = None
+            self._m_cross: Any = None
+            self._k_cross: Any = None
+            self._m_dd = 0.0
+            self._k_dd = 0.0
+            self._p_state = stepper._array_state[2]
+            self._i_state = stepper._array_integral
+            self._energy_ring: Any = None
+            self._energy_dd: np.ndarray | None = None
+            self._energy_ready = True
+
+            if sampler._has_energy:
+                np_ = stepper._np
+                if np_ > 0:
+                    inv_mp = sp.diags(stepper._inv_sqrt_mp, shape=(np_, np_))
+                    mp_norm = (inv_mp @ _petsc_to_csr(problem.operators.Mp) @ inv_mp).tocsr()
+                    kp_norm = (inv_mp @ _petsc_to_csr(problem.operators.Kp) @ inv_mp).tocsr()
+                    mp_norm.eliminate_zeros()
+                    kp_norm.eliminate_zeros()
+                    self._mp_op = backend.csr(mp_norm)
+                    self._kp_op = backend.csr(kp_norm)
+                    if (self._mp_op.nnz > 0 and not backend.all_finite(self._mp_op.data)) or (
+                        self._kp_op.nnz > 0 and not backend.all_finite(self._kp_op.data)
+                    ):
+                        self._energy_ready = False
+                if self._energy_ready and self._has_prescribed:
+                    d_e = np.asarray(
+                        problem.prescribed.x.array[problem.energy_dofs], dtype=np.float64
+                    )
+                    m_e = _petsc_to_csr(problem.energy_operators[0])
+                    k_e = _petsc_to_csr(problem.energy_operators[1])
+                    md = m_e @ d_e
+                    kd = k_e @ d_e
+                    self._m_dd = float(np.dot(d_e, md))
+                    self._k_dd = float(np.dot(d_e, kd))
+                    if np_ > 0:
+                        free_in_energy = np.searchsorted(problem.energy_dofs, problem.p_dofs)
+                        m_cross_h = md[free_in_energy] * stepper._inv_sqrt_mp
+                        k_cross_h = kd[free_in_energy] * stepper._inv_sqrt_mp
+                        if np.any(m_cross_h != 0.0):
+                            self._m_cross = backend.from_host(m_cross_h)
+                            if not backend.all_finite(self._m_cross):
+                                self._energy_ready = False
+                        if self._energy_ready and np.any(k_cross_h != 0.0):
+                            self._k_cross = backend.from_host(k_cross_h)
+                            if not backend.all_finite(self._k_cross):
+                                self._energy_ready = False
+
+            energy_cols = 2 if (sampler._has_energy and self._energy_ready) else 0
+            sample_bytes = max(1, (self._n_sensor_rows + energy_cols) * backend.dtype.itemsize)
+            chunk_rows = int(min(max(1, n_samples - 1), max(1, chunk_bytes // sample_bytes)))
+            self._ring = backend.zeros((chunk_rows, self._n_sensor_rows))
+            if energy_cols:
+                self._energy_ring = backend.zeros((chunk_rows, 2))
+                if self._has_prescribed and (self._m_dd != 0.0 or self._k_dd != 0.0):
+                    self._energy_dd = np.zeros((chunk_rows, 2), dtype=np.float64)
+
+    @property
+    def ready(self) -> bool:
+        return self._energy_ready
+
+    def record(self, t: float, boundary_integral: float) -> None:
+        backend = self._backend
+        xp = backend.xp
+        dt_scalar = backend.dtype.type
+        g_val = (
+            float(self._cfg["source_amplitude"] * acoustic_waveform(t, self._cfg)[0])
+            if self._has_prescribed
+            else 0.0
+        )
+        with backend.context():
+            if self._sensor_op.nnz > 0:
+                sample = backend.spmv(self._sensor_op, self._state)
+            else:
+                sample = backend.zeros(self._n_sensor_rows)
+            if self._s_prescribed is not None and g_val != 0.0:
+                backend.add_scaled(sample, g_val, self._s_prescribed, self._sensor_scratch)
+            self._ring[self._pending] = sample
+
+            if self._energy_ring is not None:
+                if self._mp_op is not None:
+                    p_dev = self._p_state
+                    i_dev = self._i_state
+                    ep = dt_scalar(0.5) * xp.dot(p_dev, backend.spmv(self._mp_op, p_dev))
+                    ek = dt_scalar(0.5) * xp.dot(i_dev, backend.spmv(self._kp_op, i_dev))
+                    if self._m_cross is not None and g_val != 0.0:
+                        ep = ep + dt_scalar(g_val) * xp.dot(self._m_cross, p_dev)
+                    if self._k_cross is not None and boundary_integral != 0.0:
+                        ek = ek + dt_scalar(boundary_integral) * xp.dot(self._k_cross, i_dev)
+                    self._energy_ring[self._pending, 0] = ep
+                    self._energy_ring[self._pending, 1] = ek
+                else:
+                    self._energy_ring[self._pending, 0] = dt_scalar(0.0)
+                    self._energy_ring[self._pending, 1] = dt_scalar(0.0)
+                if self._energy_dd is not None:
+                    self._energy_dd[self._pending, 0] = 0.5 * g_val * g_val * self._m_dd
+                    self._energy_dd[self._pending, 1] = (
+                        0.5 * boundary_integral * boundary_integral * self._k_dd
+                    )
+        self._pending += 1
+        self._row += 1
+        if self._pending == self._ring.shape[0]:
+            self.flush()
+
+    def flush(self) -> None:
+        if not self._pending:
+            return
+        count = self._pending
+        first = self._row - count + 1
+        with self._backend.context():
+            values = self._backend.to_host(self._ring[:count])
+            energy = (
+                self._backend.to_host(self._energy_ring[:count])
+                if self._energy_ring is not None
+                else None
+            )
+        if self._ncomp == 1:
+            self._local[0][first : self._row + 1] = values
+        else:
+            self._local[0][first : self._row + 1] = values[:, 0::2]
+            self._local[1][first : self._row + 1] = values[:, 1::2]
+        if energy is not None:
+            out = energy.astype(np.float64, copy=False)
+            if self._energy_dd is not None:
+                out = out + self._energy_dd[:count]
+            self._fluid_energy[first : self._row + 1] = out
+        self._pending = 0
 
 
 @dataclass
@@ -861,7 +1108,7 @@ def solve_acoustic(
     from wavesimfem.materials import implicit_time_step, sampled_time_grid
     from wavesimfem.reporting import log
     from wavesimfem.solvers import _progress, _resolve_device
-    from wavesimfem.storage import HistoryStore, all_finite_history
+    from wavesimfem.storage import HISTORY_CHUNK_BYTES, HistoryStore, all_finite_history
 
     cfg, summary, comm = problem.cfg, problem.summary, problem.domain.comm
     solver_type = solver_type or cfg["solver_type"]
@@ -917,7 +1164,7 @@ def solve_acoustic(
         times = np.arange(steps // stride + 1) * (stride * dt)
         histories = history_store or stack.enter_context(HistoryStore())
         local = [histories.zeros((len(times), len(problem.probes.indices))) for _ in range(ncomp)]
-        initial = sampler.update(stepper, 0.0, 0.0)
+        initial = sampler.update(stepper, 0.0, 0.0, need_vtx=bool(cfg["write_vtx"]))
         fluid_energy = np.zeros((len(times), 2))
         fluid_energy[0] = sampler.fluid_energy()
         for j, h in enumerate(local):
@@ -926,6 +1173,10 @@ def solve_acoustic(
         if cfg["write_vtx"]:
             from dolfinx.io import VTXWriter
 
+            out_dir = cfg.get("output_dir") or f"results_wavesim_{solver_type}"
+            if comm.rank == 0:
+                os.makedirs(out_dir, exist_ok=True)
+            comm.Barrier()
             # Distinct files prevent differing element value shapes being conflated.
             fields = (
                 [(sampler.pressure, "acoustic_pressure.bp")]
@@ -935,12 +1186,29 @@ def solve_acoustic(
             if problem.operators.Ms.getSize()[0]:
                 fields.append((sampler.displacement, "solid_displacement.bp"))
             for function, filename in fields:
-                writer = VTXWriter(
-                    comm, os.path.join(cfg["output_dir"], filename), [function], engine="BP4"
-                )
+                writer = VTXWriter(comm, os.path.join(out_dir, filename), [function], engine="BP4")
                 stack.callback(writer.close)
                 writer.write(0.0)
                 writers.append(writer)
+        recorder: _DeviceAcousticRecorder | None = None
+        if (
+            array_path
+            and not writers
+            and problem.observable in ("pressure", "displacement", "velocity")
+            and len(problem.probes.indices) > 0
+        ):
+            candidate = _DeviceAcousticRecorder(
+                problem,
+                stepper,
+                sampler,
+                local,
+                fluid_energy,
+                len(times),
+                HISTORY_CHUNK_BYTES,
+            )
+            if candidate.ready:
+                recorder = candidate
+
         if comm.rank == 0:
             log(
                 f"  Active DOFs: {problem.operators.Ms.getSize()[0]} solid, {problem.operators.Mp.getSize()[0]} pressure"
@@ -956,6 +1224,7 @@ def solve_acoustic(
         loop_start = time.perf_counter()
         boundary_integral = 0.0
         save_stride = max(1, steps // cfg["target_snapshots"])
+        report_every = max(1, steps // 10)
         for i in range(steps):
             t = i * dt
             stepper.step(t, dt)
@@ -980,9 +1249,18 @@ def solve_acoustic(
                         * (acoustic_waveform(t, cfg)[0] + acoustic_waveform(t + dt, cfg)[0])
                     )
             record = (i + 1) % stride == 0
-            snapshot = writers and ((i + 1) % save_stride == 0 or i + 1 == steps)
-            if record or snapshot:
-                values = sampler.update(stepper, (i + 1) * dt, boundary_integral)
+            snapshot = bool(writers and ((i + 1) % save_stride == 0 or i + 1 == steps))
+            if recorder is not None and record and not snapshot:
+                recorder.record((i + 1) * dt, boundary_integral)
+            elif record or snapshot:
+                values = sampler.update(
+                    stepper,
+                    (i + 1) * dt,
+                    boundary_integral,
+                    need_sensors=record,
+                    need_energy=record,
+                    need_vtx=snapshot,
+                )
                 if record:
                     fluid_energy[(i + 1) // stride] = sampler.fluid_energy()
                     for j, h in enumerate(local):
@@ -990,17 +1268,19 @@ def solve_acoustic(
                 if snapshot:
                     for writer in writers:
                         writer.write((i + 1) * dt)
-            if (i + 1) % max(1, steps // 10) == 0:
-                local_bad = not all(
-                    np.isfinite(v.array_r).all()
-                    for v in (stepper.u, stepper.p, stepper.v, stepper.pdot)
-                )
+            if (i + 1) % report_every == 0 or i + 1 == steps:
+                local_bad = not stepper.all_finite()
                 if comm.allreduce(local_bad, op=MPI.LOR):
                     raise FloatingPointError(f"Non-finite coupled acoustic state at step {i + 1}")
-                if comm.rank == 0:
+                if comm.rank == 0 and (i + 1) % report_every == 0:
                     _progress(i + 1, steps, loop_start)
+        if recorder is not None:
+            recorder.flush()
         elapsed = time.perf_counter() - loop_start
-        if comm.allreduce(not all(all_finite_history(h) for h in local), op=MPI.LOR):
+        if comm.allreduce(
+            not all(all_finite_history(h) for h in local) or not np.isfinite(fluid_energy).all(),
+            op=MPI.LOR,
+        ):
             raise FloatingPointError("Non-finite acoustic sensor histories")
         keys = {
             "pressure": ("sensor_data_pressure",),
@@ -1008,10 +1288,12 @@ def solve_acoustic(
             "velocity": ("sensor_data_vx", "sensor_data_vy"),
             "particle_velocity": ("sensor_data_vx", "sensor_data_vy"),
         }[problem.observable]
-        runtime = {
+        engine = stepper.device_info.backend if array_path else "petsc"
+        runtime: dict[str, Any] = {
             "sample_stride": stride,
             "integrator": "RK4" if solver_type == "explicit" else "Newmark",
-            "backend": stepper.device_info.backend if array_path else "petsc",
+            "engine": engine,
+            "backend": engine,
             "device": stepper.device_info.device if array_path else "cpu",
             "precision": cfg["precision"] if array_path else "double",
             "dt_limit": dt_limit,
@@ -1021,6 +1303,8 @@ def solve_acoustic(
             "solid_dofs": problem.operators.Ms.getSize()[0],
             "pressure_dofs": problem.operators.Mp.getSize()[0],
         }
+        if solver_type == "implicit":
+            runtime["linear_solver"] = stepper.linear_solver_description
         return AcousticSolveResult(
             times,
             dict(zip(keys, local, strict=True)),

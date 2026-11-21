@@ -7,8 +7,10 @@ energy-normalised modal amplitudes. Unresolved content remains in the residual.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import yaml
@@ -19,21 +21,15 @@ from wavesimfem.materials import a0_wavenumber, compute_rayleigh_speed, structur
 from wavesimfem.storage import atomic_output
 
 
-def s0_wavenumber(frequency, thickness, c_l, c_t):
-    """Largest real symmetric Rayleigh–Lamb root (fundamental S0 branch).
-
-    The pole-free symmetric determinant is divided by q to remove its spurious
-    q=0 zero. Half-thickness-scaled variables reduce dimensional conditioning.
-    """
-    if not all(np.isfinite(v) and v > 0 for v in (frequency, thickness, c_l, c_t)) or c_l <= c_t:
-        raise ValueError("S0 requires positive inputs and c_L > c_T")
+@lru_cache(maxsize=256)
+def _cached_s0_wavenumber(frequency: float, thickness: float, c_l: float, c_t: float) -> float:
     s = np.pi * frequency * thickness / c_t
     if s < 1e-4:
-        return 2 * np.pi * frequency / (2 * c_t * np.sqrt(1 - (c_t / c_l) ** 2))
+        return float(2 * np.pi * frequency / (2 * c_t * np.sqrt(1 - (c_t / c_l) ** 2)))
     if s > 30:
-        return 2 * np.pi * frequency / compute_rayleigh_speed(c_t, c_L=c_l)
+        return float(2 * np.pi * frequency / compute_rayleigh_speed(c_t, c_L=c_l))
 
-    def determinant(x):
+    def determinant(x: float | np.ndarray) -> np.ndarray:
         p = np.sqrt((s * c_t / c_l) ** 2 - np.asarray(x) ** 2 + 0j)
         q = np.sqrt(s * s - np.asarray(x) ** 2 + 0j)
         return np.real(
@@ -43,14 +39,38 @@ def s0_wavenumber(frequency, thickness, c_l, c_t):
 
     grid = np.linspace(0, 1.05 * s * c_t / compute_rayleigh_speed(c_t, c_L=c_l), 2049)
     values = determinant(grid)
+    zeros = np.flatnonzero(values == 0.0)
+    zeros = zeros[zeros > 0]
     crossings = np.flatnonzero(values[:-1] * values[1:] < 0)
+    if len(zeros) and (not len(crossings) or zeros[-1] > crossings[-1]):
+        return float(grid[zeros[-1]] / (thickness / 2))
     if not len(crossings):
         raise ValueError(f"Unable to bracket S0 at {frequency:g} Hz")
     i = crossings[-1]
-    return brentq(determinant, grid[i], grid[i + 1], xtol=1e-12) / (thickness / 2)
+    return float(brentq(determinant, grid[i], grid[i + 1], xtol=1e-12) / (thickness / 2))
 
 
-def separate_fundamentals(times, positions, signal, thickness, c_l, c_t, band, width_bins=2.0):
+def s0_wavenumber(frequency: float, thickness: float, c_l: float, c_t: float) -> float:
+    """Largest real symmetric Rayleigh–Lamb root (fundamental S0 branch).
+
+    The pole-free symmetric determinant is divided by q to remove its spurious
+    q=0 zero. Half-thickness-scaled variables reduce dimensional conditioning.
+    """
+    if not all(np.isfinite(v) and v > 0 for v in (frequency, thickness, c_l, c_t)) or c_l <= c_t:
+        raise ValueError("S0 requires positive inputs and c_L > c_T")
+    return _cached_s0_wavenumber(float(frequency), float(thickness), float(c_l), float(c_t))
+
+
+def separate_fundamentals(
+    times: np.ndarray,
+    positions: np.ndarray,
+    signal: np.ndarray,
+    thickness: float,
+    c_l: float,
+    c_t: float,
+    band: Sequence[float],
+    width_bins: float = 2.0,
+) -> dict[str, Any]:
     """Split a tapered array into A0, S0, and residual with an exact sum identity.
 
     Symmetric masks retain both propagation directions. Rows where A0/S0 mask
@@ -125,7 +145,7 @@ def separate_fundamentals(times, positions, signal, thickness, c_l, c_t, band, w
     )
 
 
-def _frequency_intervals(frequency, selected):
+def _frequency_intervals(frequency: np.ndarray, selected: np.ndarray) -> list[list[float]]:
     """Contiguous intervals of retained FFT-bin centres (not interpolated edges)."""
     indices = np.flatnonzero(selected)
     if not len(indices):
@@ -134,7 +154,9 @@ def _frequency_intervals(frequency, selected):
     return [[float(frequency[g[0]]), float(frequency[g[-1]])] for g in groups]
 
 
-def _component_diagnostics(tapered, a0, s0, residual):
+def _component_diagnostics(
+    tapered: np.ndarray, a0: np.ndarray, s0: np.ndarray, residual: np.ndarray
+) -> dict[str, Any]:
     # RMS ratios are intentionally not called modal fractions: smooth spectral
     # masks are not orthogonal and squared displacements are not elastic energy.
     peak = float(np.max(np.abs(tapered)))
@@ -155,7 +177,12 @@ def _component_diagnostics(tapered, a0, s0, residual):
     }
 
 
-def _lamb_diagnostics(result, horizontal, band, archive_path):
+def _lamb_diagnostics(
+    result: Mapping[str, Any],
+    horizontal: Mapping[str, Any],
+    band: Sequence[float],
+    archive_path: str | Path,
+) -> dict[str, Any]:
     """Numerical and sampling context for interpreting approximate modal filters."""
     t, x, curves = result["times"], result["positions"], result["curves"]
     dt, dx = float(t[1] - t[0]), float(x[1] - x[0])
@@ -240,7 +267,9 @@ def _lamb_diagnostics(result, horizontal, band, archive_path):
 LAMB_MIN_RECEIVERS = 8
 
 
-def lamb_eligibility_error(cfg, summary=None):
+def lamb_eligibility_error(
+    cfg: Mapping[str, Any], summary: Mapping[str, Any] | None = None
+) -> str | None:
     """Reason a configuration cannot produce a Lamb report, or ``None`` if it can.
 
     Shared by configuration validation (before any solve) and the report itself.
@@ -263,7 +292,13 @@ def lamb_eligibility_error(cfg, summary=None):
     return None
 
 
-def write_lamb_report(archive_path, output_dir=None, *, formats=("png", "pdf"), usetex=False):
+def write_lamb_report(
+    archive_path: str | Path,
+    output_dir: str | Path | None = None,
+    *,
+    formats: Sequence[str] = ("png", "pdf"),
+    usetex: bool | str = False,
+) -> dict[str, Any]:
     """Report modal-filter resolvability, displacement contributions and reconstruction.
 
     Physical A0/S0 mode identification requires a free, uniform isotropic plate.
@@ -271,7 +306,14 @@ def write_lamb_report(archive_path, output_dir=None, *, formats=("png", "pdf"), 
     """
     import matplotlib
 
-    from wavesimfem.analysis import _PLOT_LOCK, _figure, _label, _rc, _save, resolve_usetex
+    from wavesimfem.analysis import (
+        _PLOT_LOCK,
+        _figure,
+        _label,
+        _rc,
+        _save,
+        resolve_usetex,
+    )
     from wavesimfem.structure_analysis import _configuration, _scalar
     from wavesimfem.units import (
         displacement_unit,
@@ -318,18 +360,21 @@ def write_lamb_report(archive_path, output_dir=None, *, formats=("png", "pdf"), 
         max_f = parse_quantity(raw_max, "frequency") if raw_max is not None else None
         if (not min_f or not max_f) and (f_center is None or f_center <= 0):
             raise ValueError("Lamb report requires finite positive f_center or explicit band")
+        upper = max_f or 3 * f_center
         band = [
-            min_f or f_center / 5,
-            max_f or 3 * f_center,
+            min_f or min(f_center / 5, 0.5 * upper),
+            upper,
         ]
         t, x = data["times"], data["sensor_x"]
+        c_l = float(data["c_L"]) if "c_L" in data else float(regions[0]["c_L"])
+        c_t = float(data["c_T"]) if "c_T" in data else float(regions[0]["c_T"])
         result = separate_fundamentals(
             t,
             x,
             data["sensor_data_y"],
             regions[0]["thickness"],
-            float(data["c_L"]),
-            float(data["c_T"]),
+            c_l,
+            c_t,
             band,
         )
         ux = np.asarray(data["sensor_data_x"], dtype=float)
@@ -339,7 +384,7 @@ def write_lamb_report(archive_path, output_dir=None, *, formats=("png", "pdf"), 
         sx = np.fft.fft2(ux)
         horizontal = {name: np.fft.ifft2(sx * mask).real for name, mask in result["masks"].items()}
         horizontal.update(tapered=ux, residual=ux - horizontal["A0"] - horizontal["S0"])
-        offset = x - float(data["source_x"])
+        offset = x - (float(data["source_x"]) if "source_x" in data else 0.0)
     destination = Path(output_dir or Path(archive_path).parent) / "lamb_modes"
     destination.mkdir(parents=True, exist_ok=True)
     diagnostics = _lamb_diagnostics(result, horizontal, band, archive_path)
@@ -354,7 +399,8 @@ def write_lamb_report(archive_path, output_dir=None, *, formats=("png", "pdf"), 
     uu = displacement_unit(np.max(np.abs(result["tapered"])))
     ink, muted, blue, orange = "#233044", "#667085", "#167D9A", "#D97732"
     paths = []
-    with _PLOT_LOCK, matplotlib.rc_context(_rc(resolve_usetex(usetex))):
+    tex = resolve_usetex(usetex)
+    with _PLOT_LOCK, matplotlib.rc_context(_rc(tex)):
         # Resolve the physical interpretation before showing separated waveforms.
         fig = _figure(145, layout="constrained")
         fig.get_layout_engine().set(w_pad=0.035, h_pad=0.035, wspace=0.02, hspace=0.035)
@@ -526,12 +572,16 @@ def write_lamb_report(archive_path, output_dir=None, *, formats=("png", "pdf"), 
     diagnostics["figures"] = paths
     with atomic_output(destination / "diagnostics.json") as stream:
         json.dump(diagnostics, stream, indent=2, allow_nan=False)
-    _write_readme(destination, diagnostics)
+    _write_readme(destination, diagnostics, usetex=tex)
     return diagnostics
 
 
-def _write_readme(destination, diagnostics):
+def _write_readme(
+    destination: Path, diagnostics: Mapping[str, Any], *, usetex: bool = False
+) -> None:
     """Keep interpretation and provenance beside the publication figures."""
+    from wavesimfem.analysis import _typography_note
+
     component = diagnostics["components"]["y"]
     intervals = diagnostics["usable_frequency_intervals_hz"]
     interval_text = ", ".join(f"{a:.6g}–{b:.6g} Hz" for a, b in intervals) or "None"
@@ -544,7 +594,7 @@ Data provenance: {diagnostics["data_provenance"]}.
 
 ## Figures
 
-All exports are 190 mm wide with 10 pt LaTeX typography. Figure captions and interpretation belong here; the figures contain only data panels, panel titles, labels and legends.
+All exports are 190 mm wide with {_typography_note(usetex)} typography. Figure captions and interpretation belong here; the figures contain only data panels, panel titles, labels and legends.
 
 - **modal_resolution**: (a) signed frequency–wavenumber power spectrum with free-plate Rayleigh–Lamb fundamental branches; (b) separation and spatial Nyquist margins. Both margins must exceed one for geometric resolution. Positive displayed wavenumber denotes travel toward increasing receiver x. Power is squared vertical-displacement Fourier magnitude relative to the peak within the displayed frequency band, shown over a 60 dB range; it is not mechanical energy.
 - **modal_separation**: tapered vertical-displacement input, approximate A0 and S0 contributions, and the unassigned residual. All four panels share the same colour scale, clipped at the input's 99th absolute percentile. Values beyond the display limits saturate at the endpoint colours; the colour bar has flat ends. No-signal and unresolved cases are recorded below rather than annotated over the data.

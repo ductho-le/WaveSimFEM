@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
+
 import numpy as np
 from matplotlib.collections import LineCollection
 from matplotlib.colors import Normalize
+from matplotlib.figure import Figure
 from scipy.signal import spectrogram
 
 from wavesimfem.analysis import (
@@ -18,7 +23,13 @@ from wavesimfem.analysis import (
 from wavesimfem.units import frequency_unit, length_unit, observable_unit, time_unit
 
 
-def render_characterisation(report, arrays, destination, formats, dpi=300):
+def render_characterisation(
+    report: dict[str, Any],
+    arrays: tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray],
+    destination: Path,
+    formats: Sequence[str],
+    dpi: int = 300,
+) -> list[str]:
     """Render four 190 mm panel figures under the caller's typography lock."""
     t, x, ux, uy, envelope = arrays
     component = report["options"]["component"]
@@ -35,10 +46,10 @@ def render_characterisation(report, arrays, destination, formats, dpi=300):
     td, xd = tu(t), xu(x)
     selected = np.unique(np.linspace(0, len(x) - 1, min(4, len(x)), dtype=int))
     velocity, attenuation = summary["velocity"], summary["apparent_attenuation"]
-    paths = []
+    paths: list[str] = []
     band = report["options"]["frequency_band"]
 
-    def finish(fig, name):
+    def finish(fig: Figure, name: str) -> None:
         paths.extend(_save(fig, str(destination / name), formats, dpi))
 
     fig = _figure(150)

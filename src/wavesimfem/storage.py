@@ -88,19 +88,25 @@ class HistoryStore:
     def __enter__(self) -> HistoryStore:
         return self
 
+    def close(self) -> None:
+        """Close all memory maps and remove the temporary scratch directory."""
+        try:
+            for array in self._maps:
+                # Closing the mapping also releases its file descriptor. No durable
+                # flush is needed: these are scratch files and the archive is saved.
+                # Contract: callers must not use these arrays (or views of them)
+                # after exit; copy anything that has to outlive the store.
+                mapping = getattr(array, "_mmap", None)
+                if mapping is not None:
+                    mapping.close()
+        finally:
+            self._maps.clear()
+            if self._scratch is not None:
+                self._scratch.cleanup()
+                self._scratch = None
+
     def __exit__(self, *_exc: Any) -> None:
-        for array in self._maps:
-            # Closing the mapping also releases its file descriptor. No durable
-            # flush is needed: these are scratch files and the archive is saved.
-            # Contract: callers must not use these arrays (or views of them)
-            # after exit; copy anything that has to outlive the store.
-            mapping = getattr(array, "_mmap", None)
-            if mapping is not None:
-                mapping.close()
-        self._maps.clear()
-        if self._scratch is not None:
-            self._scratch.cleanup()
-            self._scratch = None
+        self.close()
 
     def zeros(self, shape: tuple[int, int], dtype: Any = np.float64) -> np.ndarray:
         if self._scratch is None or 0 in shape:

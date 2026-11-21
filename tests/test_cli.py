@@ -251,3 +251,51 @@ def test_cli_no_usetex_overrides_config(tmp_path):
         ]
     )
     assert (destination / "full_analysis.png").exists()
+
+
+def test_cli_pressure_postprocess_with_omitted_component(tmp_path):
+    import json
+
+    t = np.arange(256) * 1e-7
+    x = np.arange(16) * 0.001
+    sig = np.sin(2 * np.pi * 5e5 * t[:, None] - 1000 * x[None, :])
+    archive = tmp_path / "pressure.npz"
+    np.savez(
+        archive,
+        times=t,
+        sensor_x=x,
+        sensor_data_pressure=sig,
+        sensor_observable="pressure",
+        sensor_units="Pa",
+        f_center=5e5,
+        c_L=1500.0,
+    )
+    config = tmp_path / "pressure_analysis.yaml"
+    config.write_text(
+        "postprocess:\n  wave_characterisation:\n    enabled: true\n"
+        "output:\n  figure_formats: [png]\n  usetex: false\n",
+        encoding="utf-8",
+    )
+    destination = tmp_path / "out"
+    main(["-c", str(config), "--postprocess", str(archive), "--output", str(destination)])
+    report = json.loads((destination / "characterisation/metrics.json").read_text())
+    assert report["options"]["component"] == "pressure"
+
+
+def test_cli_postprocess_missing_required_key_exits_cleanly(tmp_path, capsys):
+    bad = tmp_path / "bad.npz"
+    np.savez(bad, times=np.arange(32) * 1e-7)
+    with pytest.raises(SystemExit) as exc_info:
+        main(["--postprocess", str(bad)])
+    assert exc_info.value.code == 2
+    assert "missing required key" in capsys.readouterr().err
+
+
+def test_cli_rejects_postprocess_with_config_and_dry_run(tmp_path, capsys):
+    archive = _write_archive(tmp_path / "sensor_data.npz")
+    config = tmp_path / "post.yaml"
+    config.write_text("mesh:\n  max_frequency: '20 MHz'\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as exc_info:
+        main(["-c", str(config), "--postprocess", str(archive), "--dry-run"])
+    assert exc_info.value.code == 2
+    assert "--postprocess and --dry-run cannot be used together" in capsys.readouterr().err

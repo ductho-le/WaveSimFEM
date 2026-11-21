@@ -633,3 +633,87 @@ def test_sensor_placement_and_observable_compatibility_checked_at_config_time():
     two_fluids.setdefault("sensors", {}).update(sensor_y=1e-3, observable="particle_velocity")
     with pytest.raises(ValueError, match=r"requires sensors\.region"):
         parse_and_resolve_config(custom_cfg=two_fluids)
+
+
+def test_yaml_mesh_frequency_unit_strings_and_cli_override(tmp_path):
+    from types import SimpleNamespace
+
+    cfg = _base()
+    cfg["mesh"]["min_frequency"] = "200 kHz"
+    cfg["mesh"]["max_frequency"] = "2 MHz"
+    resolved = parse_and_resolve_config(custom_cfg=cfg)
+    assert resolved["min_frequency"] == pytest.approx(2e5)
+    assert resolved["max_frequency"] == pytest.approx(2e6)
+
+    args = SimpleNamespace(
+        solver=None,
+        structure_mode=None,
+        output=None,
+        f_min=None,
+        f_max=None,
+        k_min=None,
+        k_max=None,
+        min_frequency=None,
+        max_frequency=1.5e5,
+        duration=None,
+        dt=None,
+        cfl=None,
+        device=None,
+        precision=None,
+        usetex=None,
+        no_postprocess=False,
+    )
+    overridden = parse_and_resolve_config(args=args, custom_cfg=cfg)
+    assert overridden["max_frequency"] == pytest.approx(1.5e5)
+    assert overridden["min_frequency"] is None
+
+    bad = _base()
+    bad["mesh"]["max_frequency"] = "2 mm"
+    with pytest.raises(ValueError, match=r"mesh\.max_frequency"):
+        parse_and_resolve_config(custom_cfg=bad)
+
+
+def test_materials_reject_booleans_strings_and_allow_null_absorb_depth():
+    from wavesimfem.materials import structure_from_config
+
+    for key, val in (("rho", True), ("E", False), ("nu", True)):
+        bad_iso = _base()
+        bad_iso["structure"]["single_layer"] = dict(ALUMINUM, **{key: val})
+        with pytest.raises(ValueError, match="must be a number"):
+            structure_from_config(flatten_config(bad_iso))
+
+    bad_voigt = _base()
+    bad_voigt["structure"]["single_layer"] = {
+        "name": "BadAniso",
+        "thickness": 1e-3,
+        "material_model": "anisotropic",
+        "rho": 1600.0,
+        "C": "900909",
+    }
+    with pytest.raises(ValueError, match=r"six (?:finite )?numbers"):
+        structure_from_config(flatten_config(bad_voigt))
+
+    bad_voigt["structure"]["single_layer"]["C"] = [1e10, True, 0.0, 1e10, 0.0, 1e10]
+    with pytest.raises(ValueError, match="six finite numbers"):
+        structure_from_config(flatten_config(bad_voigt))
+
+    hs = _base()
+    hs["structure"] = {
+        "mode": "halfspace",
+        "halfspace": {
+            "name": "Steel",
+            "thickness": 0.01,
+            "absorb_depth": None,
+            "material_model": "isotropic",
+            "rho": 7850.0,
+            "E": 210e9,
+            "nu": 0.29,
+        },
+    }
+    hs["mesh"]["ny_per_region"] = [10]
+    summary = structure_from_config(flatten_config(hs))
+    assert summary["bottom_halfspace"]["absorb_depth"] == pytest.approx(0.006)
+
+    hs["structure"]["halfspace"]["absorb_depth"] = True
+    with pytest.raises(ValueError, match="absorb_depth"):
+        structure_from_config(flatten_config(hs))

@@ -41,23 +41,36 @@ class SeparableForcing:
     The spatial vectors are fixed PETSc vectors with the restricted field
     layouts; ``None`` marks an identically zero block. ``coefficients(t)``
     returns one scalar per term. Calling the object has the generic
-    :data:`Forcing` signature, so every PETSc integrator accepts it unchanged.
-    :class:`CoupledArrayRK4` instead uploads the vectors once and forms each
-    stage load on its device from the scalar coefficients alone.
+    :data:`Forcing` signature (retaining consistent-mass boundary lifting), so
+    every consistent-mass PETSc integrator accepts it unchanged.
+    ``lumped_pressure`` optionally overrides ``pressure`` for lumped-mass
+    explicit RK4 integrators, where pre-elimination GLL mass lumping is
+    diagonal and therefore has zero off-diagonal Dirichlet-lifting entries.
     The caller owns the vectors.
     """
 
     solid: tuple[Any | None, ...]
     pressure: tuple[Any | None, ...]
     coefficients: Callable[[float], Sequence[float]]
+    lumped_pressure: tuple[Any | None, ...] | None = None
 
     def __post_init__(self) -> None:
         if len(self.solid) != len(self.pressure):
             raise ValueError("SeparableForcing needs one solid and one pressure entry per term")
+        if self.lumped_pressure is not None and len(self.lumped_pressure) != len(self.pressure):
+            raise ValueError("SeparableForcing lumped_pressure must match pressure term count")
 
-    def __call__(self, t: float, fs: Any, fp: Any) -> None:
+    def effective_pressure(self, *, lumped: bool = False) -> tuple[Any | None, ...]:
+        if lumped and self.lumped_pressure is not None:
+            return self.lumped_pressure
+        return self.pressure
+
+    def evaluate(self, t: float, fs: Any, fp: Any, *, lumped: bool = False) -> None:
         for coefficient, solid, pressure in zip(
-            self.coefficients(t), self.solid, self.pressure, strict=True
+            self.coefficients(t),
+            self.solid,
+            self.effective_pressure(lumped=lumped),
+            strict=True,
         ):
             if coefficient == 0.0:
                 continue
@@ -65,6 +78,9 @@ class SeparableForcing:
                 fs.axpy(float(coefficient), solid)
             if pressure is not None:
                 fp.axpy(float(coefficient), pressure)
+
+    def __call__(self, t: float, fs: Any, fp: Any) -> None:
+        self.evaluate(t, fs, fp, lumped=False)
 
 
 @dataclass(frozen=True)
@@ -75,6 +91,8 @@ class AcousticOperators:
     A pure solid analogously has zero-sized fluid matrices. ``Ms``, ``Mp``
     are positive mass matrices, and stiffness/damping are symmetric positive
     semidefinite. No artificial interface mass belongs in either field mass.
+    ``lumped_mp`` optionally stores pre-elimination fluid row-sum masses on the
+    free pressure layout so explicit GLL lumping precedes Dirichlet elimination.
     """
 
     Ms: Any
@@ -84,6 +102,7 @@ class AcousticOperators:
     Kp: Any
     Dp: Any | None
     C: Any
+    lumped_mp: Any | None = None
 
     def __post_init__(self) -> None:
         ns, np_ = self.Ms.getSize()[0], self.Mp.getSize()[0]
@@ -99,8 +118,22 @@ class AcousticOperators:
                 raise ValueError(f"Acoustic matrix {name} has an incompatible shape")
         if self.C.getSize() != (ns, np_):
             raise ValueError("C must have solid rows and pressure columns")
+        if self.lumped_mp is not None and (
+            self.lumped_mp.getSize() != np_
+            or self.lumped_mp.getOwnershipRange() != self.Mp.getOwnershipRange()
+        ):
+            raise ValueError("Acoustic lumped_mp must match Mp row distribution")
         if ns + np_ == 0:
             raise ValueError("The acoustic system has no active unknowns")
+
+
+def _check_positive_mass(mass: np.ndarray, comm: Any) -> np.ndarray:
+    from mpi4py import MPI
+
+    bad = bool(np.any(~np.isfinite(mass) | (mass <= 0)))
+    if comm.tompi4py().allreduce(bad, op=MPI.LOR):
+        raise ValueError("Acoustic field mass lumping produced non-positive entries")
+    return mass
 
 
 def _mass_lump(matrix: Any) -> np.ndarray:
@@ -110,16 +143,18 @@ def _mass_lump(matrix: Any) -> np.ndarray:
     try:
         ones.set(1.0)
         matrix.mult(ones, lumped)
-        mass = lumped.array_r.copy()
-        from mpi4py import MPI
-
-        bad = bool(np.any(~np.isfinite(mass) | (mass <= 0)))
-        if matrix.comm.tompi4py().allreduce(bad, op=MPI.LOR):
-            raise ValueError("Acoustic field mass lumping produced non-positive entries")
-        return mass
+        return _check_positive_mass(lumped.array_r.copy(), matrix.comm)
     finally:
         ones.destroy()
         lumped.destroy()
+
+
+def _pressure_lumped_mass(ops: AcousticOperators) -> np.ndarray:
+    if ops.lumped_mp is None:
+        return _mass_lump(ops.Mp)
+    if ops.Mp.getSize()[0] == 0:
+        return np.empty(0, dtype=float)
+    return _check_positive_mass(ops.lumped_mp.array_r.copy(), ops.Mp.comm)
 
 
 def coupled_rk4_bounds(ops: AcousticOperators) -> dict[str, float]:
@@ -137,7 +172,7 @@ def coupled_rk4_bounds(ops: AcousticOperators) -> dict[str, float]:
     norm bound is taken; raw pressure/displacement row sums mix physical units
     and do not provide this certificate. No dense eigenproblem is assembled.
     """
-    ms, mp = _mass_lump(ops.Ms), _mass_lump(ops.Mp)
+    ms, mp = _mass_lump(ops.Ms), _pressure_lumped_mass(ops)
 
     def bound(matrix: Any, mass: np.ndarray) -> float:
         return 0.0 if matrix is None or matrix.getSize()[0] == 0 else operator_bound(matrix, mass)
@@ -219,7 +254,7 @@ def _linear_solver(matrix: Any, *, mass: bool = False) -> Any:
     solver.setOperators(matrix)
     solver.setType(PETSc.KSP.Type.CG)
     solver.getPC().setType(PETSc.PC.Type.JACOBI if mass else PETSc.PC.Type.BJACOBI)
-    solver.setTolerances(rtol=1e-12, atol=1e-14, max_it=2000)
+    solver.setTolerances(rtol=1e-12, atol=0.0, max_it=2000)
     if not mass:
         pc = solver.getPC()
         pc.setUp()
@@ -253,12 +288,17 @@ class _ScaledMassSolver:
     """Normalize a field mass before factoring it, including very small SI entries."""
 
     def __init__(self, mass: Any) -> None:
-        self.scale = _inverse_sqrt_diagonal(mass)
-        self.matrix = mass.copy()
-        self.matrix.diagonalScale(self.scale, self.scale)
-        self.solver = _linear_solver(self.matrix, mass=True)
-        self.rhs = mass.createVecLeft()
-        self.solution = mass.createVecRight()
+        self.scale = self.matrix = self.solver = self.rhs = self.solution = None
+        try:
+            self.scale = _inverse_sqrt_diagonal(mass)
+            self.matrix = mass.copy()
+            self.matrix.diagonalScale(self.scale, self.scale)
+            self.solver = _linear_solver(self.matrix, mass=True)
+            self.rhs = mass.createVecLeft()
+            self.solution = mass.createVecRight()
+        except BaseException:
+            self.destroy()
+            raise
 
     def solve(self, rhs: Any, solution: Any) -> None:
         self.rhs.pointwiseMult(rhs, self.scale)
@@ -269,8 +309,11 @@ class _ScaledMassSolver:
         return self.solver.getConvergedReason()
 
     def destroy(self) -> None:
-        for obj in (self.solver, self.matrix, self.rhs, self.solution, self.scale):
-            obj.destroy()
+        for name in ("solver", "matrix", "rhs", "solution", "scale"):
+            obj = getattr(self, name, None)
+            if obj is not None:
+                obj.destroy()
+                setattr(self, name, None)
 
 
 class _CoupledState:
@@ -340,10 +383,14 @@ class _CoupledState:
         self._objects.append(result)
         return result
 
+    _lumped_mass = False
+
     def _forces(self, t: float) -> None:
         self._fs.set(0.0)
         self._fp.set(0.0)
-        if self.forcing is not None:
+        if isinstance(self.forcing, SeparableForcing):
+            self.forcing.evaluate(float(t), self._fs, self._fp, lumped=self._lumped_mass)
+        elif self.forcing is not None:
             self.forcing(float(t), self._fs, self._fp)
 
     def _residuals(self, u: Any, v: Any, p: Any, pdot: Any, t: float) -> None:
@@ -371,6 +418,13 @@ class _CoupledState:
         if not np.isfinite(dt) or dt <= 0:
             raise ValueError("Acoustic time step must be finite and positive")
 
+    def all_finite(self) -> bool:
+        """True when all active state and integral entries are finite on this rank."""
+        return all(
+            bool(np.isfinite(vector.array_r).all())
+            for vector in (self.u, self.v, self.p, self.pdot, self.pressure_integral)
+        )
+
     def destroy(self) -> None:
         """Release states/work storage, leaving caller-owned operators intact."""
         for obj in reversed(self._objects):
@@ -395,6 +449,8 @@ class CoupledRK4(_CoupledState):
     vectors (PETSc object states, agreed collectively across ranks).
     """
 
+    _lumped_mass = True
+
     def __init__(
         self,
         ops: AcousticOperators,
@@ -407,7 +463,7 @@ class CoupledRK4(_CoupledState):
         try:
             self._inv_ms, self._inv_mp = self._vector(ops.Ms), self._vector(ops.Mp)
             self._inv_ms.array[:] = 1.0 / _mass_lump(ops.Ms)
-            self._inv_mp.array[:] = 1.0 / _mass_lump(ops.Mp)
+            self._inv_mp.array[:] = 1.0 / _pressure_lumped_mass(ops)
             self.bounds = coupled_rk4_bounds(ops)
             self._state = (self.u, self.v, self.p, self.pdot)
             self._stage = tuple(self._duplicate(v) for v in self._state)
@@ -537,6 +593,7 @@ class CoupledArrayRK4(_CoupledState):
     :class:`CoupledRK4` instead of this serial backend.
     """
 
+    _lumped_mass = True
     u, v, a = _mirror("u"), _mirror("v"), _mirror("a")
     p, pdot, pddot = _mirror("p"), _mirror("pdot"), _mirror("pddot")
     pressure_integral = _mirror("pressure_integral")
@@ -564,74 +621,127 @@ class CoupledArrayRK4(_CoupledState):
         self._mirrors: dict[str, Any] = {}
         self._stale: set[str] = set()
         super().__init__(ops, forcing, initial, "cpu")
-        self.bounds = coupled_rk4_bounds(ops)
-        self._sqrt_ms, self._sqrt_mp = np.sqrt(_mass_lump(ops.Ms)), np.sqrt(_mass_lump(ops.Mp))
-        self._inv_sqrt_ms, self._inv_sqrt_mp = 1.0 / self._sqrt_ms, 1.0 / self._sqrt_mp
+        try:
+            self.bounds = coupled_rk4_bounds(ops)
+            self._sqrt_ms = np.sqrt(_mass_lump(ops.Ms))
+            self._sqrt_mp = np.sqrt(_pressure_lumped_mass(ops))
+            self._inv_sqrt_ms, self._inv_sqrt_mp = 1.0 / self._sqrt_ms, 1.0 / self._sqrt_mp
 
-        def normalized(matrix: Any, left: np.ndarray, right: np.ndarray) -> Any:
-            if matrix is None:
-                return None
-            indptr, indices, values = matrix.getValuesCSR()
-            host = sparse.csr_matrix((values, indices, indptr), shape=matrix.getSize(), copy=True)
-            host.eliminate_zeros()
-            if host.nnz == 0 and matrix in (ops.Ds, ops.Dp):
-                return None
-            host = sparse.diags(left) @ host @ sparse.diags(right)
-            if not np.isfinite(host.data).all():
-                raise ValueError("Mass-normalized acoustic operator contains non-finite values")
-            converted = self.backend.csr(host.tocsr())
-            if not self.backend.all_finite(converted.data):
-                raise ValueError("Acoustic operator exceeds the requested floating-point precision")
-            return converted
-
-        with self.backend.context():
-            self._ks = normalized(ops.Ks, self._inv_sqrt_ms, self._inv_sqrt_ms)
-            self._ds = normalized(ops.Ds, self._inv_sqrt_ms, self._inv_sqrt_ms)
-            self._kp = normalized(ops.Kp, self._inv_sqrt_mp, self._inv_sqrt_mp)
-            self._dp = normalized(ops.Dp, self._inv_sqrt_mp, self._inv_sqrt_mp)
-            self._coupling = normalized(ops.C, self._inv_sqrt_ms, self._inv_sqrt_mp)
-            self._coupling_t = self._coupling.T.tocsr()
-            self._array_state = tuple(
-                self.backend.from_host(vector.array_r * scale)
-                for vector, scale in (
-                    (self.u, self._sqrt_ms),
-                    (self.v, self._sqrt_ms),
-                    (self.p, self._sqrt_mp),
-                    (self.pdot, self._sqrt_mp),
+            def normalized_host(matrix: Any, left: np.ndarray, right: np.ndarray) -> Any:
+                if matrix is None:
+                    return None
+                indptr, indices, values = matrix.getValuesCSR()
+                host = sparse.csr_matrix(
+                    (values, indices, indptr), shape=matrix.getSize(), copy=True
                 )
-            )
-            self._array_stage, self._array_total = (
-                tuple(self.backend.zeros(state.shape) for state in self._array_state)
-                for _ in range(2)
-            )
-            self._array_stage_acceleration = (
-                self.backend.zeros(self._ns),
-                self.backend.zeros(self._np),
-            )
-            self._scratch = (self.backend.zeros(self._ns), self.backend.zeros(self._np))
-            self._array_integral = self.backend.from_host(
-                self.pressure_integral.array_r * self._sqrt_mp
-            )
-            self._array_integral_total = self.backend.zeros(self._np)
-            self._array_a, self._array_pddot = (
-                self.backend.zeros(self._ns),
-                self.backend.zeros(self._np),
-            )
-            self._device_forcing = self._upload_forcing(forcing)
-            self._mirror_sources = {
-                "u": (self._array_state[0], self._inv_sqrt_ms),
-                "v": (self._array_state[1], self._inv_sqrt_ms),
-                "p": (self._array_state[2], self._inv_sqrt_mp),
-                "pdot": (self._array_state[3], self._inv_sqrt_mp),
-                "a": (self._array_a, self._inv_sqrt_ms),
-                "pddot": (self._array_pddot, self._inv_sqrt_mp),
-                "pressure_integral": (self._array_integral, self._inv_sqrt_mp),
-            }
-            self._array_acceleration(*self._array_state, 0.0, self._array_a, self._array_pddot)
-            self._acceleration_time: float | None = 0.0
-        self._stale = set(_MIRRORS)
+                host.eliminate_zeros()
+                if host.nnz == 0 and matrix in (ops.Ds, ops.Dp):
+                    return None
+                host = (sparse.diags(left) @ host @ sparse.diags(right)).tocsr()
+                if not np.isfinite(host.data).all():
+                    raise ValueError("Mass-normalized acoustic operator contains non-finite values")
+                return host
+
+            def upload_csr(host: Any) -> Any:
+                converted = self.backend.csr(host.tocsr())
+                if not self.backend.all_finite(converted.data):
+                    raise ValueError(
+                        "Acoustic operator exceeds the requested floating-point precision"
+                    )
+                return converted
+
+            with self.backend.context():
+                ks_h = normalized_host(ops.Ks, self._inv_sqrt_ms, self._inv_sqrt_ms)
+                ds_h = normalized_host(ops.Ds, self._inv_sqrt_ms, self._inv_sqrt_ms)
+                kp_h = normalized_host(ops.Kp, self._inv_sqrt_mp, self._inv_sqrt_mp)
+                dp_h = normalized_host(ops.Dp, self._inv_sqrt_mp, self._inv_sqrt_mp)
+                c_h = normalized_host(ops.C, self._inv_sqrt_ms, self._inv_sqrt_mp)
+
+                ns, np_ = self._ns, self._np
+                if ns:
+                    ds_block = (
+                        ds_h if ds_h is not None else sparse.csr_matrix((ns, ns), dtype=np.float64)
+                    )
+                    solid_blocks = [ks_h, ds_block] + ([c_h] if np_ else [])
+                    solid_h = sparse.hstack(solid_blocks, format="csr")
+                    solid_h.eliminate_zeros()
+                    self._solid_op = upload_csr(solid_h)
+                else:
+                    self._solid_op = None
+                if np_:
+                    dp_block = (
+                        dp_h
+                        if dp_h is not None
+                        else sparse.csr_matrix((np_, np_), dtype=np.float64)
+                    )
+                    pressure_h = sparse.hstack([kp_h, dp_block], format="csr")
+                    pressure_h.eliminate_zeros()
+                    self._pressure_op = upload_csr(pressure_h)
+                else:
+                    self._pressure_op = None
+                self._coupling_t = (
+                    upload_csr(c_h.T.tocsr()) if (ns and np_ and c_h.nnz > 0) else None
+                )
+
+                n_total = 2 * ns + 2 * np_
+                self._z = self.backend.zeros(n_total)
+                if ns:
+                    self._z[:ns] = self.backend.from_host(self.u.array_r * self._sqrt_ms)
+                    self._z[ns : 2 * ns] = self.backend.from_host(self.v.array_r * self._sqrt_ms)
+                if np_:
+                    self._z[2 * ns : 2 * ns + np_] = self.backend.from_host(
+                        self.p.array_r * self._sqrt_mp
+                    )
+                    self._z[2 * ns + np_ :] = self.backend.from_host(
+                        self.pdot.array_r * self._sqrt_mp
+                    )
+                self._array_state = (
+                    self._z[:ns],
+                    self._z[ns : 2 * ns],
+                    self._z[2 * ns : 2 * ns + np_],
+                    self._z[2 * ns + np_ :],
+                )
+                self._z_stage = self.backend.zeros(n_total)
+                self._z_total = self.backend.zeros(n_total)
+                self._z_deriv = self.backend.zeros(n_total)
+                self._z_scratch = self.backend.zeros(n_total)
+                self._array_integral = self.backend.from_host(
+                    self.pressure_integral.array_r * self._sqrt_mp
+                )
+                if not self.backend.all_finite(self._z) or not self.backend.all_finite(
+                    self._array_integral
+                ):
+                    raise ValueError(
+                        "Acoustic initial state exceeds the requested floating-point precision"
+                    )
+                self._array_integral_total = self.backend.zeros(np_)
+                self._array_a = self.backend.zeros(ns)
+                self._array_pddot = self.backend.zeros(np_)
+                self._device_forcing = self._upload_forcing(forcing)
+                self._mirror_sources = {
+                    "u": (self._array_state[0], self._inv_sqrt_ms),
+                    "v": (self._array_state[1], self._inv_sqrt_ms),
+                    "p": (self._array_state[2], self._inv_sqrt_mp),
+                    "pdot": (self._array_state[3], self._inv_sqrt_mp),
+                    "a": (self._array_a, self._inv_sqrt_ms),
+                    "pddot": (self._array_pddot, self._inv_sqrt_mp),
+                    "pressure_integral": (self._array_integral, self._inv_sqrt_mp),
+                }
+                self._array_acceleration(self._z, 0.0, self._array_a, self._array_pddot)
+                self._acceleration_time: float | None = 0.0
+            self._stale = set(_MIRRORS)
+        except BaseException:
+            self.destroy()
+            raise
 
     stable_dt = CoupledRK4.stable_dt
+
+    def all_finite(self) -> bool:
+        """True when all device state and integral arrays are finite."""
+        with self.backend.context():
+            return self.backend.all_finite(self._z) and self.backend.all_finite(
+                self._array_integral
+            )
 
     def _upload_forcing(self, forcing: Forcing | None) -> tuple[tuple[Any, Any], ...] | None:
         """Mass-normalized device copies of separable source vectors."""
@@ -654,42 +764,58 @@ class CoupledArrayRK4(_CoupledState):
 
         return tuple(
             (upload(solid, self._inv_sqrt_ms), upload(pressure, self._inv_sqrt_mp))
-            for solid, pressure in zip(forcing.solid, forcing.pressure, strict=True)
+            for solid, pressure in zip(
+                forcing.solid, forcing.effective_pressure(lumped=True), strict=True
+            )
         )
 
-    def _array_acceleration(
-        self, u: Any, v: Any, p: Any, pdot: Any, t: float, au: Any, ap: Any
-    ) -> None:
+    def _array_acceleration(self, stage_z: Any, t: float, au: Any, ap: Any) -> None:
         backend = self.backend
+        ns, np_ = self._ns, self._np
+        has_fs = False
+        has_fp = False
         if self._device_forcing is None:
             self._forces(t)
-            au[:] = backend.from_host(self._fs.array_r * self._inv_sqrt_ms)
-            ap[:] = backend.from_host(self._fp.array_r * self._inv_sqrt_mp)
+            if ns:
+                au[:] = backend.from_host(self._fs.array_r * self._inv_sqrt_ms)
+                has_fs = True
+            if np_:
+                ap[:] = backend.from_host(self._fp.array_r * self._inv_sqrt_mp)
+                has_fp = True
         else:
-            au.fill(0.0)
-            ap.fill(0.0)
-            scratch_s, scratch_p = self._scratch
+            scratch_s = self._z_scratch[:ns]
+            scratch_p = self._z_scratch[2 * ns : 2 * ns + np_]
             for coefficient, (solid, pressure) in zip(
                 self.forcing.coefficients(t), self._device_forcing, strict=True
             ):
                 coefficient = float(coefficient)
                 if coefficient == 0.0:
                     continue
-                if solid is not None:
-                    backend.add_scaled(au, coefficient, solid, scratch_s)
-                if pressure is not None:
-                    backend.add_scaled(ap, coefficient, pressure, scratch_p)
-        if self._ns:
-            au -= backend.spmv(self._ks, u)
-            if self._ds is not None:
-                au -= backend.spmv(self._ds, v)
-            if self._np:
-                au -= backend.spmv(self._coupling, p)
-        if self._np:
-            ap -= backend.spmv(self._kp, p)
-            if self._dp is not None:
-                ap -= backend.spmv(self._dp, pdot)
-            if self._ns:
+                if solid is not None and ns:
+                    if not has_fs:
+                        backend.xp.multiply(solid, backend.dtype.type(coefficient), out=au)
+                        has_fs = True
+                    else:
+                        backend.add_scaled(au, coefficient, solid, scratch_s)
+                if pressure is not None and np_:
+                    if not has_fp:
+                        backend.xp.multiply(pressure, backend.dtype.type(coefficient), out=ap)
+                        has_fp = True
+                    else:
+                        backend.add_scaled(ap, coefficient, pressure, scratch_p)
+        if ns:
+            res_s = backend.spmv(self._solid_op, stage_z[: 2 * ns + np_])
+            if has_fs:
+                au -= res_s
+            else:
+                backend.xp.negative(res_s, out=au)
+        if np_:
+            res_p = backend.spmv(self._pressure_op, stage_z[2 * ns :])
+            if has_fp:
+                ap -= res_p
+            else:
+                backend.xp.negative(res_p, out=ap)
+            if self._coupling_t is not None:
                 ap += backend.spmv(self._coupling_t, au)
 
     def _sync_mirror(self, name: str) -> None:
@@ -708,48 +834,50 @@ class CoupledArrayRK4(_CoupledState):
         if dt > self.stable_dt() * (1.0 + 1e-12):
             raise ValueError("Acoustic RK4 time step exceeds the coupled stability certificate")
         backend = self.backend
-        scratch_s, scratch_p = self._scratch
-        scratch = (scratch_s, scratch_s, scratch_p, scratch_p)
-        dv, dpdot = self._array_stage_acceleration
+        ns, np_ = self._ns, self._np
+        du_d = self._z_deriv[:ns]
+        dv_d = self._z_deriv[ns : 2 * ns]
+        dp_d = self._z_deriv[2 * ns : 2 * ns + np_]
+        dpdot_d = self._z_deriv[2 * ns + np_ :]
+        scr_p = self._z_scratch[2 * ns : 2 * ns + np_]
         with backend.context():
-            stage = self._array_state
+            stage = self._z
             for index, (fraction, weight) in enumerate(_RK4_STAGES):
-                u, v, p, pdot = stage
+                if ns:
+                    du_d[...] = stage[ns : 2 * ns]
+                if np_:
+                    dp_d[...] = stage[2 * ns + np_ :]
                 if index == 0 and _same_time(self._acceleration_time, t, dt):
-                    au, ap = self._array_a, self._array_pddot
+                    if ns:
+                        dv_d[...] = self._array_a
+                    if np_:
+                        dpdot_d[...] = self._array_pddot
                 else:
-                    self._array_acceleration(u, v, p, pdot, t + fraction * dt, dv, dpdot)
-                    au, ap = dv, dpdot
-                # Position derivatives are the stage velocities themselves.
-                derivatives = (v, au, pdot, ap)
+                    self._array_acceleration(stage, t + fraction * dt, dv_d, dpdot_d)
+                stage_p = stage[2 * ns : 2 * ns + np_]
                 if index == 0:
-                    for total, derivative in zip(self._array_total, derivatives, strict=True):
-                        total[...] = derivative
-                    self._array_integral_total[...] = p
+                    self._z_total[...] = self._z_deriv
+                    if np_:
+                        self._array_integral_total[...] = stage_p
+                elif weight == 1.0:
+                    backend.add_inplace(self._z_total, self._z_deriv)
+                    if np_:
+                        backend.add_inplace(self._array_integral_total, stage_p)
                 else:
-                    for total, derivative, work in zip(
-                        self._array_total, derivatives, scratch, strict=True
-                    ):
-                        backend.add_scaled(total, weight, derivative, work)
-                    backend.add_scaled(self._array_integral_total, weight, p, scratch_p)
+                    backend.add_scaled(self._z_total, weight, self._z_deriv, self._z_scratch)
+                    if np_:
+                        backend.add_scaled(self._array_integral_total, weight, stage_p, scr_p)
                 if index < 3:
                     h = (0.5 if index < 2 else 1.0) * dt
-                    # Field order (u, v, p, pdot) advances each position before
-                    # the stage velocity it reads is overwritten.
-                    for temporary, original, derivative in zip(
-                        self._array_stage, self._array_state, derivatives, strict=True
-                    ):
-                        backend.axpy(temporary, original, h, derivative)
-                    stage = self._array_stage
-            for state, total, work in zip(
-                self._array_state, self._array_total, scratch, strict=True
-            ):
-                backend.add_scaled(state, dt / 6.0, total, work)
-            backend.add_scaled(
-                self._array_integral, dt / 6.0, self._array_integral_total, scratch_p
-            )
+                    backend.axpy(self._z_stage, self._z, h, self._z_deriv)
+                    stage = self._z_stage
+            backend.add_scaled(self._z, dt / 6.0, self._z_total, self._z_scratch)
+            if np_:
+                backend.add_scaled(
+                    self._array_integral, dt / 6.0, self._array_integral_total, scr_p
+                )
             self._acceleration_time = None
-            self._array_acceleration(*self._array_state, t + dt, self._array_a, self._array_pddot)
+            self._array_acceleration(self._z, t + dt, self._array_a, self._array_pddot)
             self._acceleration_time = t + dt
         self._stale = set(_MIRRORS)
 
@@ -758,17 +886,15 @@ class CoupledArrayRK4(_CoupledState):
         super().destroy()
         self._stale.clear()
         for name in (
-            "_ks",
-            "_ds",
-            "_kp",
-            "_dp",
-            "_coupling",
+            "_solid_op",
+            "_pressure_op",
             "_coupling_t",
+            "_z",
+            "_z_stage",
+            "_z_total",
+            "_z_deriv",
+            "_z_scratch",
             "_array_state",
-            "_array_stage",
-            "_array_total",
-            "_array_stage_acceleration",
-            "_scratch",
             "_array_integral",
             "_array_integral_total",
             "_array_a",
@@ -894,17 +1020,27 @@ class CoupledNewmark(_CoupledState):
                 # PETSc's convert() defaults to an in-place operation; pass out=
                 # so the Nest operator stays intact if factorisation falls back.
                 monolithic = self._A.convert(PETSc.Mat.Type.AIJ, out=PETSc.Mat())
-                self._solver = _direct_solver(monolithic, indefinite=True)
+                try:
+                    self._solver = _direct_solver(monolithic, indefinite=True)
+                except BaseException:
+                    monolithic.destroy()
+                    raise
                 if self._solver is not None:
-                    self._objects.append(monolithic)
+                    self._objects.extend((monolithic, self._solver))
                     self._flat_solution, self._flat_rhs = monolithic.createVecs()
                     self._objects.extend((self._flat_solution, self._flat_rhs))
                     self._split = self._rhs_fields[0].getLocalSize()
+                    factor_pkg = self._solver.getPC().getFactorSolverType()
+                    pkg = f"{str(factor_pkg).upper()} " if factor_pkg else ""
+                    self.linear_solver_description = (
+                        f"{pkg}LU (coupled direct, {self._A.getSize()[0]} DOFs)"
+                    )
                 else:
                     monolithic.destroy()
             if self._solver is None:
                 self._flat_solution = self._flat_rhs = None
                 self._solver = PETSc.KSP().create(self._A.comm)
+                self._objects.append(self._solver)
                 self._solver.setOperators(self._A)
                 self._solver.setType(PETSc.KSP.Type.GMRES)
                 self._solver.setGMRESRestart(100)
@@ -919,11 +1055,15 @@ class CoupledNewmark(_CoupledState):
                 pc.setType(PETSc.PC.Type.FIELDSPLIT)
                 pc.setFieldSplitType(PETSc.PC.CompositeType.ADDITIVE)
                 pc.setUp()
+                sub_pc = PETSc.PC.Type.LU if self._A.comm.getSize() == 1 else PETSc.PC.Type.BJACOBI
                 for sub in pc.getFieldSplitSubKSP():
                     sub.setType(PETSc.KSP.Type.PREONLY)
-                    sub.getPC().setType(
-                        PETSc.PC.Type.LU if self._A.comm.getSize() == 1 else PETSc.PC.Type.BJACOBI
-                    )
+                    sub.getPC().setType(sub_pc)
+                sub_label = "LU" if self._A.comm.getSize() == 1 else "BJacobi"
+                self.linear_solver_description = (
+                    f"GMRES + FieldSplit/{sub_label} "
+                    f"(coupled iterative, {self._A.getSize()[0]} DOFs)"
+                )
         else:
             index = 0 if self._ns else 1
             self._A = self._effective[index]
@@ -932,7 +1072,19 @@ class CoupledNewmark(_CoupledState):
             self._solution = self._duplicate(self.u if self._ns else self.p)
             self._rhs = self._duplicate(self._solution)
             self._solver = _linear_solver(self._A)
-        self._objects.append(self._solver)
+            self._objects.append(self._solver)
+            ndofs = self._A.getSize()[0]
+            if self._solver.getType() == PETSc.KSP.Type.PREONLY:
+                factor_pkg = self._solver.getPC().getFactorSolverType()
+                pkg = (
+                    f"{str(factor_pkg).upper()} "
+                    if factor_pkg and self._A.comm.getSize() > 1
+                    else ""
+                )
+                mode = "parallel direct" if self._A.comm.getSize() > 1 else "serial direct"
+                self.linear_solver_description = f"{pkg}LU ({mode}, {ndofs} DOFs)"
+            else:
+                self.linear_solver_description = f"CG + BJacobi/ICC (parallel, {ndofs} DOFs)"
 
     def step(self, t: float, dt: float) -> None:
         self._check_dt(dt)

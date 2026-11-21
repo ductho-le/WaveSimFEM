@@ -15,9 +15,7 @@ import os
 import platform
 import resource
 import socket
-import stat
 import sys
-import tempfile
 import time
 from pathlib import Path
 
@@ -68,25 +66,11 @@ def summarize_ranks(ranks: list[dict]) -> dict:
 
 def write_report(path: Path, report: dict) -> None:
     """Publish a complete JSON report, leaving an existing report intact on failure."""
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    try:
-        # mkstemp creates 0600 files; keep an existing report's mode or follow umask.
-        try:
-            mode = stat.S_IMODE(path.stat().st_mode)
-        except FileNotFoundError:
-            umask = os.umask(0)
-            os.umask(umask)
-            mode = 0o666 & ~umask
-        os.chmod(temporary, mode)
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
-            json.dump(report, stream, indent=2, sort_keys=True, allow_nan=False)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+    from wavesimfem.storage import atomic_output
+
+    with atomic_output(path) as stream:
+        json.dump(report, stream, indent=2, sort_keys=True, allow_nan=False)
+        stream.write("\n")
 
 
 def parser() -> argparse.ArgumentParser:

@@ -86,12 +86,13 @@ def _suggest(key: str, allowed: set[str] | frozenset[str]) -> str:
 def _region_float(item: Mapping[str, Any], key: str, name: str) -> float:
     if key not in item or item[key] is None:
         raise ValueError(f"Region '{name}' is missing required field '{key}'")
+    raw = item[key]
+    if isinstance(raw, (bool, np.bool_)):
+        raise ValueError(f"Region '{name}' field '{key}' must be a number, got {raw!r}")
     try:
-        value = float(item[key])
+        value = float(raw)
     except (TypeError, ValueError):
-        raise ValueError(
-            f"Region '{name}' field '{key}' must be a number, got {item[key]!r}"
-        ) from None
+        raise ValueError(f"Region '{name}' field '{key}' must be a number, got {raw!r}") from None
     if not np.isfinite(value):
         raise ValueError(f"Region '{name}' field '{key}' must be finite, got {value}")
     return value
@@ -100,11 +101,24 @@ def _region_float(item: Mapping[str, Any], key: str, name: str) -> float:
 def _region_voigt(item: Mapping[str, Any], key: str, name: str) -> list[float]:
     if key not in item or item[key] is None:
         raise ValueError(f"Region '{name}' is missing required field '{key}'")
-    try:
-        values = [float(v) for v in item[key]]
-    except (TypeError, ValueError):
+    raw = item[key]
+    if isinstance(raw, (str, bytes, Mapping)):
         raise ValueError(
             f"Region '{name}' field '{key}' must be a list of six numbers "
+            "[X11, X12, X16, X22, X26, X66]"
+        )
+    try:
+        values: list[float] = []
+        for entry in raw:
+            if isinstance(entry, (bool, np.bool_)):
+                raise ValueError("boolean in Voigt tensor")
+            val = float(entry)
+            if not np.isfinite(val):
+                raise ValueError("non-finite entry in Voigt tensor")
+            values.append(val)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"Region '{name}' field '{key}' must be a list of six finite numbers "
             "[X11, X12, X16, X22, X26, X66]"
         ) from None
     if len(values) != 6:
@@ -360,7 +374,17 @@ def _normalize_region(
 def _halfspace_absorb_depth(
     cfg: Mapping[str, Any], h: float, default_frac: float, label: str
 ) -> float:
-    absorb_depth = float(cfg.get("absorb_depth", default_frac * h))
+    raw = cfg.get("absorb_depth")
+    if raw is None:
+        raw = default_frac * h
+    if isinstance(raw, (bool, np.bool_)):
+        raise ValueError(f"{label} absorb_depth must be a finite number in (0, {h}], got {raw!r}")
+    try:
+        absorb_depth = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{label} absorb_depth must be a finite number in (0, {h}], got {raw!r}"
+        ) from None
     if not np.isfinite(absorb_depth) or absorb_depth <= 0 or absorb_depth > h:
         raise ValueError(f"{label} absorb_depth must be in (0, {h}], got {absorb_depth}")
     return absorb_depth

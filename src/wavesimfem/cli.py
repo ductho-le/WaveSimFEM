@@ -241,6 +241,12 @@ def main(argv: Sequence[str] | None = None) -> None:
                 print(_MISSING_CONFIG_MESSAGE, file=sys.stderr)
         sys.exit(2 if args.dry_run else 1)
 
+    if args.postprocess and args.dry_run:
+        _exit_with_error(
+            "--postprocess and --dry-run cannot be used together",
+            EXIT_USAGE,
+        )
+
     # Resolve Defaults -> File -> CLI overrides on each rank. Filesystem errors
     # may differ by rank; mpi_fail_fast handles unsuccessful CLI exits as well.
     try:
@@ -339,7 +345,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                         formats=cfg["figure_formats"],
                         usetex=cfg["usetex"],
                     )
-            except (OSError, ValueError, TypeError, RuntimeError) as exc:
+            except (OSError, ValueError, TypeError, KeyError, RuntimeError) as exc:
                 # RuntimeError covers plotting-tool failures (e.g. LaTeX).
                 _exit_with_error(str(exc), EXIT_USAGE, exc=exc, verbose=args.verbose)
 
