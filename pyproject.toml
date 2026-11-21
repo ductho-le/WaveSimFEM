@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wavesimfem"
-version = "0.5.0"
+version = "0.5.1"
 description = "A GPU-accelerated finite element framework for acoustic and elastic wave propagation in layered media"
 readme = "README.md"
 requires-python = ">=3.11"

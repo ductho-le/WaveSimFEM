@@ -5,6 +5,17 @@ All notable changes are documented here. Versions follow
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-11-22
+
+### Changed
+
+- **Documentation**: add PyPI badge and `pip install --no-deps wavesimfem` installation instructions to `README.md`.
+
+### Fixed
+
+- **CI & release gating**: evaluate `inputs.full_tests` directly inside reusable `.github/workflows/tests.yml` so release tags always run the full Python 3.11/3.12 DOLFINx + MPI + LaTeX verification matrix.
+- **Tests**: scale the velocity zero-crossing `atol` to peak amplitude (`1e-12 * peak`) in the SciPy-vs-PETSc acoustic solver parity test for deterministic floating-point comparisons across platforms.
+
 ## [0.5.0] — 2026-11-21 — public release & performance hardening
 
 ### Added
