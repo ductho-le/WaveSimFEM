@@ -12,6 +12,7 @@
 [![PyPI](https://img.shields.io/pypi/v/wavesimfem?style=plastic&logo=pypi&logoColor=white&color=0073B7&label=PyPI)](https://pypi.org/project/wavesimfem/)
 [![CI](https://img.shields.io/github/actions/workflow/status/ductho-le/WaveSimFEM/tests.yml?branch=main&style=plastic&logo=githubactions&logoColor=white&label=CI)](https://github.com/ductho-le/WaveSimFEM/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=plastic)](https://github.com/ductho-le/WaveSimFEM/blob/main/LICENSE)
+[![DOI](https://img.shields.io/badge/DOI-10.5281%2Fzenodo.24423592-008080.svg?style=plastic)](https://doi.org/10.5281/zenodo.24423592)
 
 [Quick Start](#-quick-start) •
 [Examples](#-ready-to-run-examples) •
@@ -365,14 +366,18 @@ WaveSimFEM/
 If you use WaveSimFEM in your research, please cite:
 
 ```bibtex
-@misc{le2026wavesimfem,
-  author       = {Le, Ductho},
-  title        = {{WaveSimFEM}: A {GPU}-accelerated finite element framework for acoustic and elastic wave propagation in layered media},
-  year         = {2026},
-  howpublished = {\url{https://github.com/ductho-le/WaveSimFEM}},
-  note         = {Manuscript in preparation}
+@software{le2026wavesimfem,
+  author    = {Le, Ductho},
+  title     = {{WaveSimFEM}: A {GPU}-accelerated finite element framework for acoustic and elastic wave propagation in layered media},
+  year      = {2026},
+  publisher = {Zenodo},
+  doi       = {10.5281/zenodo.24423592},
+  url       = {https://doi.org/10.5281/zenodo.24423592}
 }
 ```
+
+Or in APA format:
+> Le, D. (2026). *WaveSimFEM: A GPU-accelerated finite element framework for acoustic and elastic wave propagation in layered media* [Computer software]. Zenodo. https://doi.org/10.5281/zenodo.24423592
 
 *Machine-readable citation metadata is available in [`CITATION.cff`](https://github.com/ductho-le/WaveSimFEM/blob/main/CITATION.cff).*
 

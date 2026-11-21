@@ -19,8 +19,10 @@ authors:
     affiliation: "School of Biomedical Engineering, International University, Viet Nam National University Ho Chi Minh City"
 version: 0.5.1
 date-released: 2026-11-22
+doi: "10.5281/zenodo.24423592"
 license: MIT
 repository-code: "https://github.com/ductho-le/WaveSimFEM"
+url: "https://doi.org/10.5281/zenodo.24423592"
 keywords:
   - "wavesim"
   - "guided-waves"
