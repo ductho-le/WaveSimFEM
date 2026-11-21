@@ -44,10 +44,7 @@ jobs:
   test:
     # Routine pushes/PRs use the lightweight jobs below; full verification runs on
     # release tags (via workflow_call), weekly schedule, or manual workflow_dispatch.
-    if: >-
-      (github.event_name == 'workflow_dispatch' && inputs.full_tests) ||
-      (github.event_name == 'workflow_call' && inputs.full_tests) ||
-      github.event_name == 'schedule'
+    if: inputs.full_tests || github.event_name == 'schedule'
     name: Tests (Python ${{ matrix.python }}, DOLFINx ${{ matrix.dolfinx }})
     runs-on: ubuntu-latest
     timeout-minutes: 45
