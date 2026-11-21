@@ -5,6 +5,13 @@ All notable changes are documented here. Versions follow
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-11-21 — public release & performance hardening
+
+### Added
+
+- **Public API & quickstart**: lazily export acoustic solver and report APIs (`build_acoustic_problem`, `solve_acoustic`, `run_acoustic_simulation`, `write_structure_report`, `write_lamb_report`, `write_characterisation`, `structure_profile`, `reference_dispersion`, `phase_velocity_spectrum`, `polarization_spectrum`) from top-level `wavesimfem`; add interactive `notebooks/quickstart.ipynb`; print `conda-forge` setup guidance when `wavesim` is invoked without DOLFINx/MPI.
+- **Release automation & community governance**: add automated tag-driven release workflow (`.github/workflows/release.yml`) with OIDC PyPI publishing and GitHub Releases, release validation (`tools/check_release.py`), isolated wheel/sdist smoke checks (`tools/smoke_installed.py`), weekly full DOLFINx/MPI CI runs, and `.github/` governance docs (`CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, issue/PR templates).
+
 ### Changed
 
 - **CLI & units**: `--generate-config` requires `--force` to overwrite; `--min-frequency` / `--max-frequency` accept unit strings; ambiguous `"mhz"`/`"mHZ"` spellings are rejected; `--postprocess` combined with `--dry-run` exits with a usage error.
@@ -19,7 +26,7 @@ All notable changes are documented here. Versions follow
 
 ### Fixed
 
-- **Solvers & numerics**: set `atol=0.0` in iterative PETSc KSP solvers for scale invariance on small right-hand sides; perform acoustic GLL mass lumping before Dirichlet elimination (omitting `Mp_fD` lifting for explicit prescribed pressure); build layered mesh interfaces directly from `y_bot`/`y_top`; check velocity finiteness in PETSc explicit runs.
+- **Solvers & numerics**: set `atol=0.0` in iterative PETSc KSP solvers for scale invariance on small right-hand sides; perform acoustic GLL mass lumping before Dirichlet elimination (omitting `Mp_fD` lifting for explicit prescribed pressure); build layered mesh interfaces directly from `y_bot`/`y_top`; check velocity finiteness in PETSc explicit runs; use explicit `float32`/`float64` CuPy kernel types with single-precision GPU test coverage.
 - **Resource & MPI safety**: release PETSc temporaries and `HistoryStore` scratch directories on exception paths; avoid reporting `"single rank"` in `describe_thread_state` under unrecognized multi-rank launchers; report the first validation error in `PointSensors.gather`; enforce spec-compliant, linear-time YAML 1.1 merge precedence in `_UniqueSafeLoader` (working around PyYAML 6.0.4's `flatten_mapping` regression).
 - **Post-processing & timing**: compute scalar pressure colourbar limits without stacking placeholder zeros; read sectioned `mesh` frequency bands, handle `max_frequency < f_center / 5`, and tolerate missing metadata in Lamb reports; tolerate ULP rounding on characterisation `time_window` bounds; align elastic snapshot timestamps to completed steps and share mesh-based interface tolerances.
 
